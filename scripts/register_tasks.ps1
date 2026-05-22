@@ -19,14 +19,16 @@ function Register-StarRailTask {
         [string]$TaskName,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet("main", "universe")]
+        [ValidateSet("main", "universe", "cleanup")]
         [string]$Job,
 
         [Parameter(Mandatory = $true)]
         [string]$TimeOfDay,
 
         [Parameter(Mandatory = $true)]
-        [int]$Timeout
+        [int]$Timeout,
+
+        [bool]$Enabled = $true
     )
 
     $argument = @(
@@ -59,6 +61,10 @@ function Register-StarRailTask {
         -Principal $principal `
         -Settings $settings | Out-Null
 
+    if (-not $Enabled) {
+        Disable-ScheduledTask -TaskName $TaskName | Out-Null
+    }
+
     $task = Get-ScheduledTask -TaskName $TaskName
     $info = Get-ScheduledTaskInfo -TaskName $TaskName
 
@@ -67,10 +73,12 @@ function Register-StarRailTask {
     Write-Host "  user: $UserId"
     Write-Host "  time: $TimeOfDay"
     Write-Host "  command: $powerShellExe $argument"
+    Write-Host "  state: $($task.State)"
     Write-Host "  run level: $($task.Principal.RunLevel)"
     Write-Host "  logon type: $($task.Principal.LogonType)"
     Write-Host "  next run: $($info.NextRunTime)"
 }
 
 Register-StarRailTask -TaskName "StarRail_Main_0700" -Job "main" -TimeOfDay "07:00" -Timeout 1800
-Register-StarRailTask -TaskName "StarRail_Universe_2330" -Job "universe" -TimeOfDay "23:30" -Timeout 7200
+Register-StarRailTask -TaskName "StarRail_Cleanup_0800" -Job "cleanup" -TimeOfDay "08:00" -Timeout 600
+Register-StarRailTask -TaskName "StarRail_Universe_2330" -Job "universe" -TimeOfDay "23:30" -Timeout 7200 -Enabled $false

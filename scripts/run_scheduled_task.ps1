@@ -1,9 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("main", "universe")]
+    [ValidateSet("main", "universe", "cleanup")]
     [string]$Task,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [int]$Timeout
 )
 
@@ -19,5 +19,9 @@ Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] running scheduled task: 
 Write-Host "project root: $projectRoot"
 Write-Host "uv path: $($uv.Source)"
 
-& $uv.Source run python m7a_runner.py $Task --timeout $Timeout
+if ($Task -eq "cleanup") {
+    & $uv.Source run python cleanup_runner.py
+} else {
+    & $uv.Source run python m7a_runner.py $Task --timeout $Timeout
+}
 exit $LASTEXITCODE

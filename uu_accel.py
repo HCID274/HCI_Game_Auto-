@@ -36,6 +36,7 @@ REUSE_CONFIRM_TIMEOUT = 3.0
 POST_MOVE_DELAY = 0.5
 POST_CLICK_WAIT = 20         # 点击后等待确认的时间（秒）
 CONFIRM_TIMEOUT = 30         # 确认图片搜索超时（秒）
+STOP_ACCELERATION_TIMEOUT = 10.0
 
 UU_WINDOW_KEYWORDS = ("uu", "网易uu", "uu加速器")
 UU_PROCESS_KEYWORDS = ("uu", "uuaccelerator", "uulauncher")
@@ -356,6 +357,25 @@ def ensure_uu_connected() -> None:
     log.info("UU startup chain completed")
 
 
+def stop_uu_acceleration() -> None:
+    """正式 UU 收尾链路：点击已加速状态下的停止加速按钮。"""
+    _require_admin()
+
+    if not _is_uu_running():
+        log.info("UU accelerator is not running; acceleration is already stopped")
+        return
+
+    title = _focus_uu_window()
+    log.info("UU window focused: %s", title)
+
+    stop_target = _wait_and_locate_image(
+        TPL_STEP_3,
+        timeout=STOP_ACCELERATION_TIMEOUT,
+    )
+    _click(stop_target)
+    log.info("UU acceleration stop button clicked")
+
+
 def main() -> int:
     import argparse
 
@@ -364,8 +384,11 @@ def main() -> int:
         "action",
         nargs="?",
         default="start",
-        choices=["start", "stop"],
-        help="start: 启动并验证加速; stop: 关闭 UU 进程 (default: start)",
+        choices=["start", "disconnect", "stop"],
+        help=(
+            "start: 启动并验证加速; disconnect: 点击停止加速; "
+            "stop: 关闭 UU 进程 (default: start)"
+        ),
     )
     parser.add_argument(
         "--log-file",
@@ -386,7 +409,9 @@ def main() -> int:
     )
 
     try:
-        if args.action == "stop":
+        if args.action == "disconnect":
+            stop_uu_acceleration()
+        elif args.action == "stop":
             kill_uu()
         else:
             ensure_uu_connected()
