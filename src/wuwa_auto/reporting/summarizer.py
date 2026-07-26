@@ -55,6 +55,12 @@ def _validate_wording(
         raise ValueError("AI response changed the fact id set")
 
     validated: dict[str, str] = {}
+    required_phrases = {
+        "daily-activity-reward": ("领取每日活跃度奖励",),
+        "battle-pass": ("先约电台", "已执行奖励领取操作"),
+        "weekly-garden": ("完成幻梦游园本周目标",),
+        "echo-picked": ("吸收声骸",),
+    }
     for item_id, item in expected.items():
         value = wording[item_id]
         if not isinstance(value, str) or not value.strip():
@@ -62,12 +68,17 @@ def _validate_wording(
         value = value.strip()
         if "邮件" in value:
             raise ValueError("AI response mentioned excluded mail content")
+        anchors = list(required_phrases.get(item_id, ()))
         for anchor in re.findall(r"(?:讨伐强敌|无音区)第\d+项", item.text):
-            if anchor not in value:
-                raise ValueError(f"AI response removed required anchor {anchor}")
+            anchors.append(anchor)
+        if any(anchor not in value for anchor in anchors):
+            # Preserve the deterministic fact instead of accepting an AI
+            # implication that is stronger or weaker than the observed action.
+            value = item.text
         for number in re.findall(r"\d+", item.text):
             if number not in value:
-                raise ValueError(f"AI response removed required number {number}")
+                value = item.text
+                break
         validated[item_id] = value
     return data["summary"].strip(), validated
 

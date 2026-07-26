@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from wuwa_auto.reporting.parser import parse_run
 from wuwa_auto.reporting.summarizer import build_fallback_narrative
+from wuwa_auto.reporting.summarizer import _validate_wording
 
 
 def _result(tmp_path: Path, text: str, **overrides: object) -> SimpleNamespace:
@@ -78,3 +79,23 @@ DailyTask:Daily Task Completed
 """
     facts = parse_run(_result(tmp_path, text, config={}))
     assert facts.followup[0].text == "讨伐强敌第2项 1次"
+
+
+def test_ai_cannot_promote_battle_pass_action_to_claimed_reward(
+    tmp_path: Path,
+) -> None:
+    text = """
+DailyTask:battle pass
+DailyTask:info_set current task check weekly garden
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+    summary, wording = _validate_wording(
+        {
+            "summary": "完成",
+            "wording": {"battle-pass": "先约电台：领取奖励"},
+        },
+        facts,
+    )
+    assert summary == "完成"
+    assert wording["battle-pass"] == "先约电台：已执行奖励领取操作"
