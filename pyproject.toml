@@ -1,0 +1,32 @@
+[project]
+name = "wuwa-auto"
+version = "0.1.0"
+description = "鸣潮日常自动化（UU 加速 + OK-WW + 日志验收 + AI 汇报）"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.48.0",
+    "opencv-python>=4.9",
+    "pillow>=12.2.0",
+    "psutil>=5.9",
+    "pyautogui>=0.9",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+wuwa-auto = "wuwa_auto.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wuwa_auto"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
