@@ -1,4 +1,0 @@
-interface:
-  display_name: "星铁自动化排障"
-  short_description: "维护星铁日常、UU加速、M7A看门狗证据与飞书智能日报链路"
-  default_prompt: "使用 $starrail-automation 检查并修复星铁自动化链路，保留现场证据并完成回归验证。"
