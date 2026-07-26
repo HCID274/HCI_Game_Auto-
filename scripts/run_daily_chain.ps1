@@ -62,6 +62,16 @@ try {
         throw "Star Rail project not found: $starRailRoot"
     }
 
+    # Self-heal the migration if the old Star Rail registration script was
+    # accidentally rerun after this chain was installed.
+    foreach ($oldTaskName in @("StarRail_Main_0600", "StarRail_Cleanup_0800")) {
+        $oldTask = Get-ScheduledTask -TaskName $oldTaskName -ErrorAction SilentlyContinue
+        if ($oldTask -and $oldTask.State -ne "Disabled") {
+            Disable-ScheduledTask -TaskName $oldTaskName | Out-Null
+            Write-ChainLog "disabled conflicting task $oldTaskName"
+        }
+    }
+
     $starRailCode = Invoke-Automation `
         -ProjectRoot $starRailRoot `
         -Arguments @("run", "starrail-auto", "daily", "--timeout", "1800") `
