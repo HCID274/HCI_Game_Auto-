@@ -11,3 +11,22 @@ dependencies = [
     "pyautogui>=0.9",
     "python-dotenv>=1.2.2",
 ]
+
+[project.scripts]
+starrail-auto = "starrail_auto.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starrail_auto"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

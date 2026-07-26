@@ -11,7 +11,7 @@ from datetime import datetime
 from urllib import request
 from urllib.error import HTTPError, URLError
 
-from local_config import get_secret
+from starrail_auto.settings import get_secret
 
 REQUEST_TIMEOUT = 8
 

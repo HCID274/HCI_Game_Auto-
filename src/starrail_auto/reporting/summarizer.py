@@ -7,10 +7,9 @@ from typing import Any
 
 from openai import OpenAI
 
-from local_config import get_secret
-from reporting.config import load_report_prompt
-from reporting.models import NarrativeReport, RunReport, StaminaRun
-
+from starrail_auto.reporting.models import NarrativeReport, RunReport, StaminaRun
+from starrail_auto.reporting.prompting.composer import compose_report_messages
+from starrail_auto.settings import get_secret
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -285,17 +284,7 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
         timeout=AI_TIMEOUT_SECONDS,
         max_retries=1,
     )
-    messages = [
-        {"role": "system", "content": load_report_prompt()},
-        {
-            "role": "user",
-            "content": json.dumps(
-                _build_ai_input(report),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        },
-    ]
+    messages = compose_report_messages(_build_ai_input(report))
     response = client.chat.completions.create(
         model=model,
         messages=messages,

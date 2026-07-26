@@ -6,25 +6,29 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from feishu_notify import send_starrail_report_card
-from reporting.ai_summarizer import _build_ai_input, build_fallback_narrative
-from reporting.config import (
-    load_report_prompt,
-    load_reporting_context,
-    load_reporting_preferences,
-    load_training_context,
+from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.reporting.models import StaminaRun
+from starrail_auto.reporting.parser import parse_m7a_run
+from starrail_auto.reporting.prompting.composer import (
+    compose_report_messages,
+    load_system_sections,
 )
-from reporting.log_parser import parse_m7a_run
-from reporting.models import StaminaRun
-from reporting.reminders import format_active_reminders
-from reporting.report_service import (
+from starrail_auto.reporting.reminders import format_active_reminders
+from starrail_auto.reporting.service import (
     _title_for,
     report_cutoff,
     report_main_run,
     wait_for_report_boundary,
 )
-from reporting.training_plan import load_training_plan, reconcile_training_plan
-
+from starrail_auto.reporting.summarizer import _build_ai_input, build_fallback_narrative
+from starrail_auto.reporting.training_plan import (
+    load_training_plan,
+    reconcile_training_plan,
+)
+from starrail_auto.reporting.user_context import (
+    load_reporting_preferences,
+    load_training_context,
+)
 
 SUCCESS_LOG = """\
 |                                                 开始执行体力计划                                                  |
@@ -50,37 +54,31 @@ SUCCESS_LOG = """\
 
 
 class TrainingContextTests(unittest.TestCase):
-    def test_report_prompt_includes_few_shot_examples(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            prompt_path = Path(directory) / "prompt.md"
-            examples_path = Path(directory) / "examples.md"
-            standard_path = Path(directory) / "standard.md"
-            prompt_path.write_text("主规则", encoding="utf-8")
-            examples_path.write_text("正确输出示例", encoding="utf-8")
-            standard_path.write_text("固定输出标准", encoding="utf-8")
+    def test_system_prompt_is_loaded_as_named_fixed_sections(self) -> None:
+        sections = load_system_sections()
+        labels = [label for label, _ in sections]
+        content = "\n".join(text for _, text in sections)
 
-            prompt = load_report_prompt(prompt_path, examples_path, standard_path)
-
-        self.assertIn("主规则", prompt)
-        self.assertIn("正确输出示例", prompt)
-        self.assertIn("固定输出标准", prompt)
+        self.assertEqual(len(sections), 3)
+        self.assertIn("系统核心协议", labels[0])
+        self.assertIn("星铁日报标准示例", content)
+        self.assertIn("固定输出标准", content)
 
     def test_custom_preferences_are_not_loaded_as_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
-            prompt_path = directory_path / "prompt.md"
-            examples_path = directory_path / "examples.md"
-            standard_path = directory_path / "standard.md"
             preferences_path = directory_path / "preferences.md"
-            prompt_path.write_text("核心协议", encoding="utf-8")
-            examples_path.write_text("固定示例", encoding="utf-8")
-            standard_path.write_text("不可覆盖", encoding="utf-8")
             preferences_path.write_text("额外关注远坂凛", encoding="utf-8")
 
-            prompt = load_report_prompt(prompt_path, examples_path, standard_path)
             preferences = load_reporting_preferences(preferences_path)
 
-        self.assertNotIn("额外关注远坂凛", prompt)
+        messages = compose_report_messages(
+            {"custom_context": {"reporting_preferences_markdown": preferences}}
+        )
+        self.assertNotIn("额外关注远坂凛", "\n".join(
+            message["content"] for message in messages if message["role"] == "system"
+        ))
+        self.assertIn("额外关注远坂凛", messages[-1]["content"])
         self.assertEqual(preferences, "额外关注远坂凛")
 
     def test_commented_example_does_not_become_active_context(self) -> None:
@@ -470,10 +468,10 @@ class ReportBoundaryTests(unittest.TestCase):
             path = Path(directory) / "2026-07-25.log"
             path.write_text(SUCCESS_LOG, encoding="utf-8")
             with patch(
-                "reporting.report_service.send_starrail_report_card",
+                "starrail_auto.reporting.service.send_starrail_report_card",
                 return_value=True,
             ) as send, patch(
-                "reporting.report_service.summarize_report",
+                "starrail_auto.reporting.service.summarize_report",
                 return_value=(
                     build_fallback_narrative(
                         parse_m7a_run(
@@ -483,7 +481,7 @@ class ReportBoundaryTests(unittest.TestCase):
                     ),
                     False,
                 ),
-            ), patch("reporting.report_service._archive_report"):
+            ), patch("starrail_auto.reporting.service._archive_report"):
                 report_main_run(
                     log_path=path,
                     offset=0,
@@ -500,7 +498,7 @@ class ReportBoundaryTests(unittest.TestCase):
 
 class FeishuCardTests(unittest.TestCase):
     def test_card_keeps_daily_first_and_numbers_other_tasks(self) -> None:
-        with patch("feishu_notify._send_payload", return_value=True) as send:
+        with patch("starrail_auto.integrations.feishu._send_payload", return_value=True) as send:
             result = send_starrail_report_card(
                 title="✅️ 星铁完成 07-25 06:08 重试0",
                 template="green",

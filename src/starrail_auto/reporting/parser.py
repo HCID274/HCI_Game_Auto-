@@ -5,8 +5,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from reporting.models import RunEvent, RunReport, StaminaRun
-
+from starrail_auto.reporting.models import RunEvent, RunReport, StaminaRun
 
 LOG_LINE_PATTERN = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})"

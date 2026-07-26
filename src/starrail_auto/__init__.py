@@ -1,0 +1,1 @@
+"""Star Rail desktop automation."""

@@ -1,13 +1,19 @@
-"""Load project-local secrets from .env."""
+"""Project paths and local secret loading."""
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent
+PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parents[1]
 ENV_PATH = PROJECT_ROOT / ".env"
+USER_CONTEXT_DIR = PROJECT_ROOT / "UserContext"
+TEMPLATES_DIR = PROJECT_ROOT / "templates"
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
+LOGS_DIR = RUNTIME_DIR / "logs"
+EVIDENCE_DIR = RUNTIME_DIR / "evidence"
+REPORTS_DIR = RUNTIME_DIR / "reports"
 
 
 def load_local_environment() -> None:

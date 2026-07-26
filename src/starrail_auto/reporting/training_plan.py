@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from reporting.models import StaminaRun
+from starrail_auto.reporting.models import StaminaRun
+from starrail_auto.settings import USER_CONTEXT_DIR
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PLAN_PATH = PROJECT_ROOT / "prompts" / "training_plan.md"
+DEFAULT_PLAN_PATH = USER_CONTEXT_DIR / "养成计划.md"
 GOAL_PATTERN = re.compile(
     r"^- \[(?P<checked>[ xX])\] `(?P<id>[^`]+)` "
     r"(?P<character>[^｜|]+)[｜|](?P<category>.+)$"
@@ -243,34 +241,3 @@ def set_goal_status(
     save_training_plan(result, path)
     return result
 
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage the Markdown training plan")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("list")
-    complete = subparsers.add_parser("complete")
-    complete.add_argument("goal_id")
-    complete.add_argument("--evidence", default="人工确认完成")
-    reopen = subparsers.add_parser("reopen")
-    reopen.add_argument("goal_id")
-    args = parser.parse_args()
-
-    if args.command == "complete":
-        plan = set_goal_status(
-            args.goal_id,
-            completed=True,
-            evidence=args.evidence,
-        )
-    elif args.command == "reopen":
-        plan = set_goal_status(args.goal_id, completed=False, evidence="")
-    else:
-        plan = load_training_plan()
-
-    for goal in plan.goals:
-        marker = "x" if goal.completed else " "
-        print(f"[{marker}] {goal.goal_id}: {goal.character} / {goal.category}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

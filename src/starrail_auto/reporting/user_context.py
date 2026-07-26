@@ -1,18 +1,15 @@
-"""Load fixed report prompts and lower-priority user Markdown context."""
+"""Load lower-priority user Markdown context."""
 
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from starrail_auto.settings import USER_CONTEXT_DIR
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROMPT_PATH = PROJECT_ROOT / "prompts" / "starrail_report.md"
-PROMPT_FEW_SHOT_PATH = PROJECT_ROOT / "prompts" / "starrail_report_few_shot.md"
-PROMPT_STANDARD_PATH = PROJECT_ROOT / "prompts" / "reporting_standard.md"
-REPORTING_PREFERENCES_PATH = PROJECT_ROOT / "prompts" / "reporting_preferences.md"
-TRAINING_CONTEXT_PATH = PROJECT_ROOT / "prompts" / "training_context.md"
-TRAINING_PLAN_PATH = PROJECT_ROOT / "prompts" / "training_plan.md"
+REPORTING_PREFERENCES_PATH = USER_CONTEXT_DIR / "汇报偏好.md"
+TRAINING_CONTEXT_PATH = USER_CONTEXT_DIR / "培养背景.md"
+TRAINING_PLAN_PATH = USER_CONTEXT_DIR / "养成计划.md"
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +79,7 @@ def load_reporting_preferences(
 
 def load_reporting_context() -> dict[str, Any]:
     """Combine user notes and the structured Markdown training plan."""
-    from reporting.training_plan import load_training_plan
+    from starrail_auto.reporting.training_plan import load_training_plan
 
     context = load_training_context()
     plan = load_training_plan(TRAINING_PLAN_PATH)
@@ -101,16 +98,3 @@ def load_reporting_context() -> dict[str, Any]:
     if mapped_goals:
         context.setdefault("character_goals", []).extend(mapped_goals)
     return context
-
-
-def load_report_prompt(
-    path: Path = PROMPT_PATH,
-    few_shot_path: Path = PROMPT_FEW_SHOT_PATH,
-    standard_path: Path = PROMPT_STANDARD_PATH,
-) -> str:
-    sections = [path.read_text(encoding="utf-8").strip()]
-    if standard_path.exists():
-        sections.append(standard_path.read_text(encoding="utf-8").strip())
-    if few_shot_path.exists():
-        sections.append(few_shot_path.read_text(encoding="utf-8").strip())
-    return "\n\n".join(sections)

@@ -2,21 +2,16 @@
 
 import argparse
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from feishu_notify import send_starrail_report_card
-from reporting.ai_summarizer import summarize_report
-from reporting.config import load_reporting_context
-from reporting.log_parser import parse_m7a_run
-from reporting.models import NarrativeReport, RunReport
-from reporting.report_service import _title_for
-
+from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.reporting.models import NarrativeReport, RunReport
+from starrail_auto.reporting.parser import parse_m7a_run
+from starrail_auto.reporting.service import _title_for
+from starrail_auto.reporting.summarizer import summarize_report
+from starrail_auto.reporting.user_context import load_reporting_context
 
 M7A_LOG_DIR = Path(
     r"D:\2_Software\4_Games\StarRail\Auto\March7thAssistant_full\logs"

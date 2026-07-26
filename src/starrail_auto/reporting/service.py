@@ -4,25 +4,25 @@ import json
 import logging
 import time
 from dataclasses import asdict
-from datetime import datetime, time as clock_time, timedelta
+from datetime import datetime, timedelta
+from datetime import time as clock_time
 from pathlib import Path
 from typing import Callable
 
-from feishu_notify import send_starrail_report_card
-from reporting.ai_summarizer import summarize_report
-from reporting.config import load_reporting_context
-from reporting.log_parser import (
+from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.reporting.models import RunReport
+from starrail_auto.reporting.parser import (
     DAILY_INCOMPLETE_MARKER,
     RUN_STOP_MARKER,
     parse_m7a_run,
 )
-from reporting.models import RunReport
-from reporting.reminders import format_active_reminders
-from reporting.training_plan import reconcile_training_plan
+from starrail_auto.reporting.reminders import format_active_reminders
+from starrail_auto.reporting.summarizer import summarize_report
+from starrail_auto.reporting.training_plan import reconcile_training_plan
+from starrail_auto.reporting.user_context import load_reporting_context
+from starrail_auto.settings import REPORTS_DIR
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REPORT_ARCHIVE_DIR = PROJECT_ROOT / "logs" / "reports"
+REPORT_ARCHIVE_DIR = REPORTS_DIR
 REPORT_POLL_SECONDS = 5
 DAILY_CUTOFF = clock_time(hour=8)
 MANUAL_RUN_WINDOW = timedelta(hours=2)

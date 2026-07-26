@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+from starrail_auto.settings import USER_CONTEXT_DIR
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_REMINDERS_PATH = PROJECT_ROOT / "prompts" / "reminders.md"
+DEFAULT_REMINDERS_PATH = USER_CONTEXT_DIR / "日期提醒.md"
 REMINDER_PATTERN = re.compile(
     r"^- \[(?P<checked>[ xX])\] `(?P<id>[^`]+)` (?P<label>.+)$"
 )

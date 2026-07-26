@@ -1,19 +1,16 @@
-"""收尾执行器 - 关闭游戏并停止 UU 加速。"""
+"""Cleanup workflow: close the game and stop UU acceleration."""
 
-import argparse
 import logging
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import psutil
 
-from feishu_notify import notify_starrail_failure
-from uu_accel import stop_uu_acceleration
+from starrail_auto.integrations.feishu import notify_starrail_failure
+from starrail_auto.settings import LOGS_DIR
+from starrail_auto.uu.service import stop_uu_acceleration
 
-
-LOGS_DIR = Path(__file__).parent / "logs"
 GAME_PROCESS_NAMES = {"starrail.exe"}
 M7A_PROCESS_NAMES = {"march7th launcher.exe", "march7th assistant.exe"}
 
@@ -115,29 +112,12 @@ def run(delay: int = 0) -> int:
     return EXIT_OK
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Star Rail cleanup runner")
-    parser.add_argument(
-        "--delay",
-        type=int,
-        default=0,
-        help="seconds to wait before cleanup starts",
-    )
-    parser.add_argument(
-        "--log-file",
-        type=Path,
-        help="optional log file path for manual cleanup test evidence",
-    )
-    args = parser.parse_args()
-
-    _setup_logging(args.log_file)
-    exit_code = run(delay=args.delay)
+def execute_cleanup(delay: int = 0, log_file: Path | None = None) -> int:
+    """Configure logging, execute cleanup, and send failure-only notification."""
+    _setup_logging(log_file)
+    exit_code = run(delay=delay)
     if exit_code == EXIT_PROCESS_CLOSE_FAILED:
         notify_starrail_failure("清理", 0)
     elif exit_code == EXIT_UU_DISCONNECT_FAILED:
         notify_starrail_failure("UU清理", 0)
-    sys.exit(exit_code)
-
-
-if __name__ == "__main__":
-    main()
+    return exit_code
