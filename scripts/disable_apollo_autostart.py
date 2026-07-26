@@ -5,7 +5,6 @@ import subprocess
 import sys
 from ctypes import wintypes
 
-
 SERVICE_NAME = "ApolloService"
 VIRTUAL_DISPLAY_INSTANCE_ID = r"ROOT\DISPLAY\0001"
 PRIMARY_DISPLAY = r"\\.\DISPLAY1"
