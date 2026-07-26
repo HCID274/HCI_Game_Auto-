@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $taskName = "Game_Daily_0530"
 $runnerScript = Join-Path $PSScriptRoot "run_daily_chain.ps1"
-$powerShellExe = Join-Path $PSHOME "powershell.exe"
+$powerShellExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 
 if (-not (Test-Path $runnerScript)) {
     throw "chain runner not found: $runnerScript"
