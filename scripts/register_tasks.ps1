@@ -13,6 +13,13 @@ if (-not (Test-Path $runnerScript)) {
     throw "runner script not found: $runnerScript"
 }
 
+foreach ($legacyTaskName in @("StarRail_Main_0700")) {
+    if (Get-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:$false
+        Write-Host "removed legacy task: $legacyTaskName"
+    }
+}
+
 function Register-StarRailTask {
     param(
         [Parameter(Mandatory = $true)]
@@ -28,6 +35,8 @@ function Register-StarRailTask {
         [Parameter(Mandatory = $true)]
         [int]$Timeout,
 
+        [int]$ExecutionLimitSeconds = 0,
+
         [bool]$Enabled = $true
     )
 
@@ -42,10 +51,15 @@ function Register-StarRailTask {
     $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument $argument
     $trigger = New-ScheduledTaskTrigger -Daily -At (Get-Date $TimeOfDay)
     $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Highest
+    $executionLimit = if ($ExecutionLimitSeconds -gt 0) {
+        New-TimeSpan -Seconds $ExecutionLimitSeconds
+    } else {
+        New-TimeSpan -Seconds ([int][math]::Ceiling($Timeout * 1.5))
+    }
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Seconds ([int][math]::Ceiling($Timeout * 1.5))) `
+        -ExecutionTimeLimit $executionLimit `
         -MultipleInstances IgnoreNew `
         -StartWhenAvailable
 
@@ -79,6 +93,6 @@ function Register-StarRailTask {
     Write-Host "  next run: $($info.NextRunTime)"
 }
 
-Register-StarRailTask -TaskName "StarRail_Main_0700" -Job "main" -TimeOfDay "07:00" -Timeout 1800
+Register-StarRailTask -TaskName "StarRail_Main_0600" -Job "main" -TimeOfDay "06:00" -Timeout 1800 -ExecutionLimitSeconds 7800
 Register-StarRailTask -TaskName "StarRail_Cleanup_0800" -Job "cleanup" -TimeOfDay "08:00" -Timeout 600
 Register-StarRailTask -TaskName "StarRail_Universe_2330" -Job "universe" -TimeOfDay "23:30" -Timeout 7200 -Enabled $false

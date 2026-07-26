@@ -20,8 +20,10 @@ Write-Host "project root: $projectRoot"
 Write-Host "uv path: $($uv.Source)"
 
 if ($Task -eq "cleanup") {
-    & $uv.Source run python cleanup_runner.py
+    & $uv.Source run starrail-auto cleanup
+} elseif ($Task -eq "main") {
+    & $uv.Source run starrail-auto daily --timeout $Timeout
 } else {
-    & $uv.Source run python m7a_runner.py $Task --timeout $Timeout
+    & $uv.Source run starrail-auto universe --timeout $Timeout
 }
 exit $LASTEXITCODE
