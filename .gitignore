@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .claude
+.env
 
 logs/
 debug/
+config/*.local.json

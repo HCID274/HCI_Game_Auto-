@@ -9,6 +9,7 @@ from pathlib import Path
 
 import psutil
 
+from feishu_notify import notify_starrail_failure
 from uu_accel import stop_uu_acceleration
 
 
@@ -130,7 +131,12 @@ def main() -> None:
     args = parser.parse_args()
 
     _setup_logging(args.log_file)
-    sys.exit(run(delay=args.delay))
+    exit_code = run(delay=args.delay)
+    if exit_code == EXIT_PROCESS_CLOSE_FAILED:
+        notify_starrail_failure("清理", 0)
+    elif exit_code == EXIT_UU_DISCONNECT_FAILED:
+        notify_starrail_failure("UU清理", 0)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
