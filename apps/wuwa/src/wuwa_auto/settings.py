@@ -41,7 +41,7 @@ OK_NIGHTMARE_CONFIG = OK_CONFIG_DIR / "NightmareNestTask.json"
 def load_local_environment() -> None:
     """Load Wuwa secrets, then reuse only unset values from Star Rail locally."""
     load_dotenv(ENV_PATH, override=False)
-    sibling_env = PROJECT_ROOT.parent / "starRail" / ".env"
+    sibling_env = PROJECT_ROOT.parent / "starrail" / ".env"
     if sibling_env.is_file():
         load_dotenv(sibling_env, override=False)
 

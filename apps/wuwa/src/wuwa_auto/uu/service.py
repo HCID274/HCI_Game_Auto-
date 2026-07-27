@@ -36,6 +36,11 @@ from wuwa_auto.uu.desktop import (
 )
 from wuwa_auto.uu.errors import UuStartupError, UuStartupFinalError
 from wuwa_auto.uu.processes import is_uu_running, start_uu, terminate_uu
+from wuwa_auto.windows.desktop_guard import (
+    DesktopBlockedError,
+    describe_window,
+    require_desktop_ready,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +82,15 @@ def _confirm_wuthering_active(timeout: float) -> bool:
 
 def _run_attempt(attempt: int) -> None:
     log.info("UU attempt %d", attempt)
+    try:
+        foreground = require_desktop_ready()
+    except DesktopBlockedError as exc:
+        raise startup_error(
+            "desktop_guard",
+            str(exc),
+            retryable=False,
+        ) from exc
+    log.info("desktop preflight passed: %s", describe_window(foreground))
     require_supported_display()
     _ensure_process()
     try:

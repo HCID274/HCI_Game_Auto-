@@ -37,13 +37,9 @@ from wuwa_auto.uu.config import (
 )
 from wuwa_auto.uu.errors import UuStartupError
 from wuwa_auto.uu.processes import is_uu_running
+from wuwa_auto.windows.desktop_guard import activate_window
 
 log = logging.getLogger(__name__)
-
-SW_RESTORE = 9
-VK_MENU = 0x12
-KEYEVENTF_KEYUP = 0x0002
-
 
 def _leave_pyautogui_failsafe_corner() -> None:
     """Move an unattended cursor away from PyAutoGUI's emergency corners.
@@ -176,16 +172,7 @@ def focus_uu_window(timeout: float = WINDOW_TIMEOUT) -> str:
                     time.sleep(0.4)
                 hwnd = getattr(window, "_hWnd", None)
                 if hwnd is not None:
-                    # SetForegroundWindow is restricted by Windows' foreground
-                    # lock.  A temporary Alt state is the documented desktop-
-                    # automation handshake used elsewhere in this project.
-                    ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
-                    ctypes.windll.user32.keybd_event(VK_MENU, 0, 0, 0)
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    ctypes.windll.user32.BringWindowToTop(hwnd)
-                    ctypes.windll.user32.keybd_event(
-                        VK_MENU, 0, KEYEVENTF_KEYUP, 0
-                    )
+                    activate_window(int(hwnd), timeout=1.5)
                 else:
                     window.activate()
                 time.sleep(0.8)

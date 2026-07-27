@@ -1,0 +1,14 @@
+.env
+**/.env
+.venv/
+**/.venv/
+runtime/
+**/runtime/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+*.local.psd1
+*.local.json
+

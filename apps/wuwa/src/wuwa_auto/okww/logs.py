@@ -58,5 +58,10 @@ class LogCursor:
 
 
 def find_failure(text: str) -> str | None:
-    return next((marker for marker in FAILURE_MARKERS if marker in text), None)
-
+    explicit = next((marker for marker in FAILURE_MARKERS if marker in text), None)
+    if explicit:
+        return explicit
+    for line in text.splitlines():
+        if "Task exception stopped" in line:
+            return line.rsplit("TaskExecutor:", 1)[-1].strip()
+    return None

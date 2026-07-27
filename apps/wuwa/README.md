@@ -10,6 +10,13 @@ uv sync
 uv run wuwa-auto elevate daily
 ```
 
+独立补跑入口：
+
+```powershell
+uv run wuwa-auto elevate farm-echo
+uv run wuwa-auto elevate weekly-garden
+```
+
 流程只读取本轮新增的 OK-WW 日志。无论成功或失败，都会先保存截图和日志，
 随后关闭鸣潮与 OK、断开鸣潮加速并退出 UU。
 
@@ -39,7 +46,8 @@ uv run wuwa-auto report 20260727_001843
 
 ## 星铁联动
 
-`scripts/run_daily_chain.ps1` 使用全局锁按顺序执行：
+正式总控位于总仓 `orchestrator/run.ps1`；本目录的
+`scripts/run_daily_chain.ps1` 仅为兼容转发器。总控使用全局锁按顺序执行：
 
 1. 星铁日常
 2. 星铁安全清理
@@ -50,8 +58,13 @@ uv run wuwa-auto report 20260727_001843
 发生冲突。注册脚本会创建每天本地时间 05:30 的 `Game_Daily_0530`，并禁用
 旧的 `StarRail_Main_0600` 与 `StarRail_Cleanup_0800`。
 
+幻梦游园不再放在每日 OK-WW 配置中，而由
+`Game_Wuwa_WeeklyGarden_Sunday` 每周日 08:00 独立执行。两项计划任务复用同一
+全局互斥锁，周日任务不会与延长运行的每日总控抢占桌面。
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/register_chain_task.ps1
+powershell -ExecutionPolicy Bypass -File scripts/register_weekly_garden_task.ps1
 ```
 
 计划任务要求当前用户的交互式桌面会话，并以最高权限运行。

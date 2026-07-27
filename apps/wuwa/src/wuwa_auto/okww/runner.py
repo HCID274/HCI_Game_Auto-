@@ -13,7 +13,7 @@ from pathlib import Path
 import psutil
 
 from wuwa_auto.okww.config import validate_daily_configuration
-from wuwa_auto.okww.logs import LogCursor, SUCCESS_MARKER, find_failure
+from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
     OK_ENTRYPOINT,
     OK_LOG_FILE,
@@ -27,11 +27,8 @@ from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
 log = logging.getLogger(__name__)
 
 STARTUP_LOG_TIMEOUT = 180.0
-LOG_STALL_TIMEOUT = 1200.0
+LOG_STALL_TIMEOUT = 2700.0
 POLL_INTERVAL = 1.0
-OK_INSTALL_ROOT = OK_WW_EXE.parent.resolve()
-
-
 @dataclass(frozen=True)
 class OkRunResult:
     run_id: str
@@ -48,11 +45,13 @@ class OkRunResult:
 
 def _is_ok_process(process: psutil.Process) -> bool:
     try:
-        parts = [process.exe(), *process.cmdline()]
+        executable = Path(process.exe()).resolve()
     except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
-    root = str(OK_INSTALL_ROOT).casefold()
-    return any(root in (part or "").casefold() for part in parts)
+    # Do not inspect arbitrary command-line arguments here. A diagnostic shell
+    # that merely reads OK's log file contains the install path too and must
+    # never be treated as an owned OK process.
+    return executable in {OK_WW_EXE.resolve(), OK_PYTHONW_EXE.resolve()}
 
 
 def _running_ok_processes() -> list[psutil.Process]:
@@ -171,11 +170,18 @@ def write_workflow_failure(
     return result
 
 
-def run_daily_task() -> OkRunResult:
+def _run_task(
+    *,
+    task_index: int,
+    task_label: str,
+    success_marker: str,
+    run_suffix: str = "",
+) -> OkRunResult:
     require_admin()
     facts = preflight_daily_task()
+    facts["workflow_task"] = task_label
     started = datetime.now().astimezone()
-    run_id = started.strftime("%Y%m%d_%H%M%S")
+    run_id = started.strftime("%Y%m%d_%H%M%S") + run_suffix
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     slice_path = run_dir / "ok-current-run.log"
@@ -190,10 +196,10 @@ def run_daily_task() -> OkRunResult:
         # framework's long form survives parse_known_args and reaches OK.
         "--headless",
         "-t",
-        "1",
+        str(task_index),
         "-e",
     ]
-    log.info("starting OK-WW DailyTask: %s", command)
+    log.info("starting OK-WW %s: %s", task_label, command)
     launcher = subprocess.Popen(
         command,
         cwd=OK_WORKING_DIR,
@@ -223,7 +229,7 @@ def run_daily_task() -> OkRunResult:
                         "run one-time task without ui",
                         "Daily task completed, start teleport",
                         "start farming ",
-                        SUCCESS_MARKER,
+                        success_marker,
                     )
                 ):
                     log.info("OK-WW progress: %s", line)
@@ -234,10 +240,10 @@ def run_daily_task() -> OkRunResult:
             reason = f"OK-WW failure marker: {failure}"
             evidence = save_step_screenshot("ok_daily_failed")
             break
-        if SUCCESS_MARKER in current_text:
+        if success_marker in current_text:
             status = "success"
-            reason = SUCCESS_MARKER
-            evidence = save_step_screenshot("ok_daily_completed")
+            reason = success_marker
+            evidence = save_step_screenshot(f"ok_{task_label}_completed")
             break
         if not saw_log_activity and now - started_monotonic > STARTUP_LOG_TIMEOUT:
             reason = "OK-WW produced no current-run log before startup deadline"
@@ -254,8 +260,8 @@ def run_daily_task() -> OkRunResult:
             evidence = save_step_screenshot("ok_daily_worker_exited")
             break
         if saw_log_activity and now - last_log_activity > LOG_STALL_TIMEOUT:
-            reason = "OK-WW current-run log stalled for 20 minutes"
-            evidence = save_step_screenshot("ok_daily_log_stalled")
+            reason = "OK-WW current-run log stalled for 45 minutes"
+            evidence = save_step_screenshot(f"ok_{task_label}_log_stalled")
             break
         time.sleep(POLL_INTERVAL)
 
@@ -276,9 +282,36 @@ def run_daily_task() -> OkRunResult:
     )
     _write_result(result, run_dir)
     log.info(
-        "OK-WW DailyTask finished status=%s reason=%s launcher_pid=%s",
+        "OK-WW %s finished status=%s reason=%s launcher_pid=%s",
+        task_label,
         status,
         reason,
         launcher.pid,
     )
     return result
+
+
+def run_daily_task() -> OkRunResult:
+    return _run_task(
+        task_index=1,
+        task_label="daily",
+        success_marker=SUCCESS_MARKER,
+    )
+
+
+def run_farm_echo_task() -> OkRunResult:
+    return _run_task(
+        task_index=3,
+        task_label="farm_echo",
+        success_marker="Successfully Executed Task, Exiting Game and App!",
+        run_suffix="_farm_echo",
+    )
+
+
+def run_weekly_garden_task() -> OkRunResult:
+    return _run_task(
+        task_index=12,
+        task_label="weekly_garden",
+        success_marker="Successfully Executed Task, Exiting Game and App!",
+        run_suffix="_weekly_garden",
+    )

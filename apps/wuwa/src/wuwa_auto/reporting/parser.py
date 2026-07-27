@@ -82,9 +82,12 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         daily.append(ReportItem("battle-pass", "先约电台：已执行奖励领取操作"))
 
     weekly: list[ReportItem] = []
-    garden_started = "weekly garden not completed, run GardenTask" in text
     garden_completed = "乐园任务完成, 已达到上限" in text
-    if garden_started and garden_completed:
+    garden_started = (
+        "weekly garden not completed, run GardenTask" in text
+        or "GardenTask:garden end" in text
+    )
+    if garden_completed:
         weekly.append(ReportItem("weekly-garden", "完成幻梦游园本周目标"))
     elif garden_started and not garden_completed:
         issues.append(ReportItem("weekly-garden-incomplete", "幻梦游园本轮未确认完成"))
@@ -135,6 +138,7 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         overall_status=status,
         reason=result.reason,
         duration_seconds=result.duration_seconds,
+        workflow_task=str(result.config.get("workflow_task", "daily")),
         daily=daily,
         weekly=weekly,
         followup=followup,
@@ -145,9 +149,13 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
 
 
 def deterministic_summary(facts: RunFacts) -> str:
+    subject = {
+        "weekly_garden": "鸣潮周常",
+        "farm_echo": "鸣潮后续任务",
+    }.get(facts.workflow_task, "鸣潮日常")
     status = {
-        "completed": "鸣潮日常完成",
-        "partial_success": "鸣潮日常部分完成",
-        "failed": "鸣潮日常失败",
-    }.get(facts.overall_status, "鸣潮日常状态未确认")
+        "completed": f"{subject}完成",
+        "partial_success": f"{subject}部分完成",
+        "failed": f"{subject}失败",
+    }.get(facts.overall_status, f"{subject}状态未确认")
     return f"{status}，耗时{_format_duration(facts.duration_seconds)}"

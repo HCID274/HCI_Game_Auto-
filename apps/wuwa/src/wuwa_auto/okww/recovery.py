@@ -3,8 +3,8 @@
 import ctypes
 import logging
 import time
-from contextlib import contextmanager
 from collections.abc import Iterator
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 

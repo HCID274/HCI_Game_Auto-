@@ -17,6 +17,7 @@ class RunFacts:
     overall_status: str
     reason: str
     duration_seconds: int
+    workflow_task: str = "daily"
     daily: list[ReportItem] = field(default_factory=list)
     weekly: list[ReportItem] = field(default_factory=list)
     followup: list[ReportItem] = field(default_factory=list)

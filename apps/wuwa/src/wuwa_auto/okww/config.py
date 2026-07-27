@@ -8,8 +8,8 @@ from typing import Any
 
 from wuwa_auto.settings import (
     OK_DAILY_CONFIG,
-    OK_FARM_ECHO_CONFIG,
     OK_ENTRYPOINT,
+    OK_FARM_ECHO_CONFIG,
     OK_LOG_FILE,
     OK_NIGHTMARE_CONFIG,
     OK_PYTHONW_EXE,

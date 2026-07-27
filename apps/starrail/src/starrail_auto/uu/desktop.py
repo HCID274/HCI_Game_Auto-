@@ -38,6 +38,7 @@ from starrail_auto.uu.config import (
 )
 from starrail_auto.uu.errors import UuStartupError
 from starrail_auto.uu.processes import is_uu_running
+from starrail_auto.windows.desktop_guard import activate_window
 
 log = logging.getLogger(__name__)
 
@@ -134,8 +135,12 @@ def focus_uu_window(timeout: float = UU_WINDOW_TIMEOUT) -> str:
                 if getattr(window, "isMinimized", False):
                     window.restore()
                     time.sleep(0.3)
-                window.activate()
-                time.sleep(0.5)
+                hwnd = getattr(window, "_hWnd", None)
+                if hwnd is None:
+                    window.activate()
+                    time.sleep(0.5)
+                else:
+                    activate_window(int(hwnd), timeout=1.5)
                 return title
             except Exception as exc:  # pragma: no cover - host dependent
                 last_error = exc

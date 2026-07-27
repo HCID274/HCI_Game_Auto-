@@ -2,8 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from wuwa_auto.reporting.parser import parse_run
-from wuwa_auto.reporting.summarizer import build_fallback_narrative
-from wuwa_auto.reporting.summarizer import _validate_wording
+from wuwa_auto.reporting.summarizer import _validate_wording, build_fallback_narrative
 
 
 def _result(tmp_path: Path, text: str, **overrides: object) -> SimpleNamespace:
@@ -67,6 +66,24 @@ DailyTask:Daily Task Completed
 """
     facts = parse_run(_result(tmp_path, text))
     assert [item.text for item in facts.weekly] == ["完成幻梦游园本周目标"]
+
+
+def test_standalone_weekly_garden_is_reported(tmp_path: Path) -> None:
+    text = """
+GardenTask:garden end [本周游历值, 已达到上限]
+GardenTask:乐园任务完成, 已达到上限
+TaskExecutor:Successfully Executed Task, Exiting Game and App!
+"""
+    facts = parse_run(
+        _result(
+            tmp_path,
+            text,
+            config={"workflow_task": "weekly_garden"},
+        )
+    )
+    narrative = build_fallback_narrative(facts)
+    assert narrative.summary.startswith("鸣潮周常完成")
+    assert narrative.weekly == ["完成幻梦游园本周目标"]
 
 
 def test_historical_zero_based_boss_log_keeps_gui_item_number(

@@ -7,7 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from wuwa_auto.daily import run_daily_workflow
+from wuwa_auto.daily import (
+    run_daily_workflow,
+    run_farm_echo_workflow,
+    run_weekly_garden_workflow,
+)
 from wuwa_auto.okww.runner import OkRunResult, preflight_daily_task, run_daily_task
 from wuwa_auto.settings import LOGS_DIR, RUNS_DIR
 from wuwa_auto.uu.service import execute_action
@@ -42,6 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("daily", help="ensure UU, then run the OK-WW daily chain")
+    commands.add_parser("farm-echo", help="run only OK-WW FarmEchoTask")
+    commands.add_parser("weekly-garden", help="run only OK-WW GardenTask")
     commands.add_parser(
         "cleanup", help="close Wuwa/OK, disconnect Wuwa acceleration, then exit UU"
     )
@@ -165,6 +171,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_daily_task().exit_code
     if args.command == "daily":
         return run_daily_workflow()
+    if args.command == "farm-echo":
+        return run_farm_echo_workflow()
+    if args.command == "weekly-garden":
+        return run_weekly_garden_workflow()
     if args.command == "cleanup":
         from wuwa_auto.cleanup import cleanup_after_run
 

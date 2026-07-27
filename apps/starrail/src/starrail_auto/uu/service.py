@@ -34,6 +34,11 @@ from starrail_auto.uu.desktop import (
 )
 from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
 from starrail_auto.uu.processes import is_uu_running, kill_uu, start_uu
+from starrail_auto.windows.desktop_guard import (
+    DesktopBlockedError,
+    describe_window,
+    require_desktop_ready,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +56,15 @@ def _ensure_uu_started() -> None:
 
 def _run_startup_attempt(attempt_no: int) -> None:
     log.info("UU startup attempt %d started", attempt_no)
+    try:
+        foreground = require_desktop_ready()
+    except DesktopBlockedError as exc:
+        raise startup_error(
+            "desktop_guard",
+            str(exc),
+            retryable=False,
+        ) from exc
+    log.info("desktop preflight passed: %s", describe_window(foreground))
     require_supported_display()
     was_running = is_uu_running()
     _ensure_uu_started()
