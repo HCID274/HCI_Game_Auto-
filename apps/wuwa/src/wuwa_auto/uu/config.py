@@ -1,0 +1,45 @@
+"""UU paths, templates, and bounded timing policy."""
+
+from wuwa_auto.settings import EVIDENCE_DIR, TEMPLATES_DIR, UU_EXE
+
+DEBUG_DIR = EVIDENCE_DIR
+
+TPL_GAME_CARD = TEMPLATES_DIR / "uu_wuthering_card.png"
+TPL_GAME_ACTIVE = TEMPLATES_DIR / "uu_wuthering_active.png"
+TPL_START_ACCELERATION = TEMPLATES_DIR / "uu_start_acceleration.png"
+TPL_STOP_ACCELERATION = TEMPLATES_DIR / "uu_stop_acceleration.png"
+TPL_UPDATE_NOTICE = TEMPLATES_DIR / "uu_update_notice.png"
+TPL_UPDATE_CONFIRM = TEMPLATES_DIR / "uu_update_confirm.png"
+TPL_UPDATE_CLOSE = TEMPLATES_DIR / "uu_update_close.png"
+
+EXPECTED_PRIMARY_SCREEN_SIZE = (2560, 1440)
+UU_WINDOW_KEYWORDS = ("uu加速器", "网易uu")
+UU_PROCESS_NAMES = {
+    "uu.exe",
+    "uu_launcher.exe",
+    "uu_ball.exe",
+    "uu_cloudsyn.exe",
+}
+
+WINDOW_TIMEOUT = 30.0
+WINDOW_POLL_INTERVAL = 0.5
+IMAGE_INTERVAL = 0.25
+IMAGE_CONFIDENCE = 0.82
+STARTUP_WAIT = 5.0
+CARD_TIMEOUT = 20.0
+START_BUTTON_TIMEOUT = 8.0
+CONFIRM_TIMEOUT = 35.0
+REUSE_TIMEOUT = 3.0
+POST_HOVER_DELAY = 0.7
+POST_CLICK_DELAY = 8.0
+MINIMIZE_TIMEOUT = 5.0
+RESTART_DELAY = 5.0
+MAX_RESTARTS = 2
+
+UPDATE_DETECT_TIMEOUT = 0.8
+UPDATE_ACTION_TIMEOUT = 2.0
+UPDATE_SETTLE_DELAY = 0.5
+UPDATE_MAX_DISMISSALS = 3
+
+__all__ = ["UU_EXE"]
+
