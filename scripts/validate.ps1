@@ -40,7 +40,10 @@ if (-not $SkipTests) {
         try {
             & uv sync --locked
             if ($LASTEXITCODE -ne 0) { throw "$($project.Name) dependency validation failed" }
-            & uv run pytest -q
+            $pytestRoot = Join-Path $project.Path 'runtime\pytest'
+            New-Item -ItemType Directory -Force -Path $pytestRoot | Out-Null
+            $pytestTemp = Join-Path $pytestRoot ([Guid]::NewGuid().ToString())
+            & uv run pytest -q --basetemp $pytestTemp
             if ($LASTEXITCODE -ne 0) { throw "$($project.Name) tests failed" }
         }
         finally {
