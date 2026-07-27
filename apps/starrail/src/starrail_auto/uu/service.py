@@ -56,6 +56,13 @@ def _ensure_uu_started() -> None:
         raise startup_error("ensure_uu_started", "UU process was not detected after launch")
 
 
+def _confirm_starrail_active(timeout: float) -> bool:
+    """Require both Star Rail identity and the generic active-state button."""
+    identity = try_locate_image(TPL_STEP_1, timeout=timeout)
+    stop = try_locate_image(TPL_STEP_3, timeout=timeout)
+    return identity is not None and stop is not None
+
+
 def _run_startup_attempt(attempt_no: int) -> None:
     log.info("UU startup attempt %d started", attempt_no)
     try:
@@ -80,10 +87,20 @@ def _run_startup_attempt(attempt_no: int) -> None:
 
     if was_running:
         dismiss_known_popups("reuse acceleration check")
+        if _confirm_starrail_active(REUSE_CONFIRM_TIMEOUT):
+            log.info("existing Star Rail acceleration confirmed")
+            return
         target = try_locate_image(TPL_STEP_3, timeout=REUSE_CONFIRM_TIMEOUT)
         if target is not None:
-            log.info("existing acceleration confirmed at %s", target)
-            return
+            log.info(
+                "existing acceleration has no Star Rail identity; disconnecting before retry"
+            )
+            click(target)
+            time.sleep(POST_MOVE_DELAY)
+            raise startup_error(
+                "reuse_acceleration_identity",
+                "active acceleration was not verified as Star Rail",
+            )
         log.info("existing UU session is not accelerated; running full chain")
 
     first = wait_for_image(
