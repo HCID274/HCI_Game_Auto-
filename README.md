@@ -12,6 +12,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate.ps1
 # 查看完整日常链路但不启动任何游戏
 powershell -NoProfile -ExecutionPolicy Bypass -File orchestrator/run.ps1 -Mode daily-chain -DryRun
 
+# 真实验证 UU/桌面/交接/清理，但用替身跳过 M7A 与 OK-WW 核心任务
+powershell -NoProfile -ExecutionPolicy Bypass -File orchestrator/run.ps1 -Mode integration-smoke
+
 # 管理员安装并切换正式计划任务
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
@@ -25,4 +28,4 @@ uv run --project apps/wuwa wuwa-auto --help
 
 架构和退出边界见 [docs/architecture.md](docs/architecture.md)。游戏专属说明分别见
 `apps/starrail/docs/架构蓝图.md` 与 `apps/wuwa/docs/架构蓝图.md`。
-稳定后的公共 UU/桌面包提取计划见 [docs/roadmap.md](docs/roadmap.md)。
+共享能力位于 `packages/game-automation-core`；应用只保留游戏专属规则。

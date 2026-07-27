@@ -16,6 +16,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--already-elevated", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("smoke", help="validate integration without starting M7A")
+
     daily = commands.add_parser("daily", help="run the complete daily workflow")
     daily.add_argument("--timeout", type=int)
 
@@ -59,6 +61,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "daily":
         return run_daily(args.timeout)
+    if args.command == "smoke":
+        from starrail_auto.smoke import run_smoke
+
+        return run_smoke()
     if args.command == "universe":
         return run_universe(args.timeout)
     if args.command == "cleanup":

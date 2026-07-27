@@ -1,62 +1,31 @@
-"""UU process discovery, launch, and termination."""
+"""Star Rail configuration adapter for shared UU process management."""
 
-import logging
-import subprocess
+from game_automation_core.uu.processes import UuProcessController, UuProcessSpec
+from starrail_auto.uu.config import UU_EXE, UU_PROCESS_NAMES
 
-import psutil
-
-from starrail_auto.uu.config import UU_EXE
-from starrail_auto.uu.errors import UuStartupError
-
-log = logging.getLogger(__name__)
+_controller = UuProcessController(
+    UuProcessSpec(
+        executable=UU_EXE,
+        managed_names=frozenset(UU_PROCESS_NAMES),
+    )
+)
 
 
 def is_uu_running() -> bool:
-    for proc in psutil.process_iter(["name"]):
-        if proc.info["name"] and "uu" in proc.info["name"].lower():
-            return True
-    return False
+    return _controller.is_running()
+
+
+def is_any_uu_process_running() -> bool:
+    return _controller.is_any_running()
 
 
 def start_uu() -> None:
-    if not UU_EXE.exists():
-        raise UuStartupError(
-            "start_uu_process",
-            f"UU executable not found: {UU_EXE}",
-            retryable=False,
-        )
-    try:
-        subprocess.Popen([str(UU_EXE)])
-    except OSError as exc:
-        raise UuStartupError(
-            "start_uu_process",
-            f"failed to start UU accelerator: {exc}",
-            retryable=False,
-        ) from exc
+    _controller.start()
 
 
-def kill_uu() -> None:
-    targets: list[psutil.Process] = []
-    for proc in psutil.process_iter(["name", "pid"]):
-        name = proc.info["name"] or ""
-        if "uu" not in name.lower():
-            continue
-        try:
-            proc.terminate()
-            targets.append(proc)
-            log.info("terminated %s (pid=%d)", name, proc.info["pid"])
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-            log.warning("cannot terminate %s (pid=%d): %s", name, proc.info["pid"], exc)
+def kill_uu() -> bool:
+    return _controller.terminate()
 
-    if not targets:
-        log.info("no UU processes found")
-        return
 
-    _, alive = psutil.wait_procs(targets, timeout=5)
-    for proc in alive:
-        try:
-            proc.kill()
-            log.warning("force-killed %s (pid=%d)", proc.name(), proc.pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-    log.info("UU accelerator stopped")
+def terminate_uu() -> bool:
+    return _controller.terminate()

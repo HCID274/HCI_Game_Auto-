@@ -8,7 +8,9 @@
             Commands = @{
                 Daily = @('run', 'starrail-auto', 'daily', '--timeout', '1800')
                 Cleanup = @('run', 'starrail-auto', 'cleanup')
+                UuStart = @('run', 'starrail-auto', 'uu', 'start')
                 UuStop = @('run', 'starrail-auto', 'uu', 'stop')
+                Smoke = @('run', 'starrail-auto', 'smoke')
                 Health = @('run', 'starrail-auto', '--help')
             }
         }
@@ -18,6 +20,9 @@
                 Daily = @('run', 'wuwa-auto', 'daily')
                 FarmEcho = @('run', 'wuwa-auto', 'farm-echo')
                 WeeklyGarden = @('run', 'wuwa-auto', 'weekly-garden')
+                UuStart = @('run', 'wuwa-auto', 'uu', 'start')
+                Cleanup = @('run', 'wuwa-auto', 'cleanup')
+                Smoke = @('run', 'wuwa-auto', 'smoke')
                 Health = @('run', 'wuwa-auto', '--help')
             }
         }

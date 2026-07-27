@@ -37,7 +37,12 @@ UU_STARTUP_MAX_RESTARTS = 3
 EXPECTED_PRIMARY_SCREEN_SIZE = (2560, 1440)
 
 UU_WINDOW_KEYWORDS = ("uu", "网易uu", "uu加速器")
-UU_PROCESS_KEYWORDS = ("uu", "uuaccelerator", "uulauncher")
+UU_PROCESS_NAMES = {
+    "uu.exe",
+    "uu_launcher.exe",
+    "uu_ball.exe",
+    "uu_cloudsyn.exe",
+}
 UU_UPDATE_POPUP_ACTIONS = (
     ("confirm", TPL_UPDATE_CONFIRM),
     ("close", TPL_UPDATE_CLOSE),

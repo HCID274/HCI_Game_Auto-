@@ -4,6 +4,8 @@ import logging
 import time
 from pathlib import Path
 
+from game_automation_core.uu.supervisor import run_with_restart_budget
+
 from wuwa_auto.uu.config import (
     CARD_TIMEOUT,
     CONFIRM_TIMEOUT,
@@ -142,27 +144,15 @@ def _run_attempt(attempt: int) -> None:
 
 def ensure_connected() -> int:
     require_admin()
-    last_error: UuStartupError | None = None
-    restarts = 0
     with minimize_on_exit("ensure connected"):
-        for attempt in range(1, MAX_RESTARTS + 2):
-            try:
-                _run_attempt(attempt)
-                return restarts
-            except UuStartupError as exc:
-                last_error = exc
-                log.warning("UU attempt failed: %s", exc)
-                if not exc.retryable:
-                    exc.restarts_used = restarts
-                    raise
-                if attempt > MAX_RESTARTS:
-                    break
-                terminate_uu()
-                restarts += 1
-                time.sleep(RESTART_DELAY)
-    if last_error is None:
-        raise RuntimeError("UU failed without a captured error")
-    raise UuStartupFinalError(last_error, restarts)
+        return run_with_restart_budget(
+            attempt=_run_attempt,
+            restart=terminate_uu,
+            max_restarts=MAX_RESTARTS,
+            restart_delay=RESTART_DELAY,
+            sleep=time.sleep,
+            logger=log,
+        )
 
 
 def disconnect() -> None:

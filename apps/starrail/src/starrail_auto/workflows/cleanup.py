@@ -9,6 +9,7 @@ import psutil
 
 from starrail_auto.integrations.feishu import notify_starrail_failure
 from starrail_auto.settings import LOGS_DIR
+from starrail_auto.uu.processes import kill_uu
 from starrail_auto.uu.service import stop_uu_acceleration
 
 GAME_PROCESS_NAMES = {"starrail.exe"}
@@ -102,11 +103,19 @@ def run(delay: int = 0) -> int:
     if not ok:
         return EXIT_PROCESS_CLOSE_FAILED
 
+    disconnect_failed = False
     try:
         stop_uu_acceleration()
     except RuntimeError as exc:
-        log.error("UU acceleration stop failed: %s", exc)
+        disconnect_failed = True
+        log.warning("UU acceleration stop was not confirmed; forcing owned-process exit: %s", exc)
+
+    if not kill_uu():
+        log.error("UU managed processes remain after termination")
         return EXIT_UU_DISCONNECT_FAILED
+
+    if disconnect_failed:
+        log.info("UU disconnect failure recovered by complete process termination")
 
     log.info("cleanup completed")
     return EXIT_OK

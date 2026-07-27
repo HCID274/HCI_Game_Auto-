@@ -2,6 +2,13 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
+[manifest]
+members = [
+    "hci-game-automation-core",
+    "starrail-auto",
+    "wuwa-auto",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"
@@ -59,6 +66,29 @@ sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
 ]
+
+[[package]]
+name = "hci-game-automation-core"
+version = "0.1.0"
+source = { editable = "packages/game-automation-core" }
+dependencies = [
+    { name = "psutil" },
+    { name = "pyautogui" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "pyautogui", specifier = ">=0.9" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "httpcore"
@@ -653,6 +683,39 @@ wheels = [
 ]
 
 [[package]]
+name = "starrail-auto"
+version = "0.1.0"
+source = { editable = "apps/starrail" }
+dependencies = [
+    { name = "hci-game-automation-core" },
+    { name = "openai" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "psutil" },
+    { name = "pyautogui" },
+    { name = "python-dotenv" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hci-game-automation-core", editable = "packages/game-automation-core" },
+    { name = "openai", specifier = ">=2.48.0" },
+    { name = "opencv-python", specifier = ">=4.9" },
+    { name = "pillow", specifier = ">=12.2.0" },
+    { name = "psutil", specifier = ">=5.9" },
+    { name = "pyautogui", specifier = ">=0.9" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+
+[[package]]
 name = "tqdm"
 version = "4.69.1"
 source = { registry = "https://pypi.org/simple" }
@@ -688,8 +751,9 @@ wheels = [
 [[package]]
 name = "wuwa-auto"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "apps/wuwa" }
 dependencies = [
+    { name = "hci-game-automation-core" },
     { name = "openai" },
     { name = "opencv-python" },
     { name = "pillow" },
@@ -705,6 +769,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "hci-game-automation-core", editable = "packages/game-automation-core" },
     { name = "openai", specifier = ">=2.48.0" },
     { name = "opencv-python", specifier = ">=4.9" },
     { name = "pillow", specifier = ">=12.2.0" },

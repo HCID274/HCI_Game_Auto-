@@ -4,6 +4,8 @@ import logging
 import time
 from pathlib import Path
 
+from game_automation_core.uu.supervisor import run_with_restart_budget
+
 from starrail_auto.uu.config import (
     CONFIRM_TIMEOUT,
     POST_CLICK_WAIT,
@@ -114,38 +116,15 @@ def _run_startup_attempt(attempt_no: int) -> None:
 def ensure_uu_connected() -> int:
     """Ensure acceleration, allowing at most three process restarts."""
     require_admin()
-    max_attempts = UU_STARTUP_MAX_RESTARTS + 1
-    last_error: UuStartupError | None = None
-    restarts_used = 0
-
     with keep_uu_in_background_on_exit("startup chain exit"):
-        for attempt in range(1, max_attempts + 1):
-            log.info("UU startup supervisor attempt %d/%d", attempt, max_attempts)
-            try:
-                _run_startup_attempt(attempt)
-                return restarts_used
-            except UuStartupError as exc:
-                last_error = exc
-                log.warning(
-                    "UU attempt %d failed: retryable=%s step=%s reason=%s screenshot=%s",
-                    attempt,
-                    exc.retryable,
-                    exc.step_name,
-                    exc.reason,
-                    exc.screenshot_path,
-                )
-                if not exc.retryable:
-                    exc.restarts_used = restarts_used
-                    raise
-                if attempt >= max_attempts:
-                    break
-                kill_uu()
-                restarts_used += 1
-                time.sleep(UU_RESTART_DELAY)
-
-    if last_error is None:
-        raise RuntimeError("UU startup failed without a captured error")
-    raise UuStartupFinalError(last_error, restarts_used)
+        return run_with_restart_budget(
+            attempt=_run_startup_attempt,
+            restart=kill_uu,
+            max_restarts=UU_STARTUP_MAX_RESTARTS,
+            restart_delay=UU_RESTART_DELAY,
+            sleep=time.sleep,
+            logger=log,
+        )
 
 
 def stop_uu_acceleration() -> None:

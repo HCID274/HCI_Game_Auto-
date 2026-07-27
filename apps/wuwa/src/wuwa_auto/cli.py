@@ -23,6 +23,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--already-elevated", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("smoke", help="validate integration without starting OK-WW")
+
     uu = commands.add_parser("uu", help="inspect or control UU")
     uu.add_argument(
         "action",
@@ -95,6 +97,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return relaunch_cli_elevated(args.arguments)
 
     _configure_logging()
+    if args.command == "smoke":
+        from wuwa_auto.smoke import run_smoke
+
+        return run_smoke()
     if args.command == "uu":
         return execute_action(args.action)
     if args.command == "input":

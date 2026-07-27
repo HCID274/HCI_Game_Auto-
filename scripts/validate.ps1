@@ -7,10 +7,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $required = @(
     'config\automation.psd1',
     'orchestrator\run.ps1',
+    'pyproject.toml',
+    'uv.lock',
+    'packages\game-automation-core\pyproject.toml',
     'apps\starrail\pyproject.toml',
-    'apps\starrail\uv.lock',
-    'apps\wuwa\pyproject.toml',
-    'apps\wuwa\uv.lock'
+    'apps\wuwa\pyproject.toml'
 )
 foreach ($relativePath in $required) {
     $path = Join-Path $repoRoot $relativePath
@@ -31,24 +32,18 @@ if ($parseErrors.Count -gt 0) {
 }
 
 if (-not $SkipTests) {
-    $projects = @(
-        @{ Name = 'Star Rail'; Path = (Join-Path $repoRoot 'apps\starrail') },
-        @{ Name = 'Wuthering Waves'; Path = (Join-Path $repoRoot 'apps\wuwa') }
-    )
-    foreach ($project in $projects) {
-        Push-Location $project.Path
-        try {
-            & uv sync --locked
-            if ($LASTEXITCODE -ne 0) { throw "$($project.Name) dependency validation failed" }
-            $pytestRoot = Join-Path $project.Path 'runtime\pytest'
-            New-Item -ItemType Directory -Force -Path $pytestRoot | Out-Null
-            $pytestTemp = Join-Path $pytestRoot ([Guid]::NewGuid().ToString())
-            & uv run pytest -q --basetemp $pytestTemp
-            if ($LASTEXITCODE -ne 0) { throw "$($project.Name) tests failed" }
-        }
-        finally {
-            Pop-Location
-        }
+    Push-Location $repoRoot
+    try {
+        & uv sync --all-packages --all-groups --locked
+        if ($LASTEXITCODE -ne 0) { throw 'workspace dependency validation failed' }
+        $pytestRoot = Join-Path $repoRoot 'runtime\pytest'
+        New-Item -ItemType Directory -Force -Path $pytestRoot | Out-Null
+        $pytestTemp = Join-Path $pytestRoot ([Guid]::NewGuid().ToString())
+        & uv run pytest -q --basetemp $pytestTemp packages/game-automation-core/tests apps/starrail/tests apps/wuwa/tests
+        if ($LASTEXITCODE -ne 0) { throw 'workspace tests failed' }
+    }
+    finally {
+        Pop-Location
     }
 }
 
@@ -57,5 +52,8 @@ if ($LASTEXITCODE -ne 0) { throw "orchestrator health validation failed: $LASTEX
 
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'orchestrator\run.ps1') -Mode daily-chain -DryRun
 if ($LASTEXITCODE -ne 0) { throw "daily-chain dry-run failed: $LASTEXITCODE" }
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'orchestrator\run.ps1') -Mode integration-smoke -DryRun
+if ($LASTEXITCODE -ne 0) { throw "integration-smoke contract failed: $LASTEXITCODE" }
 
 Write-Host 'monorepo validation passed'

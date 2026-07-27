@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from game_automation_core.reporting.archive import write_json_archive
 
 from wuwa_auto.integrations.feishu import build_report_card, send_report_card
 from wuwa_auto.reporting.parser import parse_run
@@ -39,21 +40,19 @@ def report_run(
     sent = send_report_card(card) if allow_send else False
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = REPORTS_DIR / f"{result.run_id}.json"
-    path.write_text(
-        json.dumps(
-            {
-                "run_id": result.run_id,
-                "ai_used": ai_used,
-                "sent": sent,
-                "facts": facts.to_dict(),
-                "narrative": asdict(narrative),
-                "feishu_card": card,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    suffix = ".json" if allow_send else ".preview.json"
+    path = REPORTS_DIR / f"{result.run_id}{suffix}"
+    write_json_archive(
+        path,
+        {
+            "run_id": result.run_id,
+            "ai_used": ai_used,
+            "sent": sent,
+            "preview": not allow_send,
+            "facts": facts.to_dict(),
+            "narrative": asdict(narrative),
+            "feishu_card": card,
+        },
     )
     log.info("Wuwa report archived: %s", path)
     return path

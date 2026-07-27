@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from game_automation_core.reporting.context import read_markdown, strip_markdown_comments
+
 from starrail_auto.settings import USER_CONTEXT_DIR
 
 REPORTING_PREFERENCES_PATH = USER_CONTEXT_DIR / "汇报偏好.md"
@@ -27,15 +29,10 @@ def _field(markdown: str, *labels: str) -> str:
 
 def load_training_context(path: Path = TRAINING_CONTEXT_PATH) -> dict[str, Any]:
     """Load free-form Markdown plus optional fields used for strict matching."""
-    if not path.exists():
+    markdown = read_markdown(path, strip_comments=False, logger=log)
+    if not markdown:
         return {}
-    try:
-        markdown = path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        log.warning("training context cannot be loaded: %s", exc)
-        return {}
-
-    parseable_markdown = re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL)
+    parseable_markdown = strip_markdown_comments(markdown)
     character = _field(parseable_markdown, "角色")
     goal = _field(parseable_markdown, "培养目标", "目标")
     keyword_text = _field(
@@ -68,13 +65,7 @@ def load_reporting_preferences(
     path: Path = REPORTING_PREFERENCES_PATH,
 ) -> str:
     """Load optional user emphasis without promoting it to system instructions."""
-    if not path.exists():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        log.warning("reporting preferences cannot be loaded: %s", exc)
-        return ""
+    return read_markdown(path, strip_comments=False, logger=log)
 
 
 def load_reporting_context() -> dict[str, Any]:

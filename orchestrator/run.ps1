@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'farm-echo', 'weekly-garden', 'validate')]
+    [ValidateSet('auto', 'daily-chain', 'farm-echo', 'weekly-garden', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -107,6 +107,7 @@ $startedAt = (Get-Date).ToString('o')
 $starRailCode = 99
 $starRailCleanupCode = 99
 $wuwaCode = 99
+$wuwaCleanupCode = 0
 $finalCode = 99
 
 try {
@@ -150,9 +151,32 @@ try {
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Health -Label 'Wuthering Waves CLI health'
             }
+            'integration-smoke' {
+                Remove-RetiredTasks
+                $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName UuStart -Label 'Star Rail UU real adapter'
+                if ($starRailCode -eq 0) {
+                    $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName Smoke -Label 'Star Rail core substitute'
+                }
+                $starRailCleanupCode = Invoke-AppCommand -AppName StarRail -CommandName Cleanup -Label 'Star Rail real cleanup'
+                if ($starRailCleanupCode -ne 0) {
+                    Invoke-AppCommand -AppName StarRail -CommandName UuStop -Label 'Star Rail UU fallback stop' | Out-Null
+                }
+                if ($starRailCode -eq 0 -and $starRailCleanupCode -eq 0) {
+                    $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName UuStart -Label 'Wuthering Waves UU real adapter'
+                    if ($wuwaCode -eq 0) {
+                        $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Smoke -Label 'Wuthering Waves core substitute'
+                    }
+                    $wuwaCleanupCode = Invoke-AppCommand -AppName Wuwa -CommandName Cleanup -Label 'Wuthering Waves real cleanup'
+                }
+                else {
+                    Write-OrchestratorLog 'Wuthering Waves smoke skipped because Star Rail handoff failed'
+                    $wuwaCode = 30
+                }
+            }
         }
 
-        if ($starRailCleanupCode -ne 0) { $finalCode = 30 }
+        if ($wuwaCleanupCode -ne 0) { $finalCode = 40 }
+        elseif ($starRailCleanupCode -ne 0) { $finalCode = 30 }
         elseif ($starRailCode -ne 0) { $finalCode = 10 }
         elseif ($wuwaCode -ne 0) { $finalCode = 20 }
         else { $finalCode = 0 }
@@ -173,6 +197,7 @@ finally {
         starrail_exit_code = $starRailCode
         starrail_cleanup_exit_code = $starRailCleanupCode
         wuwa_exit_code = $wuwaCode
+        wuwa_cleanup_exit_code = $wuwaCleanupCode
         exit_code = $finalCode
         log_path = $logPath
     }

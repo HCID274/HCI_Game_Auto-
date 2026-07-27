@@ -1,15 +1,14 @@
 """Feishu webhook notifications for Star Rail automation."""
 
-import base64
-import hashlib
-import hmac
-import json
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime
-from urllib import request
-from urllib.error import HTTPError, URLError
+
+from game_automation_core.reporting.feishu import (
+    build_sectioned_card,
+    make_signature,
+    send_signed_payload,
+)
 
 from starrail_auto.settings import get_secret
 
@@ -38,9 +37,7 @@ def _load_config() -> FeishuConfig | None:
 
 def _make_signature(timestamp: int, secret: str) -> str:
     """Build Feishu custom bot signature."""
-    string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
-    digest = hmac.new(string_to_sign, b"", digestmod=hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("utf-8")
+    return make_signature(timestamp, secret)
 
 
 def _send_payload(payload: dict[str, object]) -> bool:
@@ -49,26 +46,12 @@ def _send_payload(payload: dict[str, object]) -> bool:
     if config is None:
         return False
 
-    timestamp = int(time.time())
-    payload = dict(payload)
-    payload["timestamp"] = str(timestamp)
-    payload["sign"] = _make_signature(timestamp, config.secret)
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(
-        config.webhook_url,
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
+    return send_signed_payload(
+        payload,
+        webhook_url=config.webhook_url,
+        secret=config.secret,
+        timeout=REQUEST_TIMEOUT,
     )
-
-    try:
-        with request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            response_body = resp.read().decode("utf-8", errors="replace")
-            log.info("Feishu notification sent: status=%s body=%s", resp.status, response_body)
-            return True
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        log.warning("Feishu notification failed: %s", exc)
-        return False
 
 
 def _send_text(text: str) -> bool:
@@ -79,10 +62,6 @@ def _send_text(text: str) -> bool:
             "content": {"text": text},
         }
     )
-
-
-def _numbered_lines(items: list[str]) -> str:
-    return "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
 
 
 def send_starrail_report_card(
@@ -98,112 +77,20 @@ def send_starrail_report_card(
     reminders: list[str] | None = None,
 ) -> bool:
     """Render the stable report layout as a Feishu interactive card."""
-    elements: list[dict[str, object]] = [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": f"**每日实训**\n{daily}",
-            },
-        }
-    ]
-
-    if routine_tasks:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": f"**日常**\n{_numbered_lines(routine_tasks)}",
-                    },
-                },
-            ]
-        )
-    if other_tasks:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": f"**后续完成**\n{_numbered_lines(other_tasks)}",
-                    },
-                },
-            ]
-        )
-    if current_task:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": f"**当前任务**\n{current_task}",
-                    },
-                },
-            ]
-        )
-    if issues:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": f"**异常记录**\n{_numbered_lines(issues)}",
-                    },
-                },
-            ]
-        )
-
-    if training_todos:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            "**养成计划待办**\n"
-                            f"{_numbered_lines(training_todos)}"
-                        ),
-                    },
-                },
-            ]
-        )
-
-    if reminders:
-        elements.extend(
-            [
-                {"tag": "hr"},
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": f"**提醒**\n{_numbered_lines(reminders)}",
-                    },
-                },
-            ]
-        )
-
     return _send_payload(
-        {
-            "msg_type": "interactive",
-            "card": {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "template": template,
-                    "title": {"tag": "plain_text", "content": title},
-                },
-                "elements": elements,
-            },
-        }
+        build_sectioned_card(
+            title=title,
+            template=template,
+            lead=f"**每日实训**\n{daily}",
+            sections=[
+                ("日常", routine_tasks),
+                ("后续完成", other_tasks),
+                ("当前任务", current_task),
+                ("异常记录", issues),
+                ("养成计划待办", training_todos or []),
+                ("提醒", reminders or []),
+            ],
+        )
     )
 
 

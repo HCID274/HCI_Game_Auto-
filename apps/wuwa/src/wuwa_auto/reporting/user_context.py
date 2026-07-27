@@ -1,8 +1,9 @@
 """Load lower-priority, user-editable Markdown reporting context."""
 
 import logging
-import re
 from pathlib import Path
+
+from game_automation_core.reporting.context import read_markdown
 
 from wuwa_auto.settings import USER_CONTEXT_DIR
 
@@ -13,14 +14,7 @@ log = logging.getLogger(__name__)
 
 
 def _read_markdown(path: Path) -> str:
-    if not path.is_file():
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.warning("user context cannot be loaded from %s: %s", path, exc)
-        return ""
-    return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
+    return read_markdown(path, logger=log)
 
 
 def load_reporting_context() -> dict[str, str]:

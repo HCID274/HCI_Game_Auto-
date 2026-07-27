@@ -1,6 +1,5 @@
 """Wait for the M7A run boundary, summarize it, and send one Feishu card."""
 
-import json
 import logging
 import time
 from dataclasses import asdict
@@ -8,6 +7,8 @@ from datetime import datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
 from typing import Callable
+
+from game_automation_core.reporting.archive import write_json_archive
 
 from starrail_auto.integrations.feishu import send_starrail_report_card
 from starrail_auto.reporting.models import RunReport
@@ -83,10 +84,7 @@ def _archive_report(
         "facts": report.to_prompt_dict(),
         "narrative": asdict(narrative),
     }
-    archive_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json_archive(archive_path, payload)
     log.info("report evidence archived: %s", archive_path)
 
 

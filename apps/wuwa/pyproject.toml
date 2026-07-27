@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "鸣潮日常自动化（UU 加速 + OK-WW + 日志验收 + AI 汇报）"
 requires-python = ">=3.12"
 dependencies = [
+    "hci-game-automation-core",
     "openai>=2.48.0",
     "opencv-python>=4.9",
     "pillow>=12.2.0",
@@ -11,6 +12,9 @@ dependencies = [
     "pyautogui>=0.9",
     "python-dotenv>=1.2.2",
 ]
+
+[tool.uv.sources]
+hci-game-automation-core = { workspace = true }
 
 [project.scripts]
 wuwa-auto = "wuwa_auto.cli:main"

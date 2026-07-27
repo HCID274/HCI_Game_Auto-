@@ -1,0 +1,9 @@
+[tool.uv.workspace]
+members = [
+    "apps/starrail",
+    "apps/wuwa",
+    "packages/game-automation-core",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
