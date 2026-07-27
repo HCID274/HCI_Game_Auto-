@@ -32,7 +32,7 @@
         Daily = @{
             Name = 'Game_Daily_0530'
             At = '05:30'
-            ExecutionLimitHours = 8
+            ExecutionLimitHours = 3
             Description = '05:30 Star Rail -> safe cleanup -> Wuthering Waves daily chain'
         }
         WeeklyGarden = @{
