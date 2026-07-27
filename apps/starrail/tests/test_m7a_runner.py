@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from starrail_auto.m7a.config import EXIT_OK
 from starrail_auto.m7a.environment import is_game_network_ready, wait_for_game_ready
-from starrail_auto.m7a.logs import daily_run_outcome, stage_for_exit_code
+from starrail_auto.m7a.logs import daily_run_outcome, main_run_outcome, stage_for_exit_code
 from starrail_auto.m7a.models import M7ALogCheckpoint
 from starrail_auto.m7a.watchdog import hard_timeout_for_task, watch
 
@@ -52,10 +52,26 @@ class MainRunPolicyTests(unittest.TestCase):
         ):
             self.assertEqual(daily_run_outcome(checkpoint), "completed")
 
-    def test_main_completion_exits_watchdog_without_touching_process(self) -> None:
+    def test_daily_completion_does_not_resolve_main_before_stop_marker(self) -> None:
         checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)
         with patch(
-            "starrail_auto.m7a.watchdog.daily_run_outcome",
+            "starrail_auto.m7a.logs.read_log_since",
+            return_value="2026-07-17 | INFO | 每日实训已完成",
+        ):
+            self.assertIsNone(main_run_outcome(checkpoint))
+
+    def test_daily_completion_resolves_main_at_stop_marker(self) -> None:
+        checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)
+        with patch(
+            "starrail_auto.m7a.logs.read_log_since",
+            return_value="每日实训已完成\n停止运行",
+        ):
+            self.assertEqual(main_run_outcome(checkpoint), "completed")
+
+    def test_main_stop_marker_exits_watchdog_without_touching_process(self) -> None:
+        checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)
+        with patch(
+            "starrail_auto.m7a.watchdog.main_run_outcome",
             return_value="completed",
         ), patch(
             "starrail_auto.m7a.watchdog.poll_process"
@@ -65,7 +81,7 @@ class MainRunPolicyTests(unittest.TestCase):
                     object(),
                     None,
                     checkpoint=checkpoint,
-                    stop_when_daily_resolved=True,
+                    stop_when_main_resolved=True,
                 ),
                 EXIT_OK,
             )

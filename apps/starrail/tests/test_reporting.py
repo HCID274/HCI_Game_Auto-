@@ -2,7 +2,7 @@
 
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,12 +15,7 @@ from starrail_auto.reporting.prompting.composer import (
     load_system_sections,
 )
 from starrail_auto.reporting.reminders import format_active_reminders
-from starrail_auto.reporting.service import (
-    _title_for,
-    report_cutoff,
-    report_main_run,
-    wait_for_report_boundary,
-)
+from starrail_auto.reporting.service import _title_for, report_main_run
 from starrail_auto.reporting.summarizer import (
     AISummaryError,
     _build_ai_input,
@@ -644,32 +639,7 @@ class FallbackNarrativeTests(unittest.TestCase):
         self.assertTrue(title.startswith("❌️ 星铁失败"))
         self.assertEqual(template, "red")
 
-class ReportBoundaryTests(unittest.TestCase):
-    def test_scheduled_run_uses_same_day_eight_oclock(self) -> None:
-        started = datetime(2026, 7, 25, 6, 0)
-        self.assertEqual(report_cutoff(started), datetime(2026, 7, 25, 8, 0))
-
-    def test_manual_run_after_eight_gets_two_hours(self) -> None:
-        started = datetime(2026, 7, 25, 13, 30)
-        self.assertEqual(report_cutoff(started), started + timedelta(hours=2))
-
-    def test_stop_marker_finishes_wait_without_reaching_cutoff(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "run.log"
-            path.write_text("停止运行", encoding="utf-8")
-            now = datetime(2026, 7, 25, 6, 10)
-            content, cutoff_reached, report_time = wait_for_report_boundary(
-                path,
-                0,
-                started_at=datetime(2026, 7, 25, 6, 0),
-                now_fn=lambda: now,
-                sleep_fn=lambda _seconds: None,
-            )
-
-        self.assertIn("停止运行", content)
-        self.assertFalse(cutoff_reached)
-        self.assertEqual(report_time, now)
-
+class ReportServiceTests(unittest.TestCase):
     def test_completed_log_sends_one_final_card_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "2026-07-25.log"
@@ -692,7 +662,6 @@ class ReportBoundaryTests(unittest.TestCase):
                 report_main_run(
                     log_path=path,
                     offset=0,
-                    started_at=datetime(2026, 7, 25, 6, 0),
                     exit_code=0,
                     stage="",
                     retries=0,

@@ -65,7 +65,7 @@ def run_m7a(task: str, timeout: int, *, uu_retries: int = 0) -> RunResult:
         target,
         hard_timeout,
         checkpoint=checkpoint,
-        stop_when_daily_resolved=(task == "main"),
+        stop_when_main_resolved=(task == "main"),
     )
     if exit_code == EXIT_OK and task == "main":
         if daily_run_outcome(checkpoint) != "completed" and not wait_for_daily_completion(checkpoint):

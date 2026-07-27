@@ -64,14 +64,12 @@ def _run(task: str, timeout: int) -> RunResult:
 
 def execute_task(task: str, timeout: int | None = None) -> int:
     _setup_logging()
-    started_at = datetime.now()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
     if task == "main":
         try:
             report_main_run(
                 log_path=result.report_log_path,
                 offset=result.report_log_offset,
-                started_at=started_at,
                 exit_code=result.exit_code,
                 stage=result.stage,
                 retries=result.retries,

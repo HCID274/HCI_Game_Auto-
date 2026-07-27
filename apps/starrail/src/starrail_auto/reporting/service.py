@@ -1,23 +1,16 @@
-"""Wait for the M7A run boundary, summarize it, and send one Feishu card."""
+"""Summarize one completed M7A run and send one Feishu card."""
 
 import logging
-import time
 from dataclasses import asdict
-from datetime import datetime, timedelta
-from datetime import time as clock_time
+from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 from game_automation_core.reporting.archive import write_json_archive
 
 from starrail_auto.integrations.feishu import send_starrail_report_card
 from starrail_auto.m7a.power_plan import load_power_plan_remaining
 from starrail_auto.reporting.models import RunReport
-from starrail_auto.reporting.parser import (
-    DAILY_INCOMPLETE_MARKER,
-    RUN_STOP_MARKER,
-    parse_m7a_run,
-)
+from starrail_auto.reporting.parser import parse_m7a_run
 from starrail_auto.reporting.reminders import format_active_reminders
 from starrail_auto.reporting.summarizer import summarize_report
 from starrail_auto.reporting.training_plan import reconcile_training_plan
@@ -25,9 +18,6 @@ from starrail_auto.reporting.user_context import load_reporting_context
 from starrail_auto.settings import REPORTS_DIR
 
 REPORT_ARCHIVE_DIR = REPORTS_DIR
-REPORT_POLL_SECONDS = 5
-DAILY_CUTOFF = clock_time(hour=8)
-MANUAL_RUN_WINDOW = timedelta(hours=2)
 
 log = logging.getLogger(__name__)
 
@@ -39,34 +29,6 @@ def read_log_since(path: Path, offset: int) -> str:
         current_size = path.stat().st_size
         handle.seek(offset if current_size >= offset else 0)
         return handle.read().decode("utf-8", errors="replace")
-
-
-def report_cutoff(started_at: datetime) -> datetime:
-    """Use 08:00 for the scheduled run and two hours for later manual reruns."""
-    scheduled_cutoff = datetime.combine(started_at.date(), DAILY_CUTOFF)
-    if started_at < scheduled_cutoff:
-        return scheduled_cutoff
-    return started_at + MANUAL_RUN_WINDOW
-
-
-def wait_for_report_boundary(
-    path: Path,
-    offset: int,
-    *,
-    started_at: datetime,
-    now_fn: Callable[[], datetime] = datetime.now,
-    sleep_fn: Callable[[float], None] = time.sleep,
-) -> tuple[str, bool, datetime]:
-    cutoff = report_cutoff(started_at)
-    while True:
-        content = read_log_since(path, offset)
-        if RUN_STOP_MARKER in content:
-            return content, False, now_fn()
-
-        now = now_fn()
-        if now >= cutoff:
-            return content, True, now
-        sleep_fn(min(REPORT_POLL_SECONDS, max(0.0, (cutoff - now).total_seconds())))
 
 
 def _archive_report(
@@ -102,7 +64,6 @@ def report_main_run(
     *,
     log_path: Path | None,
     offset: int,
-    started_at: datetime,
     exit_code: int,
     stage: str,
     retries: int,
@@ -110,20 +71,10 @@ def report_main_run(
     """Send exactly one final main-run report without changing the run result."""
     preferences = load_reporting_context()
     content = ""
-    cutoff_reached = False
     report_time = datetime.now()
 
     if log_path is not None:
-        initial_content = read_log_since(log_path, offset)
-        should_wait_for_m7a = exit_code == 0 or DAILY_INCOMPLETE_MARKER in initial_content
-        if should_wait_for_m7a:
-            content, cutoff_reached, report_time = wait_for_report_boundary(
-                log_path,
-                offset,
-                started_at=started_at,
-            )
-        else:
-            content = initial_content
+        content = read_log_since(log_path, offset)
 
     report = parse_m7a_run(
         content,
@@ -139,11 +90,6 @@ def report_main_run(
         completed_at=report_time,
     )
     report.custom_context["training_plan"] = training_plan.to_context()
-    if cutoff_reached and not report.stopped_normally and report.overall_status == "completed":
-        # The daily objective is complete, but a later M7A task is still active.
-        if report.current_reason.startswith("日志仍在更新"):
-            report.overall_status = "in_progress"
-
     narrative, ai_used = summarize_report(report)
     title, template = _title_for(report, report_time)
     reminders = format_active_reminders(report_time.date())
@@ -159,10 +105,9 @@ def report_main_run(
         reminders=reminders,
     )
     log.info(
-        "final report handled: sent=%s ai_used=%s cutoff=%s status=%s",
+        "final report handled: sent=%s ai_used=%s status=%s",
         sent,
         ai_used,
-        cutoff_reached,
         report.overall_status,
     )
     if log_path is not None:

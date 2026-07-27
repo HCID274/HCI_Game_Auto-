@@ -25,8 +25,8 @@ from starrail_auto.m7a.config import (
 )
 from starrail_auto.m7a.logs import (
     capture_failure_evidence,
-    daily_run_outcome,
     get_latest_m7a_log,
+    main_run_outcome,
 )
 from starrail_auto.m7a.models import M7ALogCheckpoint
 
@@ -88,13 +88,13 @@ def watch(
     hard_timeout: int | None,
     *,
     checkpoint: M7ALogCheckpoint | None = None,
-    stop_when_daily_resolved: bool = False,
+    stop_when_main_resolved: bool = False,
 ) -> int:
     start = time.monotonic()
     cpu_idle_since: float | None = None
     while True:
-        if stop_when_daily_resolved and checkpoint is not None:
-            outcome = daily_run_outcome(checkpoint)
+        if stop_when_main_resolved and checkpoint is not None:
+            outcome = main_run_outcome(checkpoint)
             if outcome == "completed":
                 return EXIT_OK
             if outcome == "incomplete":
@@ -130,4 +130,4 @@ def watch(
                 stop_assistant_for_evidence(proc)
                 return EXIT_WATCHDOG_LOG_STALLED
 
-        time.sleep(DAILY_RESULT_POLL_INTERVAL if stop_when_daily_resolved else WATCHDOG_INTERVAL)
+        time.sleep(DAILY_RESULT_POLL_INTERVAL if stop_when_main_resolved else WATCHDOG_INTERVAL)

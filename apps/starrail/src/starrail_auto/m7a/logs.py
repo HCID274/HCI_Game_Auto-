@@ -22,6 +22,7 @@ from starrail_auto.m7a.config import (
     M7A_DAILY_INCOMPLETE_MARKER,
     M7A_DAILY_SCORE_PATTERN,
     M7A_LOG_DIR,
+    M7A_RUN_STOP_MARKER,
 )
 from starrail_auto.m7a.models import M7ALogCheckpoint
 
@@ -72,6 +73,18 @@ def daily_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
     if M7A_DAILY_COMPLETION_MARKER in content:
         return "completed"
     if M7A_DAILY_INCOMPLETE_MARKER in content:
+        return "incomplete"
+    return None
+
+
+def main_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
+    """Resolve main only after failure or M7A's own final stop boundary."""
+    content = read_log_since(checkpoint)
+    if M7A_DAILY_COMPLETION_MARKER in content:
+        return "completed" if M7A_RUN_STOP_MARKER in content else None
+    if M7A_DAILY_INCOMPLETE_MARKER in content:
+        return "incomplete"
+    if M7A_RUN_STOP_MARKER in content:
         return "incomplete"
     return None
 
