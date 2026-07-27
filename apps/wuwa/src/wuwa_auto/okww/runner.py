@@ -9,10 +9,15 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import psutil
 
-from wuwa_auto.okww.config import validate_daily_configuration
+from wuwa_auto.okww.config import (
+    validate_daily_configuration,
+    validate_farm_echo_configuration,
+    validate_weekly_garden_configuration,
+)
 from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
     OK_ENTRYPOINT,
@@ -119,13 +124,27 @@ def stop_wuthering_game() -> int:
     return 0 if stopped else 1
 
 
-def preflight_daily_task() -> dict[str, object]:
-    facts = validate_daily_configuration()
+def _preflight_task(
+    validate_configuration: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    facts = validate_configuration()
     running = _running_ok_processes()
     if running:
         processes = ", ".join(f"{p.name()}({p.pid})" for p in running)
         raise RuntimeError(f"OK-WW is already running: {processes}")
     return facts
+
+
+def preflight_daily_task() -> dict[str, object]:
+    return _preflight_task(validate_daily_configuration)
+
+
+def preflight_farm_echo_task() -> dict[str, object]:
+    return _preflight_task(validate_farm_echo_configuration)
+
+
+def preflight_weekly_garden_task() -> dict[str, object]:
+    return _preflight_task(validate_weekly_garden_configuration)
 
 
 def _write_result(result: OkRunResult, run_dir: Path) -> None:
@@ -175,10 +194,11 @@ def _run_task(
     task_index: int,
     task_label: str,
     success_marker: str,
+    preflight: Callable[[], dict[str, object]],
     run_suffix: str = "",
 ) -> OkRunResult:
     require_admin()
-    facts = preflight_daily_task()
+    facts = preflight()
     facts["workflow_task"] = task_label
     started = datetime.now().astimezone()
     run_id = started.strftime("%Y%m%d_%H%M%S") + run_suffix
@@ -296,6 +316,7 @@ def run_daily_task() -> OkRunResult:
         task_index=1,
         task_label="daily",
         success_marker=SUCCESS_MARKER,
+        preflight=preflight_daily_task,
     )
 
 
@@ -304,6 +325,7 @@ def run_farm_echo_task() -> OkRunResult:
         task_index=3,
         task_label="farm_echo",
         success_marker="Successfully Executed Task, Exiting Game and App!",
+        preflight=preflight_farm_echo_task,
         run_suffix="_farm_echo",
     )
 
@@ -313,5 +335,6 @@ def run_weekly_garden_task() -> OkRunResult:
         task_index=12,
         task_label="weekly_garden",
         success_marker="Successfully Executed Task, Exiting Game and App!",
+        preflight=preflight_weekly_garden_task,
         run_suffix="_weekly_garden",
     )

@@ -35,6 +35,7 @@ OK_LOG_FILE = OK_WORKING_DIR / "logs" / "ok-script.log"
 OK_CONFIG_DIR = OK_WORKING_DIR / "configs"
 OK_DAILY_CONFIG = OK_CONFIG_DIR / "DailyTask.json"
 OK_FARM_ECHO_CONFIG = OK_CONFIG_DIR / "FarmEchoTask.json"
+OK_GARDEN_CONFIG = OK_CONFIG_DIR / "GardenTask.json"
 OK_NIGHTMARE_CONFIG = OK_CONFIG_DIR / "NightmareNestTask.json"
 
 

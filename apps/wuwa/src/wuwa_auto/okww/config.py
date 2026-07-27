@@ -1,4 +1,4 @@
-"""Validate the installed OK-WW configuration used by the daily workflow."""
+"""Validate only the installed OK-WW configuration required by each workflow."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from wuwa_auto.settings import (
     OK_DAILY_CONFIG,
     OK_ENTRYPOINT,
     OK_FARM_ECHO_CONFIG,
+    OK_GARDEN_CONFIG,
     OK_LOG_FILE,
     OK_NIGHTMARE_CONFIG,
     OK_PYTHONW_EXE,
@@ -34,7 +35,7 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_daily_configuration() -> dict[str, Any]:
+def _validate_common_paths() -> None:
     for path in (
         OK_WW_EXE,
         OK_PYTHONW_EXE,
@@ -45,13 +46,9 @@ def validate_daily_configuration() -> dict[str, Any]:
         if not path.exists():
             raise RuntimeError(f"required OK-WW path is missing: {path}")
 
-    daily = _load_json(OK_DAILY_CONFIG)
-    farm_echo = _load_json(OK_FARM_ECHO_CONFIG)
-    nightmare = _load_json(OK_NIGHTMARE_CONFIG)
 
-    additional = daily.get("Additional Tasks to Run After Daily Task") or []
-    if TELEPORT_AND_FARM_4C not in additional:
-        raise RuntimeError(f"DailyTask must enable {TELEPORT_AND_FARM_4C!r}")
+def _load_farm_echo_facts() -> dict[str, Any]:
+    farm_echo = _load_json(OK_FARM_ECHO_CONFIG)
     if farm_echo.get("Teleport to Boss", "No") == "No":
         raise RuntimeError("FarmEchoTask must enable 'Teleport to Boss'")
 
@@ -62,15 +59,7 @@ def validate_daily_configuration() -> dict[str, Any]:
             f"{EXPECTED_REPEAT_FARM_COUNT}; actual={repeat_count!r}"
         )
 
-    if AUTO_FARM_NIGHTMARE in additional and not nightmare.get("Which to Farm"):
-        raise RuntimeError(
-            "NightmareNestTask needs at least one 'Which to Farm' selection"
-        )
-
     return {
-        "daily_farm": daily.get("Which to Farm"),
-        "daily_farm_index": daily.get("Which Tacet Suppression to Farm"),
-        "additional_tasks": list(additional),
         "teleport_to_boss": farm_echo.get("Teleport to Boss"),
         "boss_challenge_index": farm_echo.get(
             "Which Boss Challenge to Teleport"
@@ -78,5 +67,40 @@ def validate_daily_configuration() -> dict[str, Any]:
         "boss_level": farm_echo.get("Boss Level"),
         "boss": farm_echo.get("Boss"),
         "repeat_farm_count": repeat_count,
-        "nightmare_targets": list(nightmare.get("Which to Farm") or []),
+    }
+
+
+def validate_farm_echo_configuration() -> dict[str, Any]:
+    _validate_common_paths()
+    return _load_farm_echo_facts()
+
+
+def validate_weekly_garden_configuration() -> dict[str, Any]:
+    _validate_common_paths()
+    garden = _load_json(OK_GARDEN_CONFIG)
+    return {"garden_config": garden}
+
+
+def validate_daily_configuration() -> dict[str, Any]:
+    _validate_common_paths()
+    daily = _load_json(OK_DAILY_CONFIG)
+    additional = daily.get("Additional Tasks to Run After Daily Task") or []
+    if TELEPORT_AND_FARM_4C not in additional:
+        raise RuntimeError(f"DailyTask must enable {TELEPORT_AND_FARM_4C!r}")
+
+    nightmare_targets: list[Any] = []
+    if AUTO_FARM_NIGHTMARE in additional:
+        nightmare = _load_json(OK_NIGHTMARE_CONFIG)
+        nightmare_targets = list(nightmare.get("Which to Farm") or [])
+        if not nightmare_targets:
+            raise RuntimeError(
+                "NightmareNestTask needs at least one 'Which to Farm' selection"
+            )
+
+    return {
+        "daily_farm": daily.get("Which to Farm"),
+        "daily_farm_index": daily.get("Which Tacet Suppression to Farm"),
+        "additional_tasks": list(additional),
+        **_load_farm_echo_facts(),
+        "nightmare_targets": nightmare_targets,
     }
