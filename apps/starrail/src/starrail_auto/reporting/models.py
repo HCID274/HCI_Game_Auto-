@@ -8,6 +8,10 @@ from typing import Any
 @dataclass
 class StaminaRun:
     name: str
+    source: str = "plan"
+    activity_name: str = ""
+    activity_start_remaining: int | None = None
+    activity_remaining_count: int | None = None
     plan_index: int | None = None
     plan_total: int | None = None
     planned_count: int | None = None

@@ -11,6 +11,7 @@ M7A_LAUNCHER = Path(
 M7A_LOG_DIR = Path(
     r"D:\2_Software\4_Games\StarRail\Auto\March7thAssistant_full\logs"
 )
+M7A_CONFIG_PATH = M7A_LAUNCHER.parent / "config.yaml"
 DEBUG_DIR = EVIDENCE_DIR
 
 GRACE_PERIOD = 60

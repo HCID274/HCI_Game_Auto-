@@ -34,6 +34,10 @@ PLAN_REMAINING_PATTERN = re.compile(
 PLAN_SKIPPED_PATTERN = re.compile(r"^无法执行: (?P<name>.+?)，(?P<reason>.+)$")
 TRAINING_TARGET_PATTERN = re.compile(r"^培养目标(?P<character>.+?)的待刷副本:$")
 DIRECT_REWARD_PATTERN = re.compile(r"^领取(?P<reward>.+?奖励)完成$")
+ACTIVITY_REMAINING_PATTERN = re.compile(
+    r"^(?P<activity>位面分裂|异器盈界|花藏繁生)剩余次数[：:]"
+    r"(?P<count>\d+)$"
+)
 
 DAILY_COMPLETED_MARKER = "每日实训已完成"
 DAILY_INCOMPLETE_MARKER = "每日实训未完成"
@@ -61,6 +65,21 @@ def _append_daily_event(report: RunReport, event: RunEvent) -> None:
 
 def _normalized_task_name(value: str) -> str:
     return re.sub(r"[\s·\-—_]", "", value).casefold()
+
+
+def _plan_remaining_for(
+    task_name: str,
+    power_plan_remaining: dict[str, int],
+) -> int | None:
+    target = _normalized_task_name(task_name)
+    return next(
+        (
+            count
+            for name, count in power_plan_remaining.items()
+            if _normalized_task_name(name) == target
+        ),
+        None,
+    )
 
 
 def _character_context(task_name: str, preferences: dict[str, Any]) -> str:
@@ -128,13 +147,19 @@ def parse_m7a_run(
     run_stage: str = "",
     retries: int = 0,
     force_failed: bool = False,
+    power_plan_remaining: dict[str, int] | None = None,
 ) -> RunReport:
     """Parse only the content after the run's recorded byte checkpoint."""
     preferences = preferences or {}
+    power_plan_remaining = power_plan_remaining or {}
     report = RunReport(run_stage=run_stage, retries=retries, custom_context=preferences)
     events: list[tuple[datetime, str, str]] = []
     active_section = ""
     active_plan: StaminaRun | None = None
+    active_activity: StaminaRun | None = None
+    pending_activity_name = ""
+    pending_activity_remaining: int | None = None
+    pending_activity_batch_count = 0
     capturing_training_dungeons = False
     last_plan_constraint = ""
 
@@ -154,10 +179,31 @@ def parse_m7a_run(
         if separator_match:
             label = separator_match.group("label").strip()
             farm_match = FARM_PATTERN.search(label)
-            if farm_match and active_plan is not None:
-                active_plan.name = farm_match.group("name").strip()
-                active_plan.rounds = int(farm_match.group("rounds"))
-                active_plan.rewards_per_round = int(farm_match.group("rewards"))
+            if farm_match:
+                farm_name = farm_match.group("name").strip()
+                farm_rounds = int(farm_match.group("rounds"))
+                farm_rewards = int(farm_match.group("rewards"))
+                if active_plan is not None:
+                    active_plan.name = farm_name
+                    active_plan.rounds = farm_rounds
+                    active_plan.rewards_per_round = farm_rewards
+                elif pending_activity_name and pending_activity_remaining is not None:
+                    if active_activity is None or active_activity.name != farm_name:
+                        active_activity = StaminaRun(
+                            name=farm_name,
+                            source="activity",
+                            activity_name=pending_activity_name,
+                            activity_start_remaining=pending_activity_remaining,
+                            activity_remaining_count=pending_activity_remaining,
+                            remaining_plan_count=_plan_remaining_for(
+                                farm_name, power_plan_remaining
+                            ),
+                        )
+                        active_activity.character_context = _character_context(
+                            farm_name, preferences
+                        )
+                        report.stamina_runs.append(active_activity)
+                    pending_activity_batch_count = farm_rounds * farm_rewards
             if label.endswith("奖励完成") and label != "奖励完成":
                 if report.daily_status == "completed":
                     _append_unique(report.rewards_completed, label)
@@ -185,6 +231,11 @@ def parse_m7a_run(
                 _append_unique(report.rewards_completed, reward)
             else:
                 _append_daily_event(report, RunEvent(kind="reward", label=reward))
+
+        activity_match = ACTIVITY_REMAINING_PATTERN.match(message)
+        if activity_match:
+            pending_activity_name = activity_match.group("activity")
+            pending_activity_remaining = int(activity_match.group("count"))
 
         target_match = TRAINING_TARGET_PATTERN.match(message)
         if target_match:
@@ -246,6 +297,8 @@ def parse_m7a_run(
         plan_match = PLAN_PATTERN.match(message)
         if plan_match:
             last_plan_constraint = ""
+            active_activity = None
+            pending_activity_batch_count = 0
             active_plan = StaminaRun(
                 name=plan_match.group("name").strip(),
                 plan_index=int(plan_match.group("index")),
@@ -272,6 +325,26 @@ def parse_m7a_run(
                     stamina_index=report.stamina_runs.index(active_plan),
                 ),
             )
+        elif (
+            message == "副本任务完成"
+            and active_activity is not None
+            and pending_activity_batch_count > 0
+        ):
+            active_activity.completed_instances += pending_activity_batch_count
+            active_activity.activity_remaining_count = max(
+                0,
+                (active_activity.activity_start_remaining or 0)
+                - active_activity.completed_instances,
+            )
+            active_activity.status = "completed"
+            _append_daily_event(
+                report,
+                RunEvent(
+                    kind="stamina",
+                    stamina_index=report.stamina_runs.index(active_activity),
+                ),
+            )
+            pending_activity_batch_count = 0
 
         if active_plan is not None and (
             re.match(r"^开拓力 < \d+$", message)

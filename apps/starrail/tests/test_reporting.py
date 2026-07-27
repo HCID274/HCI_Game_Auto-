@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.m7a.power_plan import load_power_plan_remaining
 from starrail_auto.reporting.models import StaminaRun
 from starrail_auto.reporting.parser import parse_m7a_run
 from starrail_auto.reporting.prompting.composer import (
@@ -20,7 +21,12 @@ from starrail_auto.reporting.service import (
     report_main_run,
     wait_for_report_boundary,
 )
-from starrail_auto.reporting.summarizer import _build_ai_input, build_fallback_narrative
+from starrail_auto.reporting.summarizer import (
+    AISummaryError,
+    _build_ai_input,
+    _validate_stamina_wording,
+    build_fallback_narrative,
+)
 from starrail_auto.reporting.training_plan import (
     load_training_plan,
     reconcile_training_plan,
@@ -135,6 +141,24 @@ class TrainingContextTests(unittest.TestCase):
 
 
 class TrainingPlanTests(unittest.TestCase):
+    def test_m7a_power_plan_snapshot_is_loaded(self) -> None:
+        content = """\
+power_plan:
+  - [饰品提取, 鎏金追忆, 25]
+  - [拟造花萼（赤）, 海原电视塔, 29]
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(content, encoding="utf-8")
+            remaining = load_power_plan_remaining(path)
+        self.assertEqual(
+            remaining,
+            {
+                "饰品提取 - 鎏金追忆": 25,
+                "拟造花萼（赤） - 海原电视塔": 29,
+            },
+        )
+
     PLAN = """\
 # 星铁养成计划
 
@@ -229,6 +253,62 @@ class ReminderTests(unittest.TestCase):
 
 
 class LogParserTests(unittest.TestCase):
+    def test_activity_priority_keeps_activity_and_own_plan_counters(self) -> None:
+        content = """\
+2026-07-27 10:47:48,707 | INFO | 位面分裂剩余次数：12
+2026-07-27 10:48:02,784 | INFO | 开拓力: 293/300
+---------------------------------- 开始刷饰品提取 - 鎏金追忆，总计1轮，每轮包含6次 ----------------------------------
+2026-07-27 10:51:09,352 | INFO | 副本任务完成
+---------------------------------- 开始刷饰品提取 - 鎏金追忆，总计1轮，每轮包含1次 ----------------------------------
+2026-07-27 10:52:28,569 | INFO | 副本任务完成
+|                                                 开始执行体力计划                                                  |
+2026-07-27 10:52:28,570 | INFO | 执行体力计划 [1/7]: 拟造花萼（赤） - 海原电视塔, 计划次数: 30
+2026-07-27 10:52:32,770 | INFO | 开拓力: 13/300
+------------------------------ 开始刷拟造花萼（赤） - 海原电视塔，总计1轮，每轮包含1次 ------------------------------
+2026-07-27 10:53:30,503 | INFO | 副本任务完成
+2026-07-27 10:53:30,503 | INFO | 体力计划剩余: 拟造花萼（赤） - 海原电视塔, 剩余次数: 29
+2026-07-27 10:54:38,753 | INFO | 每日实训已完成
+|                                                     停止运行                                                      |
+"""
+        report = parse_m7a_run(
+            content,
+            now=datetime(2026, 7, 27, 10, 55),
+            preferences={
+                "character_goals": [
+                    {
+                        "character": "远坂凛",
+                        "goal": "行迹材料",
+                        "keywords": ["海原电视塔"],
+                    }
+                ]
+            },
+            power_plan_remaining={"饰品提取 - 鎏金追忆": 25},
+        )
+        narrative = build_fallback_narrative(report)
+
+        self.assertEqual(len(report.stamina_runs), 2)
+        activity = report.stamina_runs[0]
+        self.assertEqual(activity.source, "activity")
+        self.assertEqual(activity.completed_instances, 7)
+        self.assertEqual(activity.remaining_plan_count, 25)
+        self.assertEqual(activity.activity_remaining_count, 5)
+        self.assertEqual(
+            narrative.daily.splitlines()[:2],
+            [
+                "1. 位面分裂：饰品提取·鎏金追忆 7次，剩余计划25次，活动双倍剩余5次",
+                "2. 拟造花萼（赤）·海原电视塔（远坂凛 行迹材料）1次，剩余计划29次",
+            ],
+        )
+        ai_events = _build_ai_input(report)["ordered_daily_events"]
+        self.assertEqual(ai_events[0]["activity_remaining_count"], 5)
+        self.assertEqual(ai_events[0]["remaining_plan_count"], 25)
+
+        with self.assertRaises(AISummaryError):
+            _validate_stamina_wording(
+                report,
+                type(narrative)(daily="1. 饰品提取·鎏金追忆 7次"),
+            )
+
     def test_training_plan_mapping_ignores_dungeon_separator_style(self) -> None:
         report = parse_m7a_run(
             "2026-07-26 06:00:00,000 | INFO | 执行体力计划 [1/1]: "

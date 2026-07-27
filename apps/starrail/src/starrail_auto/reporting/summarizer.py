@@ -44,8 +44,13 @@ def _format_stamina_run(item: StaminaRun) -> str:
     if item.status == "skipped":
         return f"{name}：未执行（{item.reason or '条件不足'}）"
 
+    if item.source == "activity" and item.activity_name:
+        name = f"{item.activity_name}：{name}"
+
     details: list[str] = []
-    if item.rounds == 1 and item.rewards_per_round is not None:
+    if item.source == "activity" and item.completed_instances:
+        details.append(f"{item.completed_instances}次")
+    elif item.rounds == 1 and item.rewards_per_round is not None:
         details.append(f"{item.rewards_per_round}次")
     elif item.rounds is not None and item.rewards_per_round is not None:
         details.append(f"{item.rounds}轮×{item.rewards_per_round}次")
@@ -57,6 +62,8 @@ def _format_stamina_run(item: StaminaRun) -> str:
         details.append(f"剩余计划{item.remaining_plan_count}次")
     elif _plan_fully_completed(item):
         details.append("已完成")
+    if item.source == "activity" and item.activity_remaining_count is not None:
+        details.append(f"活动双倍剩余{item.activity_remaining_count}次")
 
     text = name
     if details:
@@ -202,6 +209,11 @@ def _parse_narrative_response(data: Any) -> NarrativeReport:
 def _stamina_fact(item: StaminaRun) -> dict[str, Any]:
     return {
         "name": item.name.replace(" - ", "·"),
+        "source": item.source,
+        "activity_name": item.activity_name,
+        "activity_start_remaining": item.activity_start_remaining,
+        "activity_remaining_count": item.activity_remaining_count,
+        "completed_instances": item.completed_instances,
         "rounds": item.rounds,
         "count_per_round": item.rewards_per_round,
         "remaining_plan_count": item.remaining_plan_count,
@@ -298,9 +310,43 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
     if not content:
         raise AISummaryError("DeepSeek returned empty content")
     try:
-        return _parse_narrative_response(json.loads(content))
+        narrative = _parse_narrative_response(json.loads(content))
     except json.JSONDecodeError as exc:
         raise AISummaryError(f"DeepSeek returned invalid JSON: {exc}") from exc
+    _validate_stamina_wording(report, narrative)
+    return narrative
+
+
+def _validate_stamina_wording(
+    report: RunReport,
+    narrative: NarrativeReport,
+) -> None:
+    """Reject AI wording that drops authoritative activity or plan counters."""
+    lines = narrative.daily.splitlines()
+    for event in report.daily_events:
+        if event.kind != "stamina" or event.stamina_index is None:
+            continue
+        if not 0 <= event.stamina_index < len(report.stamina_runs):
+            continue
+        item = report.stamina_runs[event.stamina_index]
+        name = item.name.replace(" - ", "·")
+        line = next((value for value in lines if name in value), "")
+        required: list[str] = []
+        if item.source == "activity":
+            if item.activity_name:
+                required.append(item.activity_name)
+            if item.completed_instances:
+                required.append(f"{item.completed_instances}次")
+            if item.activity_remaining_count is not None:
+                required.append(f"活动双倍剩余{item.activity_remaining_count}次")
+        if item.remaining_plan_count == 0:
+            required.append("已完成")
+        elif item.remaining_plan_count is not None:
+            required.append(f"剩余计划{item.remaining_plan_count}次")
+        if not line or any(token not in line for token in required):
+            raise AISummaryError(
+                f"DeepSeek wording dropped stamina facts for {name}: {required}"
+            )
 
 
 def summarize_report(report: RunReport) -> tuple[NarrativeReport, bool]:

@@ -11,6 +11,7 @@ from typing import Callable
 from game_automation_core.reporting.archive import write_json_archive
 
 from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.m7a.power_plan import load_power_plan_remaining
 from starrail_auto.reporting.models import RunReport
 from starrail_auto.reporting.parser import (
     DAILY_INCOMPLETE_MARKER,
@@ -131,6 +132,7 @@ def report_main_run(
         run_stage=stage,
         retries=retries,
         force_failed=(exit_code != 0),
+        power_plan_remaining=load_power_plan_remaining(),
     )
     training_plan = reconcile_training_plan(
         report.stamina_runs,
