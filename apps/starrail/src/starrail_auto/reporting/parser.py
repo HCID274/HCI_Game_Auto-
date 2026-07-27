@@ -31,13 +31,32 @@ INSTANCE_COMPLETED_PATTERN = re.compile(r"^第(?P<count>\d+)次副本完成$")
 PLAN_REMAINING_PATTERN = re.compile(
     r"^体力计划剩余: (?P<name>.+), 剩余次数: (?P<count>\d+)$"
 )
+PLAN_COMPLETED_PATTERN = re.compile(r"^体力计划已完成: (?P<name>.+)$")
 PLAN_SKIPPED_PATTERN = re.compile(r"^无法执行: (?P<name>.+?)，(?P<reason>.+)$")
 TRAINING_TARGET_PATTERN = re.compile(r"^培养目标(?P<character>.+?)的待刷副本:$")
 DIRECT_REWARD_PATTERN = re.compile(r"^领取(?P<reward>.+?奖励)完成$")
+MAIL_REWARD_PATTERN = re.compile(r"^邮件奖励已领取$")
 ACTIVITY_REMAINING_PATTERN = re.compile(
     r"^(?P<activity>位面分裂|异器盈界|花藏繁生)剩余次数[：:]"
     r"(?P<count>\d+)$"
 )
+REDEMPTION_RESULT_PATTERN = re.compile(
+    r"^兑换码使用(?P<status>成功|失败): .+ \((?P<index>\d+)/(?P<total>\d+)\)$"
+)
+REDEMPTION_SUMMARY_PATTERN = re.compile(r"^成功使用了(?P<count>\d+)个兑换码:$")
+ECHO_OF_WAR_PATTERN = re.compile(
+    r"^历战余响本周可领取奖励次数[：:](?P<remaining>\d+)/(?P<total>\d+)$"
+)
+DIVERGENT_SCORE_PATTERN = re.compile(
+    r"^差分宇宙积分[：:]\s*(?P<score>\d+)\s*/\s*(?P<total>\d+)$"
+)
+DIVERGENT_DURATION_PATTERN = re.compile(
+    r"^本次差分宇宙用时[：:](?P<minutes>\d+) 分钟 (?P<seconds>\d+) 秒$"
+)
+DIVERGENT_COUNTS_PATTERN = re.compile(
+    r"^已记录差分宇宙次数[：:]今日 (?P<daily>\d+) 次，本周 (?P<weekly>\d+) 次$"
+)
+REDEMPTION_CODE_ONLY_PATTERN = re.compile(r"^[A-Za-z0-9]{8,24}$")
 
 DAILY_COMPLETED_MARKER = "每日实训已完成"
 DAILY_INCOMPLETE_MARKER = "每日实训未完成"
@@ -61,6 +80,27 @@ def _append_unique(items: list[str], value: str) -> None:
 def _append_daily_event(report: RunReport, event: RunEvent) -> None:
     if event not in report.daily_events:
         report.daily_events.append(event)
+
+
+def _replace_prefixed(items: list[str], prefix: str, value: str) -> None:
+    """Keep only the latest snapshot and place it at its actual event position."""
+    for index, item in enumerate(items):
+        if item.startswith(prefix):
+            items.pop(index)
+            break
+    items.append(value)
+
+
+def _in_power_plan_section(active_section: str) -> bool:
+    return active_section == "执行体力计划" or active_section.startswith("体力计划：")
+
+
+def _redact_sensitive_message(message: str) -> str:
+    return re.sub(
+        r"^(兑换码使用(?:成功|失败):)\s+.+?(\s+\(\d+/\d+\))$",
+        r"\1 [已隐藏]\2",
+        message,
+    )
 
 
 def _normalized_task_name(value: str) -> str:
@@ -157,11 +197,18 @@ def parse_m7a_run(
     active_section = ""
     active_plan: StaminaRun | None = None
     active_activity: StaminaRun | None = None
+    active_default_stamina: StaminaRun | None = None
     pending_activity_name = ""
     pending_activity_remaining: int | None = None
     pending_activity_batch_count = 0
     capturing_training_dungeons = False
     last_plan_constraint = ""
+    redemption_total = 0
+    redemption_failed = 0
+    capturing_redemption_codes = False
+    divergent_duration = ""
+    divergent_daily_count: int | None = None
+    divergent_weekly_count: int | None = None
 
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -170,6 +217,16 @@ def parse_m7a_run(
             label = section_match.group("label").strip()
             if label.startswith("开始") and label not in {"开始运行", "开始检测更新"}:
                 active_section = label.removeprefix("开始").strip()
+                if active_section != "执行体力计划":
+                    active_plan = None
+                if active_section != "检测活动":
+                    active_activity = None
+                    pending_activity_batch_count = 0
+                if active_section != "清体力":
+                    active_default_stamina = None
+                if active_section == "清体力":
+                    pending_activity_name = ""
+                    pending_activity_remaining = None
             elif label == RUN_STOP_MARKER:
                 report.stopped_normally = True
                 active_section = ""
@@ -183,11 +240,14 @@ def parse_m7a_run(
                 farm_name = farm_match.group("name").strip()
                 farm_rounds = int(farm_match.group("rounds"))
                 farm_rewards = int(farm_match.group("rewards"))
-                if active_plan is not None:
+                if _in_power_plan_section(active_section) and active_plan is not None:
                     active_plan.name = farm_name
                     active_plan.rounds = farm_rounds
                     active_plan.rewards_per_round = farm_rewards
-                elif pending_activity_name and pending_activity_remaining is not None:
+                elif (
+                    pending_activity_name
+                    and pending_activity_remaining is not None
+                ):
                     if active_activity is None or active_activity.name != farm_name:
                         active_activity = StaminaRun(
                             name=farm_name,
@@ -204,11 +264,17 @@ def parse_m7a_run(
                         )
                         report.stamina_runs.append(active_activity)
                     pending_activity_batch_count = farm_rounds * farm_rewards
-            if label.endswith("奖励完成") and label != "奖励完成":
-                if report.daily_status == "completed":
-                    _append_unique(report.rewards_completed, label)
-                else:
-                    _append_daily_event(report, RunEvent(kind="reward", label=label))
+                elif active_section == "清体力":
+                    active_default_stamina = StaminaRun(
+                        name=farm_name,
+                        source="default",
+                        rounds=farm_rounds,
+                        rewards_per_round=farm_rewards,
+                    )
+                    active_default_stamina.character_context = _character_context(
+                        farm_name, preferences
+                    )
+                    report.stamina_runs.append(active_default_stamina)
             continue
 
         log_match = LOG_LINE_PATTERN.match(line)
@@ -220,7 +286,11 @@ def parse_m7a_run(
             "%Y-%m-%d %H:%M:%S,%f",
         )
         level = log_match.group("level")
-        message = log_match.group("message").strip()
+        message = _redact_sensitive_message(log_match.group("message").strip())
+        if capturing_redemption_codes:
+            if REDEMPTION_CODE_ONLY_PATTERN.match(message):
+                continue
+            capturing_redemption_codes = False
         events.append((timestamp, level, message))
         report.last_log_at = timestamp
 
@@ -231,6 +301,69 @@ def parse_m7a_run(
                 _append_unique(report.rewards_completed, reward)
             else:
                 _append_daily_event(report, RunEvent(kind="reward", label=reward))
+
+        if MAIL_REWARD_PATTERN.match(message):
+            _append_unique(report.rewards_completed, "邮件奖励完成")
+
+        redemption_result = REDEMPTION_RESULT_PATTERN.match(message)
+        if redemption_result:
+            redemption_total = max(
+                redemption_total,
+                int(redemption_result.group("total")),
+            )
+            if redemption_result.group("status") == "失败":
+                redemption_failed += 1
+
+        redemption_summary = REDEMPTION_SUMMARY_PATTERN.match(message)
+        if redemption_summary:
+            success_count = int(redemption_summary.group("count"))
+            failed_count = max(redemption_failed, redemption_total - success_count)
+            text = f"兑换码：成功{success_count}个"
+            if failed_count:
+                text += f"，失败{failed_count}个"
+            _append_unique(report.other_tasks, text)
+            capturing_redemption_codes = True
+
+        echo_match = ECHO_OF_WAR_PATTERN.match(message)
+        if echo_match:
+            _append_unique(
+                report.other_tasks,
+                "历战余响：本周可领取奖励"
+                f"{echo_match.group('remaining')}/{echo_match.group('total')}（已检查）",
+            )
+
+        duration_match = DIVERGENT_DURATION_PATTERN.match(message)
+        if duration_match:
+            divergent_duration = (
+                f"{duration_match.group('minutes')}分{duration_match.group('seconds')}秒"
+            )
+
+        counts_match = DIVERGENT_COUNTS_PATTERN.match(message)
+        if counts_match:
+            divergent_daily_count = int(counts_match.group("daily"))
+            divergent_weekly_count = int(counts_match.group("weekly"))
+
+        if message == "差分宇宙已完成":
+            details = ["完成1次"]
+            if divergent_duration:
+                details.append(f"用时{divergent_duration}")
+            if divergent_daily_count is not None:
+                details.append(f"今日{divergent_daily_count}次")
+            if divergent_weekly_count is not None:
+                details.append(f"本周{divergent_weekly_count}次")
+            _append_unique(report.other_tasks, f"差分宇宙：{'，'.join(details)}")
+
+        if message == "模拟宇宙奖励已领取":
+            _append_unique(report.other_tasks, "领取模拟宇宙奖励")
+
+        divergent_score_match = DIVERGENT_SCORE_PATTERN.match(message)
+        if divergent_score_match:
+            _replace_prefixed(
+                report.other_tasks,
+                "差分宇宙积分 ",
+                "差分宇宙积分 "
+                f"{divergent_score_match.group('score')}/{divergent_score_match.group('total')}",
+            )
 
         activity_match = ACTIVITY_REMAINING_PATTERN.match(message)
         if activity_match:
@@ -281,6 +414,7 @@ def parse_m7a_run(
         if message == DAILY_COMPLETED_MARKER:
             report.daily_status = "completed"
             report.overall_status = "completed"
+            _append_unique(report.rewards_completed, "每日实训奖励完成")
         elif message == DAILY_INCOMPLETE_MARKER:
             report.daily_status = "failed"
             report.overall_status = "failed"
@@ -316,7 +450,11 @@ def parse_m7a_run(
                 int(completed_instance_match.group("count")),
             )
 
-        if message == "副本任务完成" and active_plan is not None:
+        if (
+            message == "副本任务完成"
+            and _in_power_plan_section(active_section)
+            and active_plan is not None
+        ):
             active_plan.status = "completed"
             _append_daily_event(
                 report,
@@ -345,6 +483,20 @@ def parse_m7a_run(
                 ),
             )
             pending_activity_batch_count = 0
+        elif (
+            message == "副本任务完成"
+            and active_section == "清体力"
+            and active_default_stamina is not None
+        ):
+            active_default_stamina.status = "completed"
+            _append_daily_event(
+                report,
+                RunEvent(
+                    kind="stamina",
+                    stamina_index=report.stamina_runs.index(active_default_stamina),
+                ),
+            )
+            active_default_stamina = None
 
         if active_plan is not None and (
             re.match(r"^开拓力 < \d+$", message)
@@ -365,6 +517,17 @@ def parse_m7a_run(
             )
             if matching:
                 matching.remaining_plan_count = int(remaining_match.group("count"))
+                matching.status = "completed"
+
+        plan_completed_match = PLAN_COMPLETED_PATTERN.match(message)
+        if plan_completed_match:
+            name = plan_completed_match.group("name").strip()
+            matching = next(
+                (item for item in reversed(report.stamina_runs) if item.name == name),
+                None,
+            )
+            if matching:
+                matching.remaining_plan_count = 0
                 matching.status = "completed"
 
         skipped_match = PLAN_SKIPPED_PATTERN.match(message)

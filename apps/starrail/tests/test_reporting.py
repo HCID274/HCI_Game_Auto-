@@ -24,6 +24,7 @@ from starrail_auto.reporting.service import (
 from starrail_auto.reporting.summarizer import (
     AISummaryError,
     _build_ai_input,
+    _validate_other_task_wording,
     _validate_stamina_wording,
     build_fallback_narrative,
 )
@@ -308,6 +309,16 @@ class LogParserTests(unittest.TestCase):
                 report,
                 type(narrative)(daily="1. 饰品提取·鎏金追忆 7次"),
             )
+        with self.assertRaises(AISummaryError):
+            _validate_stamina_wording(
+                report,
+                type(narrative)(
+                    daily=(
+                        "1. 位面分裂：饰品提取·鎏金追忆 7次，"
+                        "活动双倍剩余5次，剩余计划25次"
+                    )
+                ),
+            )
 
     def test_training_plan_mapping_ignores_dungeon_separator_style(self) -> None:
         report = parse_m7a_run(
@@ -428,6 +439,122 @@ class LogParserTests(unittest.TestCase):
 """
         report = parse_m7a_run(content, now=datetime(2026, 7, 25, 6, 7))
         self.assertEqual(report.stamina_runs[0].character_context, "")
+
+    def test_explicit_completed_plan_sets_authoritative_zero_remaining(self) -> None:
+        content = """\
+|                                                 开始执行体力计划                                                  |
+2026-07-22 06:03:00,000 | INFO | 执行体力计划 [1/1]: 拟造花萼（赤） - 海原电视塔, 计划次数: 1
+------------------------------ 开始刷拟造花萼（赤） - 海原电视塔，总计1轮，每轮包含1次 ------------------------------
+2026-07-22 06:04:00,000 | INFO | 副本任务完成
+2026-07-22 06:04:00,001 | INFO | 体力计划已完成: 拟造花萼（赤） - 海原电视塔
+2026-07-22 06:05:00,000 | INFO | 每日实训已完成
+|                                                     停止运行                                                      |
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 22, 6, 5))
+
+        self.assertEqual(report.stamina_runs[0].remaining_plan_count, 0)
+        self.assertIn("已完成", build_fallback_narrative(report).daily)
+
+    def test_default_stamina_does_not_reuse_the_skipped_plan(self) -> None:
+        content = """\
+|                                                 开始执行体力计划                                                  |
+2026-07-03 06:05:31,747 | INFO | 执行体力计划 [1/1]: 饰品提取 - 孽果盘生, 计划次数: 8
+2026-07-03 06:05:45,583 | INFO | 开拓力 < 40
+2026-07-03 06:05:45,583 | INFO | 无法执行: 饰品提取 - 孽果盘生，保留该计划
+|                                                    开始清体力                                                     |
+--------------------------- 开始刷拟造花萼（赤） - 「世界尽头」酒馆，总计1轮，每轮包含3次 ---------------------------
+2026-07-03 06:07:07,551 | INFO | 副本任务完成
+2026-07-03 06:07:50,000 | INFO | 每日实训已完成
+|                                                     停止运行                                                      |
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 3, 6, 8))
+        narrative = build_fallback_narrative(report)
+
+        self.assertEqual(len(report.stamina_runs), 2)
+        self.assertEqual(report.stamina_runs[0].name, "饰品提取 - 孽果盘生")
+        self.assertEqual(report.stamina_runs[0].status, "skipped")
+        self.assertEqual(report.stamina_runs[1].source, "default")
+        self.assertEqual(
+            report.stamina_runs[1].name,
+            "拟造花萼（赤） - 「世界尽头」酒馆",
+        )
+        self.assertIn("拟造花萼（赤）·「世界尽头」酒馆 3次", narrative.daily)
+        self.assertTrue(any("孽果盘生：未执行" in item for item in narrative.other_tasks))
+
+    def test_historical_redemption_summary_hides_codes_and_keeps_counts(self) -> None:
+        content = """\
+2026-07-04 06:02:37,287 | ERROR | 兑换码使用失败: secret-one (1/3)
+2026-07-04 06:03:09,644 | INFO | 兑换码使用成功: secret-two (2/3)
+2026-07-04 06:03:23,178 | INFO | 兑换码使用成功: secret-three (3/3)
+2026-07-04 06:03:28,507 | INFO | 成功使用了2个兑换码:
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 4, 6, 4))
+
+        self.assertEqual(report.other_tasks, ["兑换码：成功2个，失败1个"])
+        self.assertNotIn("secret", str(report.to_prompt_dict()))
+
+    def test_historical_divergent_universe_facts_are_all_retained(self) -> None:
+        content = """\
+2026-07-27 10:54:56,036 | INFO | 差分宇宙积分：0 / 18000
+2026-07-27 11:18:00,485 | INFO | 本次差分宇宙用时：22 分钟 16 秒
+2026-07-27 11:18:07,548 | INFO | 已记录差分宇宙次数：今日 1 次，本周 1 次
+2026-07-27 11:18:07,548 | INFO | 差分宇宙已完成
+2026-07-27 11:18:19,746 | INFO | 模拟宇宙奖励已领取
+2026-07-27 11:18:30,037 | INFO | 差分宇宙积分：18000 / 18000
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 27, 11, 19))
+
+        self.assertEqual(
+            report.other_tasks,
+            [
+                "差分宇宙：完成1次，用时22分16秒，今日1次，本周1次",
+                "领取模拟宇宙奖励",
+                "差分宇宙积分 18000/18000",
+            ],
+        )
+        with self.assertRaises(AISummaryError):
+            _validate_other_task_wording(
+                report,
+                type(build_fallback_narrative(report))(
+                    daily="1. 每日实训完成 500/500",
+                    other_tasks=["差分宇宙积分 18000/18000"],
+                ),
+            )
+
+    def test_echo_check_and_only_confirmed_rewards_are_reported(self) -> None:
+        content = """\
+2026-07-24 06:02:32,288 | INFO | 历战余响本周可领取奖励次数：0/3
+================================================== 检测到委托奖励 ===================================================
+2026-07-24 06:03:00,000 | INFO | 委托派遣中，目前没有可领取的奖励帕！
+--------------------------------------------------- 委托奖励完成 ----------------------------------------------------
+2026-07-24 06:04:00,000 | INFO | 邮件奖励已领取
+2026-07-24 06:05:00,000 | INFO | 每日实训已完成
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 24, 6, 5))
+        narrative = build_fallback_narrative(report)
+
+        self.assertEqual(
+            report.other_tasks,
+            ["历战余响：本周可领取奖励0/3（已检查）"],
+        )
+        self.assertEqual(
+            narrative.routine_tasks,
+            ["领取每日实训奖励"],
+        )
+        self.assertIn("领取邮件奖励", narrative.other_tasks)
+        self.assertNotIn("领取委托奖励", narrative.routine_tasks)
+
+    def test_historical_check_in_reward_is_kept_in_daily_order(self) -> None:
+        content = """\
+2026-07-19 06:02:33,411 | INFO | 领取巡星之礼奖励完成
+2026-07-19 06:08:00,000 | INFO | 每日实训已完成
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 7, 19, 6, 8))
+
+        self.assertEqual(
+            build_fallback_narrative(report).daily.splitlines(),
+            ["1. 领取巡星之礼奖励", "2. 每日实训完成 未读取"],
+        )
 
 
 class FallbackNarrativeTests(unittest.TestCase):

@@ -314,6 +314,7 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
     except json.JSONDecodeError as exc:
         raise AISummaryError(f"DeepSeek returned invalid JSON: {exc}") from exc
     _validate_stamina_wording(report, narrative)
+    _validate_other_task_wording(report, narrative)
     return narrative
 
 
@@ -337,15 +338,38 @@ def _validate_stamina_wording(
                 required.append(item.activity_name)
             if item.completed_instances:
                 required.append(f"{item.completed_instances}次")
-            if item.activity_remaining_count is not None:
-                required.append(f"活动双倍剩余{item.activity_remaining_count}次")
         if item.remaining_plan_count == 0:
             required.append("已完成")
         elif item.remaining_plan_count is not None:
             required.append(f"剩余计划{item.remaining_plan_count}次")
-        if not line or any(token not in line for token in required):
+        if item.source == "activity" and item.activity_remaining_count is not None:
+            required.append(f"活动双倍剩余{item.activity_remaining_count}次")
+        positions = [line.find(token) for token in required]
+        if (
+            not line
+            or any(position < 0 for position in positions)
+            or positions != sorted(positions)
+        ):
             raise AISummaryError(
-                f"DeepSeek wording dropped stamina facts for {name}: {required}"
+                f"DeepSeek wording dropped or reordered stamina facts for {name}: "
+                f"{required}"
+            )
+
+
+def _validate_other_task_wording(
+    report: RunReport,
+    narrative: NarrativeReport,
+) -> None:
+    """Reject AI wording that omits deterministic non-daily task outcomes."""
+
+    def normalized(value: str) -> str:
+        return re.sub(r"[\s：:，,。；;（）()]", "", value)
+
+    actual = normalized("\n".join(narrative.other_tasks))
+    for expected in report.other_tasks:
+        if normalized(expected) not in actual:
+            raise AISummaryError(
+                f"DeepSeek wording dropped other-task fact: {expected}"
             )
 
 
