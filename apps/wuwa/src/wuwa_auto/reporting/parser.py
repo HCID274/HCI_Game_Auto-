@@ -10,14 +10,7 @@ from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.user_context import load_reporting_context
 
 DAILY_POINTS = re.compile(r"total daily points (?P<points>\d+)")
-CURRENT_STAMINA = re.compile(r"current_stamina (?P<value>\d+)")
-FINAL_STAMINA = re.compile(r"current stamina: (?P<value>\d+)")
 BOSS_TELEPORT = re.compile(r"Teleport to Boss Boss Challenge (?P<index>\d+)")
-
-
-def _last_int(pattern: re.Pattern[str], text: str) -> int | None:
-    matches = list(pattern.finditer(text))
-    return int(matches[-1].group("value" if "value" in pattern.groupindex else "points")) if matches else None
 
 
 def _battle_pass_claim_branch_completed(text: str) -> bool:
@@ -58,24 +51,50 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         issues.append(ReportItem("run-failure", f"主流程失败：{result.reason}"))
 
     daily: list[ReportItem] = []
-    stamina_values = [int(match.group("value")) for match in CURRENT_STAMINA.finditer(text)]
-    final_stamina = _last_int(FINAL_STAMINA, text)
-    tacet_runs = text.count("TacetTask:start walk_to_treasure")
+    tacet_attempts = text.count("TacetTask:start walk_to_treasure")
+    tacet_unclaimed = text.count("TacetTask:is not claim treasure, restart challenge")
+    tacet_runs = max(0, tacet_attempts - tacet_unclaimed)
     if tacet_runs:
         index = result.config.get("daily_farm_index")
         label = f"无音区第{index}项" if index else "无音区"
-        details = f"{label}清剿{tacet_runs}场"
-        if stamina_values and final_stamina is not None:
-            consumed = stamina_values[0] - final_stamina
-            if consumed > 0:
-                details += f"，消耗{consumed}结晶波片"
+        # OK-WW v3.5.18 fixes one Tacet claim at 60 waveplates. Its
+        # ``current stamina`` value is a must-use budget that may become
+        # negative, not the final in-game balance, so subtraction is unsafe.
+        details = f"{label}清剿{tacet_runs}场，消耗{tacet_runs * 60}结晶波片"
         daily.append(ReportItem("tacet-suppression", details))
 
     points = list(DAILY_POINTS.finditer(text))
     if "claim daily reward via  coordinate" in text:
-        suffix = f"（检测到{points[-1].group('points')}点）" if points else ""
+        detected_points = int(points[-1].group("points")) if points else None
+        if detected_points is not None and detected_points >= 100:
+            daily.append(
+                ReportItem(
+                    "daily-activity-reward",
+                    f"领取每日活跃度奖励（活跃度{detected_points}点）",
+                )
+            )
+        else:
+            daily.append(
+                ReportItem(
+                    "daily-activity-claim-action",
+                    "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）",
+                )
+            )
+
+    nightmare_echoes = sum(
+        text.count(marker)
+        for marker in (
+            "NightmareNestTask:Captured echo during combat, skipping search.",
+            "NightmareNestTask:farm echo yolo find True",
+            "NightmareNestTask:farm echo walk find true",
+        )
+    )
+    if nightmare_echoes:
         daily.append(
-            ReportItem("daily-activity-reward", f"领取每日活跃度奖励{suffix}")
+            ReportItem(
+                "nightmare-nest-echo",
+                f"梦魇巢穴吸收声骸{nightmare_echoes}次",
+            )
         )
 
     if _battle_pass_claim_branch_completed(text):
@@ -109,10 +128,10 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     echo_picked = sum(
         text.count(marker)
         for marker in (
-            "farm echo on the face",
-            "farm echo yolo find True",
-            "farm echo walk_circle_find_echo True",
-            "farm echo walk_find_echo True",
+            "FarmEchoTask:farm echo on the face",
+            "FarmEchoTask:farm echo yolo find True",
+            "FarmEchoTask:farm echo walk_circle_find_echo True",
+            "FarmEchoTask:farm echo walk_find_echo True",
         )
     )
     if echo_picked:
@@ -125,6 +144,17 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     for marker, wording in optional_failures.items():
         if marker in text and not any(item.text == wording for item in issues):
             issues.append(ReportItem(f"optional-{marker}", wording))
+
+    unreachable_nests = text.count(
+        "NightmareNestTask:nightmare nest unreachable, skip this run"
+    )
+    if unreachable_nests:
+        issues.append(
+            ReportItem(
+                "nightmare-nest-unreachable",
+                f"梦魇巢穴存在未解锁或不可达目标，已跳过{unreachable_nests}处",
+            )
+        )
 
     for index, issue in enumerate(cleanup_data.get("issues", []), start=1):
         issues.append(ReportItem(f"cleanup-{index}", str(issue)))

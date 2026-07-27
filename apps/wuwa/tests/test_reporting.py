@@ -37,12 +37,87 @@ DailyTask:Daily Task Completed
     narrative = build_fallback_narrative(facts)
 
     assert narrative.daily == [
-        "领取每日活跃度奖励（检测到120点）",
+        "领取每日活跃度奖励（活跃度120点）",
         "先约电台：已执行奖励领取操作",
     ]
     assert narrative.weekly == []
     assert narrative.followup == ["讨伐强敌第2项 2次", "吸收声骸1次"]
     assert "邮件" not in str(narrative)
+
+
+def test_unconfirmed_daily_points_are_only_reported_as_claim_action(
+    tmp_path: Path,
+) -> None:
+    text = """
+DailyTask:info_set total daily points 0
+DailyTask:claim daily reward via  coordinate
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert [item.item_id for item in facts.daily] == [
+        "daily-activity-claim-action"
+    ]
+    assert facts.daily[0].text == (
+        "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）"
+    )
+
+
+def test_real_tacet_markers_report_claimed_runs_and_fixed_waveplates(
+    tmp_path: Path,
+) -> None:
+    text = """
+TacetTask:start walk_to_treasure
+TacetTask:info_set current_stamina 144
+TacetTask:start walk_to_treasure
+TacetTask:info_set current_stamina 24
+BaseWWTask:current stamina: -36 must_use completed, no need to use back_up
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert facts.daily[0].text == "无音区第6项清剿2场，消耗120结晶波片"
+
+
+def test_unclaimed_tacet_restart_is_not_counted(tmp_path: Path) -> None:
+    text = """
+TacetTask:start walk_to_treasure
+TacetTask:is not claim treasure, restart challenge
+TacetTask:start walk_to_treasure
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert facts.daily[0].text == "无音区第6项清剿1场，消耗60结晶波片"
+
+
+def test_historical_nightmare_echo_and_unreachable_target_are_reported(
+    tmp_path: Path,
+) -> None:
+    text = """
+NightmareNestTask:farm echo walk find true
+NightmareNestTask:nightmare nest unreachable, skip this run: go_nest:41:18
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
+    assert [item.text for item in facts.issues] == [
+        "梦魇巢穴存在未解锁或不可达目标，已跳过1处"
+    ]
+    assert facts.overall_status == "partial_success"
+
+
+def test_nightmare_echo_does_not_inflate_farm_echo_pickup(tmp_path: Path) -> None:
+    text = """
+NightmareNestTask:farm echo yolo find True
+FarmEchoTask:farm echo on the face
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
+    assert [item.text for item in facts.followup] == ["吸收声骸1次"]
 
 
 def test_battle_pass_is_omitted_when_claim_branch_is_not_entered(
@@ -116,3 +191,28 @@ DailyTask:Daily Task Completed
     )
     assert summary == "完成"
     assert wording["battle-pass"] == "先约电台：已执行奖励领取操作"
+
+
+def test_ai_cannot_promote_unconfirmed_daily_action_to_claimed_reward(
+    tmp_path: Path,
+) -> None:
+    text = """
+DailyTask:info_set total daily points 0
+DailyTask:claim daily reward via  coordinate
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+    summary, wording = _validate_wording(
+        {
+            "summary": "完成",
+            "wording": {
+                "daily-activity-claim-action": "每日活跃度奖励已领取",
+            },
+        },
+        facts,
+    )
+
+    assert summary == "完成"
+    assert wording["daily-activity-claim-action"] == (
+        "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）"
+    )

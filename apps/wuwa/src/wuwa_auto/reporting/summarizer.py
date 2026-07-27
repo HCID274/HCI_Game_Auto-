@@ -57,6 +57,8 @@ def _validate_wording(
     validated: dict[str, str] = {}
     required_phrases = {
         "daily-activity-reward": ("领取每日活跃度奖励",),
+        "daily-activity-claim-action": ("每日活跃度", "已执行奖励领取操作", "未从日志确认"),
+        "nightmare-nest-echo": ("梦魇巢穴", "吸收声骸"),
         "battle-pass": ("先约电台", "已执行奖励领取操作"),
         "weekly-garden": ("完成幻梦游园本周目标",),
         "echo-picked": ("吸收声骸",),
