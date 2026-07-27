@@ -55,8 +55,8 @@ uv run wuwa-auto report 20260727_001843
 4. 鸣潮自身收尾
 
 只有星铁桌面环境无法安全清理时才跳过鸣潮，避免两个游戏或两种 UU 加速
-发生冲突。注册脚本会创建每天本地时间 05:30 的 `Game_Daily_0530`，并禁用
-旧的 `StarRail_Main_0600` 与 `StarRail_Cleanup_0800`。
+发生冲突。注册脚本会创建每天本地时间 05:30 的 `Game_Daily_0530`，并删除
+已退役的 `StarRail_Main_0600` 与 `StarRail_Cleanup_0800`。
 
 幻梦游园不再放在每日 OK-WW 配置中，而由
 `Game_Wuwa_WeeklyGarden_Sunday` 每周日 08:00 独立执行。两项计划任务复用同一

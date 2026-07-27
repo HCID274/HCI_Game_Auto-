@@ -60,10 +60,11 @@ $weeklyTrigger = New-ScheduledTaskTrigger `
     -At (Get-Date $weekly.At)
 Register-AutomationTask -Definition $weekly -Trigger $weeklyTrigger -Mode 'weekly-garden'
 
-foreach ($taskName in $config.LegacyTasks) {
+foreach ($taskName in $config.RemovedTasks) {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($task -and $task.State -ne 'Disabled') {
-        Disable-ScheduledTask -TaskName $taskName | Out-Null
+    if ($task) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        Write-Host "removed retired task: $taskName"
     }
 }
 

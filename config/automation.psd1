@@ -39,7 +39,7 @@
         }
     }
 
-    LegacyTasks = @(
+    RemovedTasks = @(
         'StarRail_Main_0600'
         'StarRail_Cleanup_0800'
     )

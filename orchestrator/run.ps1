@@ -92,13 +92,13 @@ function Invoke-AppCommand {
     return [int]$code
 }
 
-function Disable-LegacyTasks {
+function Remove-RetiredTasks {
     if ($DryRun) { return }
-    foreach ($taskName in $config.LegacyTasks) {
+    foreach ($taskName in $config.RemovedTasks) {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($task -and $task.State -ne 'Disabled') {
-            Disable-ScheduledTask -TaskName $taskName | Out-Null
-            Write-OrchestratorLog "disabled conflicting task $taskName"
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-OrchestratorLog "removed retired task $taskName"
         }
     }
 }
@@ -119,7 +119,7 @@ try {
         Write-OrchestratorLog "run mode=$runMode dry_run=$([bool]$DryRun)"
         switch ($runMode) {
             'daily-chain' {
-                Disable-LegacyTasks
+                Remove-RetiredTasks
                 $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName Daily -Label 'Star Rail daily'
                 $starRailCleanupCode = Invoke-AppCommand -AppName StarRail -CommandName Cleanup -Label 'Star Rail cleanup'
 
