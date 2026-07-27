@@ -44,4 +44,3 @@
         'StarRail_Cleanup_0800'
     )
 }
-

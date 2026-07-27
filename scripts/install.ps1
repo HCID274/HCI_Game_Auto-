@@ -24,4 +24,3 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 & (Join-Path $repoRoot 'apps\wuwa\scripts\configure_codex_firewall.ps1')
 & (Join-Path $PSScriptRoot 'register_tasks.ps1')
 Write-Host 'game automation monorepo installation completed'
-

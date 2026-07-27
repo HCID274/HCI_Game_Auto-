@@ -75,4 +75,3 @@ foreach ($taskName in @($daily.Name, $weekly.Name)) {
     Write-Host "  next run: $($info.NextRunTime)"
     Write-Host "  action: $($task.Actions.Execute) $($task.Actions.Arguments)"
 }
-
