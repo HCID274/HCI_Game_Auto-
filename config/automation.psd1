@@ -39,7 +39,8 @@
             Name = 'Game_Wuwa_WeeklyGarden_Sunday'
             At = '08:00'
             DayOfWeek = 'Sunday'
-            ExecutionLimitHours = 4
+            LockWaitMinutes = 210
+            ExecutionLimitHours = 8
             Description = 'Sunday Wuthering Waves weekly garden through the shared orchestrator'
         }
     }

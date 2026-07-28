@@ -39,6 +39,29 @@ function Write-OrchestratorLog {
     Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
 }
 
+function Enter-OrchestratorMutex {
+    param([int]$WaitMinutes = 0)
+
+    $wait = [TimeSpan]::FromMinutes([Math]::Max(0, $WaitMinutes))
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($WaitMinutes -gt 0) {
+        Write-OrchestratorLog "waiting up to $WaitMinutes minutes for the global lock"
+    }
+    try {
+        $acquired = $mutex.WaitOne($wait)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # An abandoned mutex is acquired by the waiter that observes it.
+        $acquired = $true
+        Write-OrchestratorLog 'acquired an abandoned global lock'
+    }
+    $watch.Stop()
+    if ($acquired -and $WaitMinutes -gt 0) {
+        Write-OrchestratorLog "global lock acquired after $([Math]::Round($watch.Elapsed.TotalSeconds, 1)) seconds"
+    }
+    return [bool]$acquired
+}
+
 function Get-AppRoot {
     param([Parameter(Mandatory = $true)][string]$AppName)
     $relativePath = $config.Apps[$AppName].RelativePath
@@ -111,9 +134,13 @@ $wuwaCleanupCode = 0
 $finalCode = 99
 
 try {
-    $lockTaken = $mutex.WaitOne(0)
+    $lockWaitMinutes = 0
+    if ($runMode -eq 'weekly-garden') {
+        $lockWaitMinutes = [int]$config.Tasks.WeeklyGarden.LockWaitMinutes
+    }
+    $lockTaken = Enter-OrchestratorMutex -WaitMinutes $lockWaitMinutes
     if (-not $lockTaken) {
-        Write-OrchestratorLog 'another automation workflow owns the global lock'
+        Write-OrchestratorLog "global lock wait expired after $lockWaitMinutes minutes"
         $finalCode = 75
     }
     else {

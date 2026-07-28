@@ -56,4 +56,7 @@ if ($LASTEXITCODE -ne 0) { throw "daily-chain dry-run failed: $LASTEXITCODE" }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'orchestrator\run.ps1') -Mode integration-smoke -DryRun
 if ($LASTEXITCODE -ne 0) { throw "integration-smoke contract failed: $LASTEXITCODE" }
 
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'scripts\test_weekly_lock_wait.ps1')
+if ($LASTEXITCODE -ne 0) { throw "weekly lock-wait validation failed: $LASTEXITCODE" }
+
 Write-Host 'monorepo validation passed'
