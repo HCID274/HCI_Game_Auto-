@@ -27,6 +27,32 @@ from wuwa_auto.uu.service import ensure_connected
 log = logging.getLogger(__name__)
 
 
+def _settle_business_transaction(
+    task_name: str,
+    result: OkRunResult,
+) -> OkRunResult:
+    """Resolve every in-process top-up and recovery before notification."""
+    current = result
+    try:
+        if task_name == "daily":
+            current = ensure_daily_farm_echo_absorptions(current)
+        return maybe_recover_farm_echo_death(current)
+    except Exception as exc:
+        reason = f"{task_name} business transaction settlement exception: {exc}"
+        log.exception(reason)
+        evidence = None
+        try:
+            evidence = save_step_screenshot("wuwa_transaction_settlement_failed")
+        except Exception:
+            log.exception("could not save transaction settlement failure screenshot")
+        return write_workflow_failure(
+            started=datetime.fromisoformat(current.started_at),
+            reason=reason,
+            evidence_path=evidence,
+            source_result=current,
+        )
+
+
 def _run_workflow(task_name: str, task_runner) -> int:
     require_admin()
     started = datetime.now().astimezone()
@@ -46,12 +72,16 @@ def _run_workflow(task_name: str, task_runner) -> int:
                 acceleration_connected = True
                 log.info("%s workflow: start OK-WW task", task_name)
                 result = task_runner()
-                if task_name == "daily":
-                    result = ensure_daily_farm_echo_absorptions(result)
-                result = maybe_recover_farm_echo_death(result)
+                # A retry is part of this workflow's business transaction, not
+                # a new reportable run.  Only the settled composite result may
+                # cross the notification boundary below.
+                result = _settle_business_transaction(task_name, result)
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"
                 log.exception(failure_reason)
+                # Never let a result captured before an exception cross the
+                # final notification boundary as if the workflow had settled.
+                result = None
                 try:
                     failure_evidence = save_step_screenshot(
                         "wuwa_daily_workflow_failed"

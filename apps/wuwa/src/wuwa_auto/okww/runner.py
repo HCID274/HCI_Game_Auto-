@@ -164,8 +164,9 @@ def write_workflow_failure(
     started: datetime,
     reason: str,
     evidence_path: Path | None = None,
+    source_result: OkRunResult | None = None,
 ) -> OkRunResult:
-    """Persist a failure that happened before OK-WW could return a result."""
+    """Persist a workflow failure, optionally retaining its latest result."""
     finished = datetime.now().astimezone()
     base_id = started.strftime("%Y%m%d_%H%M%S")
     run_id = f"{base_id}_workflow_failure"
@@ -177,7 +178,21 @@ def write_workflow_failure(
         run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True)
     slice_path = run_dir / "ok-current-run.log"
-    slice_path.write_text("", encoding="utf-8")
+    source_text = ""
+    config: dict[str, object] = {}
+    evidence = evidence_path
+    if source_result is not None:
+        source_path = Path(source_result.log_slice_path)
+        if source_path.is_file():
+            source_text = (
+                f"=== HOST WORKFLOW SOURCE {source_result.run_id} ===\n"
+                f"{source_path.read_text(encoding='utf-8', errors='replace').rstrip()}\n"
+            )
+        config = dict(source_result.config)
+        config["workflow_failure_source_run_id"] = source_result.run_id
+        if evidence is None and source_result.evidence_path:
+            evidence = Path(source_result.evidence_path)
+    slice_path.write_text(source_text, encoding="utf-8")
     result = OkRunResult(
         run_id=run_id,
         status="failed",
@@ -186,8 +201,8 @@ def write_workflow_failure(
         finished_at=finished.isoformat(),
         duration_seconds=round((finished - started).total_seconds()),
         log_slice_path=str(slice_path),
-        evidence_path=str(evidence_path) if evidence_path else None,
-        config={},
+        evidence_path=str(evidence) if evidence else None,
+        config=config,
         exit_code=1,
     )
     write_result(result, run_dir)
