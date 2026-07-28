@@ -143,6 +143,11 @@ class ViiperServer:
             "server",
             f"--api.addr=127.0.0.1:{self.api_port}",
             f"--usb.addr=127.0.0.1:{self.usb_port}",
+            # usbip.exe normally attaches in about two seconds, but a busy
+            # driver stack can exceed VIIPER's five-second device cleanup
+            # default. Keep the not-yet-attached device alive long enough for
+            # the already-bounded local attach command to finish.
+            "--api.device-handler-connect-timeout=20s",
             "--api.auto-attach-local-client=true",
             # VIIPER 0.7.0 predates usbip-win2 0.9.7.8's native IOCTL API
             # change.  Its supported command-line fallback is compatible.

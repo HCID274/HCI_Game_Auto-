@@ -14,6 +14,27 @@ FAILURE_MARKERS = (
     "Start task failed: Daily Task",
 )
 
+FARM_ECHO_COMPLETION_MARKERS = (
+    "FarmEchoTask:farm echo on the face",
+    "FarmEchoTask:farm echo yolo find ",
+    "FarmEchoTask:farm echo walk_circle_find_echo ",
+    "FarmEchoTask:farm echo walk_find_echo ",
+)
+FARM_ECHO_DEATH_MARKERS = (
+    "FarmEchoTask:raise_not_in_combat char dead",
+    "FarmEchoTask:info_set Revive Failed",
+)
+FARM_ECHO_RESTART_CONFIRMATION = (
+    "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter"
+)
+HOST_FARM_ECHO_CONFIRMATION = "HOST_FARM_ECHO_KILL_CONFIRMED"
+FARM_ECHO_PICKUP_CONFIRMATION_MARKERS = (
+    "FarmEchoTask:farm echo on the face",
+    "FarmEchoTask:farm echo yolo find True",
+    "FarmEchoTask:farm echo walk_circle_find_echo True",
+    "FarmEchoTask:farm echo walk_find_echo True",
+)
+
 
 @dataclass
 class LogCursor:
@@ -65,3 +86,46 @@ def find_failure(text: str) -> str | None:
         if "Task exception stopped" in line:
             return line.rsplit("TaskExecutor:", 1)[-1].strip()
     return None
+
+
+def count_farm_echo_completions(text: str) -> int:
+    """Count only post-combat FarmEcho results, including a missing echo drop."""
+    return sum(
+        1
+        for line in text.splitlines()
+        if any(marker in line for marker in FARM_ECHO_COMPLETION_MARKERS)
+    )
+
+
+def count_farm_echo_kill_confirmations(text: str) -> int:
+    """Count kills from causal post-combat evidence, without double counting."""
+    lines = text.splitlines()
+    host_counts: list[int] = []
+    for line in lines:
+        if HOST_FARM_ECHO_CONFIRMATION not in line:
+            continue
+        suffix = line.split(HOST_FARM_ECHO_CONFIRMATION, 1)[1].strip()
+        numerator = suffix.split("/", 1)[0].strip()
+        if numerator.isdigit():
+            host_counts.append(int(numerator))
+    if host_counts:
+        # The host marker is cumulative and already deduplicates the upstream
+        # evidence that immediately preceded it.
+        return max(host_counts)
+
+    confirmed = 0
+    pending_echo_pickup = False
+    for line in lines:
+        if any(marker in line for marker in FARM_ECHO_PICKUP_CONFIRMATION_MARKERS):
+            pending_echo_pickup = True
+        elif FARM_ECHO_RESTART_CONFIRMATION in line:
+            confirmed += 1
+            pending_echo_pickup = False
+    if pending_echo_pickup:
+        confirmed += 1
+    return confirmed
+
+
+def is_recoverable_farm_echo_death(text: str) -> bool:
+    """Require both current-run death facts before touching the game UI."""
+    return all(marker in text for marker in FARM_ECHO_DEATH_MARKERS)

@@ -8,11 +8,18 @@ from wuwa_auto.input.viiper import managed_virtual_mouse
 from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
-    run_farm_echo_task,
     run_weekly_garden_task,
     write_workflow_failure,
 )
+from wuwa_auto.okww.config import (
+    EXPECTED_REPEAT_FARM_COUNT,
+    confirmed_retry_attempt_limit,
+    temporary_farm_echo_repeat_count,
+)
+from wuwa_auto.okww.confirmed_retry import run_confirmed_farm_echo_retry
+from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
 from wuwa_auto.reporting.service import report_run
+from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
 from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
 from wuwa_auto.uu.service import ensure_connected
 
@@ -38,6 +45,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
                 acceleration_connected = True
                 log.info("%s workflow: start OK-WW task", task_name)
                 result = task_runner()
+                result = maybe_recover_farm_echo_death(result)
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"
                 log.exception(failure_reason)
@@ -82,7 +90,31 @@ def run_daily_workflow() -> int:
 
 
 def run_farm_echo_workflow() -> int:
-    return _run_workflow("farm_echo", run_farm_echo_task)
+    target_count = EXPECTED_REPEAT_FARM_COUNT
+    if FARM_ECHO_TARGET_REQUEST.is_file():
+        requested = FARM_ECHO_TARGET_REQUEST.read_text(encoding="utf-8").strip()
+        FARM_ECHO_TARGET_REQUEST.unlink()
+        try:
+            target_count = int(requested)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"invalid one-shot FarmEcho target: {requested!r}"
+            ) from exc
+        if not 1 <= target_count <= EXPECTED_REPEAT_FARM_COUNT:
+            raise RuntimeError(
+                "one-shot FarmEcho target must be between 1 and "
+                f"{EXPECTED_REPEAT_FARM_COUNT}; actual={target_count}"
+            )
+
+    def run_confirmed_target() -> OkRunResult:
+        attempt_limit = confirmed_retry_attempt_limit(target_count)
+        with temporary_farm_echo_repeat_count(attempt_limit):
+            return run_confirmed_farm_echo_retry(
+                target_count=target_count,
+                attempt_limit=attempt_limit,
+            )
+
+    return _run_workflow("farm_echo", run_confirmed_target)
 
 
 def run_weekly_garden_workflow() -> int:

@@ -41,7 +41,7 @@ DailyTask:Daily Task Completed
         "先约电台：已执行奖励领取操作",
     ]
     assert narrative.weekly == []
-    assert narrative.followup == ["讨伐强敌第2项 2次", "吸收声骸1次"]
+    assert narrative.followup == ["讨伐强敌第2项 1次", "吸收声骸1次"]
     assert "邮件" not in str(narrative)
 
 
@@ -117,7 +117,10 @@ DailyTask:Daily Task Completed
     facts = parse_run(_result(tmp_path, text))
 
     assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
-    assert [item.text for item in facts.followup] == ["吸收声骸1次"]
+    assert [item.text for item in facts.followup] == [
+        "讨伐强敌第2项 1次",
+        "吸收声骸1次",
+    ]
 
 
 def test_battle_pass_is_omitted_when_claim_branch_is_not_entered(
@@ -167,10 +170,78 @@ def test_historical_zero_based_boss_log_keeps_gui_item_number(
     text = """
 FarmEchoTask:info_set Teleport to Boss Boss Challenge 1
 FarmEchoTask:start wait in combat
+FarmEchoTask:farm echo walk_find_echo None
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
 DailyTask:Daily Task Completed
 """
     facts = parse_run(_result(tmp_path, text, config={}))
     assert facts.followup[0].text == "讨伐强敌第2项 1次"
+
+
+def test_unconfirmed_farm_echo_result_is_not_reported_as_kill(
+    tmp_path: Path,
+) -> None:
+    text = """
+FarmEchoTask:info_set Teleport to Boss Boss Challenge 1
+FarmEchoTask:start wait in combat
+FarmEchoTask:farm echo walk_find_echo None
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text, config={}))
+    assert all(item.item_id != "boss-challenge" for item in facts.followup)
+
+
+def test_confirmed_retry_uses_structured_kill_count(tmp_path: Path) -> None:
+    text = "\n".join(
+        ["FarmEchoTask:farm echo walk_find_echo None"] * 5
+    )
+    facts = parse_run(
+        _result(
+            tmp_path,
+            text,
+            config={
+                "boss_challenge_index": 2,
+                "workflow_task": "farm_echo_confirmed_retry",
+                "confirmed_farm_echo_count": 2,
+            },
+        )
+    )
+    narrative = build_fallback_narrative(facts)
+
+    assert facts.followup[0].text == "讨伐强敌第2项 2次"
+    assert narrative.summary.startswith("鸣潮后续任务完成")
+
+
+def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
+    tmp_path: Path,
+) -> None:
+    text = "\n".join(
+        ["FarmEchoTask:farm echo walk_find_echo None"] * 5
+    )
+    result = _result(
+        tmp_path,
+        text,
+        config={
+            "boss_challenge_index": 2,
+            "workflow_task": "daily",
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "retry_completed": 2,
+                "total_completed": 5,
+                "first_safe_recovery": True,
+                "final_safe_recovery": None,
+            },
+        },
+    )
+
+    facts = parse_run(result)
+
+    assert facts.overall_status == "completed"
+    assert [item.text for item in facts.followup] == [
+        "讨伐强敌第2项 已完成5/5次",
+        "讨伐中途倒地1次，已自动退本回血并补跑2次",
+    ]
 
 
 def test_ai_cannot_promote_battle_pass_action_to_claimed_reward(

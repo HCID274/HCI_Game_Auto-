@@ -15,6 +15,7 @@ LOGS_DIR = RUNTIME_DIR / "logs"
 EVIDENCE_DIR = RUNTIME_DIR / "evidence"
 REPORTS_DIR = RUNTIME_DIR / "reports"
 RUNS_DIR = RUNTIME_DIR / "runs"
+FARM_ECHO_TARGET_REQUEST = RUNTIME_DIR / "next-farm-echo-target"
 VENDOR_DIR = RUNTIME_DIR / "vendor"
 VIIPER_DIR = VENDOR_DIR / "viiper" / "0.7.0"
 VIIPER_EXE = VIIPER_DIR / "viiper.exe"
@@ -26,6 +27,7 @@ OK_WW_EXE = Path(
     r"D:\2_Software\4_Games\Wuthering Waves\01Auto\ok-ww\ok-ww.exe"
 )
 OK_PYTHONW_EXE = OK_WW_EXE.parent / "data" / "apps" / "ok-ww" / "python" / "pythonw.exe"
+OK_PYTHON_EXE = OK_PYTHONW_EXE.with_name("python.exe")
 OK_WORKING_DIR = Path(
     r"D:\2_Software\4_Games\Wuthering Waves\01Auto\ok-ww"
     r"\data\apps\ok-ww\working"

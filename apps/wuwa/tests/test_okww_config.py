@@ -1,6 +1,8 @@
 """Regression tests for task-scoped OK-WW configuration preflight."""
 
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from wuwa_auto.okww import config
@@ -33,6 +35,55 @@ class OkConfigurationTests(unittest.TestCase):
         load_json.assert_called_once_with(config.OK_FARM_ECHO_CONFIG)
         self.assertEqual(facts["boss_challenge_index"], 2)
         self.assertEqual(facts["repeat_farm_count"], 5)
+
+    def test_temporary_repeat_count_restores_original_bytes(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "FarmEchoTask.json"
+            original = (json.dumps(FARM_ECHO_CONFIG, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
+            path.write_bytes(original)
+            with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
+                with config.temporary_farm_echo_repeat_count(2):
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(current["Repeat Farm Count"], 2)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_temporary_repeat_count_restores_original_bytes_after_error(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "FarmEchoTask.json"
+            original = (json.dumps(FARM_ECHO_CONFIG, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
+            path.write_bytes(original)
+            with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
+                with self.assertRaisesRegex(RuntimeError, "simulated retry failure"):
+                    with config.temporary_farm_echo_repeat_count(2):
+                        raise RuntimeError("simulated retry failure")
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_temporary_repeat_count_allows_bounded_combat_passes(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "FarmEchoTask.json"
+            original = (json.dumps(FARM_ECHO_CONFIG, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
+            path.write_bytes(original)
+            with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
+                with config.temporary_farm_echo_repeat_count(60):
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(current["Repeat Farm Count"], 60)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_confirmed_retry_attempt_limit_allows_detector_reentry(self) -> None:
+        self.assertEqual(config.confirmed_retry_attempt_limit(1), 12)
+        self.assertEqual(config.confirmed_retry_attempt_limit(5), 60)
 
     def test_weekly_preflight_reads_only_garden_configuration(self) -> None:
         with patch.object(config, "_validate_common_paths"), patch.object(
@@ -77,7 +128,13 @@ class OkRunnerPreflightTests(unittest.TestCase):
         with patch("wuwa_auto.okww.runner._run_task") as run_task:
             run_farm_echo_task()
 
-        self.assertIs(run_task.call_args.kwargs["preflight"], preflight_farm_echo_task)
+        preflight = run_task.call_args.kwargs["preflight"]
+        with patch(
+            "wuwa_auto.okww.runner.preflight_farm_echo_task",
+            return_value={"repeat_farm_count": 5},
+        ) as farm_preflight:
+            self.assertEqual(preflight(), {"repeat_farm_count": 5})
+        farm_preflight.assert_called_once_with(5)
 
     def test_weekly_runner_uses_weekly_preflight(self) -> None:
         with patch("wuwa_auto.okww.runner._run_task") as run_task:

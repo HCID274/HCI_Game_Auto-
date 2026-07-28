@@ -14,6 +14,7 @@ from typing import Callable
 import psutil
 
 from wuwa_auto.okww.config import (
+    EXPECTED_REPEAT_FARM_COUNT,
     validate_daily_configuration,
     validate_farm_echo_configuration,
     validate_weekly_garden_configuration,
@@ -139,15 +140,19 @@ def preflight_daily_task() -> dict[str, object]:
     return _preflight_task(validate_daily_configuration)
 
 
-def preflight_farm_echo_task() -> dict[str, object]:
-    return _preflight_task(validate_farm_echo_configuration)
+def preflight_farm_echo_task(
+    expected_repeat_count: int = EXPECTED_REPEAT_FARM_COUNT,
+) -> dict[str, object]:
+    return _preflight_task(
+        lambda: validate_farm_echo_configuration(expected_repeat_count)
+    )
 
 
 def preflight_weekly_garden_task() -> dict[str, object]:
     return _preflight_task(validate_weekly_garden_configuration)
 
 
-def _write_result(result: OkRunResult, run_dir: Path) -> None:
+def write_result(result: OkRunResult, run_dir: Path) -> None:
     (run_dir / "result.json").write_text(
         json.dumps(asdict(result), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -185,7 +190,7 @@ def write_workflow_failure(
         config={},
         exit_code=1,
     )
-    _write_result(result, run_dir)
+    write_result(result, run_dir)
     return result
 
 
@@ -300,7 +305,7 @@ def _run_task(
         config=facts,
         exit_code=0 if status == "success" else 1,
     )
-    _write_result(result, run_dir)
+    write_result(result, run_dir)
     log.info(
         "OK-WW %s finished status=%s reason=%s launcher_pid=%s",
         task_label,
@@ -320,13 +325,17 @@ def run_daily_task() -> OkRunResult:
     )
 
 
-def run_farm_echo_task() -> OkRunResult:
+def run_farm_echo_task(
+    *,
+    expected_repeat_count: int = EXPECTED_REPEAT_FARM_COUNT,
+    run_suffix: str = "_farm_echo",
+) -> OkRunResult:
     return _run_task(
         task_index=3,
         task_label="farm_echo",
         success_marker="Successfully Executed Task, Exiting Game and App!",
-        preflight=preflight_farm_echo_task,
-        run_suffix="_farm_echo",
+        preflight=lambda: preflight_farm_echo_task(expected_repeat_count),
+        run_suffix=run_suffix,
     )
 
 

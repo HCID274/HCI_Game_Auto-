@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from wuwa_auto.okww.logs import count_farm_echo_kill_confirmations
 from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.user_context import load_reporting_context
 
@@ -112,7 +113,13 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         issues.append(ReportItem("weekly-garden-incomplete", "幻梦游园本轮未确认完成"))
 
     followup: list[ReportItem] = []
-    boss_runs = text.count("FarmEchoTask:start wait in combat")
+    recovery = result.config.get("farm_echo_recovery") or {}
+    boss_runs = count_farm_echo_kill_confirmations(text)
+    confirmed_runs = result.config.get("confirmed_farm_echo_count")
+    if confirmed_runs is not None:
+        boss_runs = int(confirmed_runs)
+    if recovery.get("triggered"):
+        boss_runs = int(recovery.get("total_completed") or boss_runs)
     if boss_runs:
         boss_index = result.config.get("boss_challenge_index")
         if boss_index is None:
@@ -123,7 +130,41 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                 # OK logs its internal zero-based list index; the GUI is one-based.
                 boss_index = int(teleports[-1].group("index")) + 1
         label = f"讨伐强敌第{boss_index}项" if boss_index else "讨伐强敌"
-        followup.append(ReportItem("boss-challenge", f"{label} {boss_runs}次"))
+        if recovery.get("triggered"):
+            target = int(recovery.get("target_count") or boss_runs)
+            wording = f"{label} 已完成{boss_runs}/{target}次"
+        else:
+            wording = f"{label} {boss_runs}次"
+        followup.append(ReportItem("boss-challenge", wording))
+
+    if recovery.get("triggered"):
+        retry_completed = int(recovery.get("retry_completed") or 0)
+        total_completed = int(recovery.get("total_completed") or boss_runs)
+        target = int(recovery.get("target_count") or total_completed)
+        if result.status == "success":
+            if retry_completed:
+                recovery_wording = (
+                    f"讨伐中途倒地1次，已自动退本回血并补跑{retry_completed}次"
+                )
+            else:
+                recovery_wording = "讨伐中途倒地1次，已自动退本回血"
+            followup.append(
+                ReportItem(
+                    "boss-death-recovered",
+                    recovery_wording,
+                )
+            )
+        else:
+            first_safe = recovery.get("first_safe_recovery") is True
+            final_safe = recovery.get("final_safe_recovery")
+            safe = first_safe and final_safe is not False
+            recovery_state = "已退本回血" if safe else "安全恢复未完成"
+            issues.append(
+                ReportItem(
+                    "boss-death-recovery-incomplete",
+                    f"讨伐中途倒地，{recovery_state}；本轮累计完成{total_completed}/{target}次",
+                )
+            )
 
     echo_picked = sum(
         text.count(marker)
@@ -161,8 +202,14 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
 
     if result.status == "success" and issues:
         status = "partial_success"
+    elif result.status != "success" and recovery.get("triggered") and (
+        int(recovery.get("total_completed") or 0) > 0
+        or recovery.get("first_safe_recovery") is True
+    ):
+        status = "partial_success"
     if cleanup_data and not cleanup_data.get("completed", False):
-        status = "partial_success" if result.status == "success" else "failed"
+        if status == "completed":
+            status = "partial_success"
 
     return RunFacts(
         overall_status=status,
@@ -182,6 +229,7 @@ def deterministic_summary(facts: RunFacts) -> str:
     subject = {
         "weekly_garden": "鸣潮周常",
         "farm_echo": "鸣潮后续任务",
+        "farm_echo_confirmed_retry": "鸣潮后续任务",
     }.get(facts.workflow_task, "鸣潮日常")
     status = {
         "completed": f"{subject}完成",

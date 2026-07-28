@@ -1,8 +1,11 @@
 """Narrow, screenshot-gated recoveries for known upstream OK-WW UI bugs."""
 
 import ctypes
+import json
 import logging
+import subprocess
 import time
+from dataclasses import dataclass
 from collections.abc import Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -11,10 +14,18 @@ from pathlib import Path
 import psutil
 
 from wuwa_auto.input.viiper import managed_virtual_mouse
-from wuwa_auto.settings import OK_PYTHONW_EXE, TEMPLATES_DIR
+from wuwa_auto.settings import (
+    OK_PYTHON_EXE,
+    OK_PYTHONW_EXE,
+    OK_WORKING_DIR,
+    TEMPLATES_DIR,
+)
 from wuwa_auto.uu import desktop
 
 log = logging.getLogger(__name__)
+
+RECOVERY_WORKER = Path(__file__).with_name("recovery_worker.py")
+RECOVERY_TIMEOUT = 360.0
 
 WEEKLY_GARDEN_TAB = TEMPLATES_DIR / "ok_weekly_garden_tab.png"
 DAILY_CLAIM = TEMPLATES_DIR / "ok_daily_claim.png"
@@ -59,6 +70,14 @@ class _InputUnion(ctypes.Union):
 class _Input(ctypes.Structure):
     _anonymous_ = ("data",)
     _fields_ = [("type", ctypes.c_ulong), ("data", _InputUnion)]
+
+
+@dataclass(frozen=True)
+class FarmEchoRecoveryResult:
+    success: bool
+    reason: str
+    evidence_path: str | None
+    worker_result_path: str
 
 
 @contextmanager
@@ -155,6 +174,91 @@ def _validate_game_window(hwnd: int) -> None:
         raise RuntimeError(
             f"target is not Wuthering Waves: hwnd={hwnd}, process={name}"
         )
+
+
+def run_farm_echo_death_recovery(
+    run_dir: Path,
+    *,
+    attempt: int,
+) -> FarmEchoRecoveryResult:
+    """Keep the game alive and ask OK-WW to exit the realm and heal."""
+    desktop.require_admin()
+    desktop.require_supported_display()
+    hwnd = _focus_game_window()
+    _validate_game_window(hwnd)
+    before = desktop.save_step_screenshot(
+        f"ok_farm_echo_recovery_{attempt}_before"
+    )
+    result_path = run_dir / f"farm-echo-recovery-{attempt}.json"
+    command = [
+        str(OK_PYTHON_EXE),
+        str(RECOVERY_WORKER),
+        str(OK_WORKING_DIR),
+        str(result_path),
+    ]
+    log.info("starting FarmEcho death recovery attempt=%s", attempt)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=OK_WORKING_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=RECOVERY_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        evidence = desktop.save_step_screenshot(
+            f"ok_farm_echo_recovery_{attempt}_timeout"
+        )
+        return FarmEchoRecoveryResult(
+            success=False,
+            reason=f"recovery worker timed out after {RECOVERY_TIMEOUT:.0f}s",
+            evidence_path=str(evidence),
+            worker_result_path=str(result_path),
+        )
+
+    payload: dict[str, object] = {}
+    if result_path.is_file():
+        try:
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, json.JSONDecodeError):
+            log.exception("invalid FarmEcho recovery result: %s", result_path)
+    success = completed.returncode == 0 and payload.get("success") is True
+    if success:
+        evidence = desktop.save_step_screenshot(
+            f"ok_farm_echo_recovery_{attempt}_completed"
+        )
+        reason = str(payload.get("reason") or "recovery completed")
+    else:
+        evidence = desktop.save_step_screenshot(
+            f"ok_farm_echo_recovery_{attempt}_failed"
+        )
+        reason = str(
+            payload.get("reason")
+            or completed.stdout.strip()
+            or f"recovery worker exited with code {completed.returncode}"
+        )
+    log.info(
+        "FarmEcho death recovery attempt=%s success=%s reason=%s before=%s after=%s",
+        attempt,
+        success,
+        reason,
+        before,
+        evidence,
+    )
+    return FarmEchoRecoveryResult(
+        success=success,
+        reason=reason,
+        evidence_path=str(evidence),
+        worker_result_path=str(result_path),
+    )
 
 
 def _post_message_click(
