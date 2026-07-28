@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,9 +12,12 @@ from wuwa_auto.okww.config import (
     confirmed_retry_attempt_limit,
     temporary_farm_echo_repeat_count,
 )
-from wuwa_auto.okww.confirmed_retry import run_confirmed_farm_echo_retry
+from wuwa_auto.okww.confirmed_retry import (
+    MAX_FARM_ECHO_RUNTIME_SECONDS,
+    run_confirmed_farm_echo_retry,
+)
 from wuwa_auto.okww.logs import (
-    count_farm_echo_kill_confirmations,
+    count_farm_echo_absorptions,
     is_recoverable_farm_echo_death,
 )
 from wuwa_auto.okww.recovery import (
@@ -74,53 +78,53 @@ def _write_composite(
     initial: OkRunResult,
     *,
     target: int,
-    initial_completed: int,
-    first_recovery: FarmEchoRecoveryResult,
-    retry: OkRunResult | None,
-    retry_requested: int,
-    retry_completed: int,
-    final_recovery: FarmEchoRecoveryResult | None,
+    attempts: list[OkRunResult],
+    attempt_counts: list[int],
+    recoveries: list[FarmEchoRecoveryResult],
     retry_error: str = "",
 ) -> OkRunResult:
-    total_completed = min(target, initial_completed + retry_completed)
-    completed = (
-        first_recovery.success
-        and total_completed >= target
-        and (retry_requested == 0 or (retry is not None and retry.status == "success"))
+    initial_completed = attempt_counts[0]
+    retry_completed = sum(attempt_counts[1:])
+    total_completed = min(target, sum(attempt_counts))
+    completed = total_completed >= target and all(
+        recovery.success for recovery in recoveries
     )
     config = dict(initial.config)
+    config["confirmed_farm_echo_absorption_count"] = total_completed
     config["farm_echo_recovery"] = {
         "triggered": True,
         "target_count": target,
         "initial_completed": initial_completed,
-        "first_safe_recovery": first_recovery.success,
-        "first_recovery_reason": first_recovery.reason,
-        "retry_requested": retry_requested,
-        "retry_attempted": retry is not None,
-        "retry_completed": retry_completed,
-        "retry_status": retry.status if retry is not None else "not_run",
-        "retry_error": retry_error,
-        "final_safe_recovery": (
-            final_recovery.success if final_recovery is not None else None
-        ),
-        "final_recovery_reason": (
-            final_recovery.reason if final_recovery is not None else ""
-        ),
-        "total_completed": total_completed,
-        "attempt_run_ids": [
-            initial.run_id,
-            *([retry.run_id] if retry is not None else []),
+        "first_safe_recovery": recoveries[0].success if recoveries else False,
+        "first_recovery_reason": recoveries[0].reason if recoveries else "",
+        "recovery_attempts": len(recoveries),
+        "recoveries": [
+            {
+                "success": recovery.success,
+                "reason": recovery.reason,
+                "evidence_path": recovery.evidence_path,
+            }
+            for recovery in recoveries
         ],
+        "retry_requested": max(0, target - initial_completed),
+        "retry_attempted": len(attempts) > 1,
+        "retry_completed": retry_completed,
+        "retry_status": attempts[-1].status if len(attempts) > 1 else "not_run",
+        "retry_error": retry_error,
+        "final_safe_recovery": recoveries[-1].success if recoveries else None,
+        "final_recovery_reason": recoveries[-1].reason if recoveries else "",
+        "total_completed": total_completed,
+        "attempt_run_ids": [attempt.run_id for attempt in attempts],
     }
 
     run_id, run_dir = _unique_composite_dir(initial.run_id)
     combined_path = run_dir / "ok-current-run.log"
-    sections = [
-        f"=== HOST ATTEMPT {initial.run_id} ===\n{_read_log(initial).rstrip()}\n"
-    ]
-    if retry is not None:
+    sections = []
+    for index, attempt in enumerate(attempts):
+        label = "ATTEMPT" if index == 0 else f"RETRY {index}"
         sections.append(
-            f"=== HOST RETRY {retry.run_id} ===\n{_read_log(retry).rstrip()}\n"
+            f"=== HOST {label} {attempt.run_id} ===\n"
+            f"{_read_log(attempt).rstrip()}\n"
         )
     combined_path.write_text("\n".join(sections), encoding="utf-8")
 
@@ -130,20 +134,23 @@ def _write_composite(
         reason = f"FarmEcho recovered and completed {total_completed}/{target}"
     else:
         reason = (
-            f"FarmEcho recovery incomplete: completed {total_completed}/{target}; "
-            f"first_recovery={first_recovery.reason}"
+            f"FarmEcho recovery incomplete: absorbed {total_completed}/{target}; "
+            f"recoveries={len(recoveries)}"
         )
         if retry_error:
             reason += f"; retry={retry_error}"
-        elif retry is not None and retry.status != "success":
-            reason += f"; retry={retry.reason}"
-        if final_recovery is not None:
-            reason += f"; final_recovery={final_recovery.reason}"
-    evidence = (
-        (final_recovery.evidence_path if final_recovery is not None else None)
-        or (retry.evidence_path if retry is not None else None)
-        or first_recovery.evidence_path
-        or initial.evidence_path
+        elif attempts[-1].status != "success":
+            reason += f"; last_attempt={attempts[-1].reason}"
+    evidence = next(
+        (
+            path
+            for path in [
+                *(recovery.evidence_path for recovery in reversed(recoveries)),
+                *(attempt.evidence_path for attempt in reversed(attempts)),
+            ]
+            if path
+        ),
+        None,
     )
     result = OkRunResult(
         run_id=run_id,
@@ -163,7 +170,7 @@ def _write_composite(
 
 
 def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
-    """Recover one death and retry only the exact remaining count once."""
+    """Recover deaths and retry the exact remainder within one shared deadline."""
     if result.status == "success":
         return result
     initial_text = _read_log(result)
@@ -171,16 +178,20 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
         return result
 
     target = int(
-        result.config.get("repeat_farm_count") or EXPECTED_REPEAT_FARM_COUNT
+        result.config.get("farm_echo_absorption_target")
+        or result.config.get("target_count")
+        or result.config.get("repeat_farm_count")
+        or EXPECTED_REPEAT_FARM_COUNT
     )
-    structured_completed = result.config.get("confirmed_farm_echo_count")
+    structured_completed = result.config.get(
+        "confirmed_farm_echo_absorption_count"
+    )
     if structured_completed is None:
-        initial_completed = count_farm_echo_kill_confirmations(initial_text)
+        initial_completed = count_farm_echo_absorptions(initial_text)
     else:
         initial_completed = int(structured_completed)
     initial_completed = min(target, initial_completed)
     remaining = max(0, target - initial_completed)
-    initial_run_dir = Path(result.log_slice_path).parent
     log.warning(
         "FarmEcho death detected: completed=%s target=%s remaining=%s",
         initial_completed,
@@ -188,56 +199,77 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
         remaining,
     )
 
-    first_recovery = _recover_safely(initial_run_dir, attempt=1)
-    if not first_recovery.success or remaining == 0:
-        return _write_composite(
-            result,
-            target=target,
-            initial_completed=initial_completed,
-            first_recovery=first_recovery,
-            retry=None,
-            retry_requested=remaining,
-            retry_completed=0,
-            final_recovery=None,
+    explicit_runtime_limit = result.config.get("farm_echo_runtime_limit_seconds")
+    retry_deadline = time.monotonic() + MAX_FARM_ECHO_RUNTIME_SECONDS
+    if explicit_runtime_limit is not None:
+        elapsed_runtime = float(
+            result.config.get("farm_echo_runtime_elapsed_seconds")
+            or result.duration_seconds
         )
+        remaining_runtime = max(
+            0.0,
+            float(explicit_runtime_limit) - elapsed_runtime,
+        )
+        retry_deadline = time.monotonic() + remaining_runtime
 
-    retry: OkRunResult | None = None
-    retry_completed = 0
+    attempts = [result]
+    attempt_counts = [initial_completed]
+    recoveries: list[FarmEchoRecoveryResult] = []
     retry_error = ""
-    final_recovery: FarmEchoRecoveryResult | None = None
     try:
-        attempt_limit = confirmed_retry_attempt_limit(remaining)
-        with temporary_farm_echo_repeat_count(attempt_limit):
-            retry = run_confirmed_farm_echo_retry(
-                target_count=remaining,
-                attempt_limit=attempt_limit,
+        current = result
+        while current.status != "success" and is_recoverable_farm_echo_death(
+            _read_log(current)
+        ):
+            recovery = _recover_safely(
+                Path(current.log_slice_path).parent,
+                attempt=len(recoveries) + 1,
             )
-        retry_text = _read_log(retry)
-        retry_completed = min(
-            remaining,
-            int(retry.config.get("confirmed_farm_echo_count") or 0),
-        )
-        if retry.status != "success" and is_recoverable_farm_echo_death(retry_text):
-            final_recovery = _recover_safely(
-                Path(retry.log_slice_path).parent,
-                attempt=2,
+            recoveries.append(recovery)
+            if not recovery.success or sum(attempt_counts) >= target:
+                break
+
+            remaining = target - sum(attempt_counts)
+            remaining_runtime = retry_deadline - time.monotonic()
+            if remaining_runtime <= 0:
+                raise RuntimeError(
+                    "FarmEcho one-hour absorption budget exhausted during recovery"
+                )
+            attempt_limit = confirmed_retry_attempt_limit(remaining)
+            with temporary_farm_echo_repeat_count(attempt_limit):
+                current = run_confirmed_farm_echo_retry(
+                    target_count=remaining,
+                    attempt_limit=attempt_limit,
+                    runtime_limit_seconds=min(
+                        MAX_FARM_ECHO_RUNTIME_SECONDS,
+                        remaining_runtime,
+                    ),
+                )
+            attempts.append(current)
+            attempt_counts.append(
+                min(
+                    remaining,
+                    int(
+                        current.config.get(
+                            "confirmed_farm_echo_absorption_count"
+                        )
+                        or 0
+                    ),
+                )
             )
     except Exception as exc:
         retry_error = str(exc)
         log.exception("FarmEcho bounded retry failed before returning a result")
     finally:
-        # A successful worker is already exiting; a failed worker must not race
-        # final cleanup or a second safety recovery.
+        # A returned worker is already exiting; do not let any failed leaf race
+        # final cleanup.
         stop_daily_workers()
 
     return _write_composite(
         result,
         target=target,
-        initial_completed=initial_completed,
-        first_recovery=first_recovery,
-        retry=retry,
-        retry_requested=remaining,
-        retry_completed=retry_completed,
-        final_recovery=final_recovery,
+        attempts=attempts,
+        attempt_counts=attempt_counts,
+        recoveries=recoveries,
         retry_error=retry_error,
     )

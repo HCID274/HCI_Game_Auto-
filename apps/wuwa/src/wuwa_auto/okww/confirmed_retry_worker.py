@@ -1,4 +1,4 @@
-"""Run a bounded FarmEcho retry and count causal post-combat evidence."""
+"""Run a bounded FarmEcho retry and count only actual echo absorption."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-CONFIRMED_MARKER = "HOST_FARM_ECHO_KILL_CONFIRMED"
-COMPLETED_MARKER = "HOST_FARM_ECHO_CONFIRMED_RETRY_COMPLETED"
+CONFIRMED_MARKER = "HOST_FARM_ECHO_ABSORPTION_CONFIRMED"
+COMPLETED_MARKER = "HOST_FARM_ECHO_ABSORPTION_TARGET_COMPLETED"
 
 
 def _write_result(path: Path, **values: object) -> None:
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("TARGET must be positive")
 
     started = datetime.now().astimezone()
-    confirmed = 0
+    absorbed = 0
     try:
         os.chdir(working_dir)
         sys.path.insert(0, str(working_dir))
@@ -53,9 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         class FarmEchoTask(UpstreamFarmEchoTask):
             def __init__(self, *args: object, **kwargs: object) -> None:
                 super().__init__(*args, **kwargs)
-                self.host_confirmed = 0
-                self.host_echo_confirmed_since_restart = False
-                self.host_ignore_next_restart_confirmation = False
+                self.host_absorbed = 0
 
             def teleport_to_configured_boss_and_prepare(self) -> None:
                 """Reuse a completed realm left behind by an earlier run."""
@@ -75,9 +73,8 @@ def main(argv: list[str] | None = None) -> int:
                     self.treat_as_not_in_realm = False
                     self._has_treasure = True
                     self._just_entered_boss_realm = False
-                    # The next restart UI belongs to the preceding run. Use it
-                    # to start a fresh fight, but never count that stale kill.
-                    self.host_ignore_next_restart_confirmation = True
+                    # This stale result is only a control-flow handoff. The
+                    # absorption target changes solely in ``incr_drop``.
                     self.init_parameters()
                     self.log_info("HOST_FARM_ECHO_REUSE_COMPLETED_REALM")
                     self.wait_click_feature(
@@ -101,70 +98,21 @@ def main(argv: list[str] | None = None) -> int:
                 self.ensure_main(time_out=30)
                 super().teleport_to_configured_boss_and_prepare()
 
-            def host_record_confirmation(self, source: str) -> None:
-                nonlocal confirmed
-                self.host_confirmed += 1
-                confirmed = self.host_confirmed
+            def host_record_absorption(self) -> None:
+                nonlocal absorbed
+                self.host_absorbed += 1
+                absorbed = self.host_absorbed
                 self.log_info(
-                    f"{CONFIRMED_MARKER} {self.host_confirmed}/{target} "
-                    f"source={source}"
+                    f"{CONFIRMED_MARKER} {self.host_absorbed}/{target}"
                 )
-                if self.host_confirmed >= target:
+                if self.host_absorbed >= target:
                     raise TargetReached
 
             def incr_drop(self, dropped: object) -> object:
                 result = super().incr_drop(dropped)
                 if dropped and self._in_realm:
-                    self.host_echo_confirmed_since_restart = True
-                    self.host_record_confirmation("echo_absorbed")
+                    self.host_record_absorption()
                 return result
-
-            def wait_click_feature(
-                self,
-                feature: object,
-                *args: object,
-                **kwargs: object,
-            ) -> object:
-                nonlocal confirmed
-                relative_x = kwargs.get("relative_x", 0.5)
-                is_restart = (
-                    feature == "claim_cancel_button_hcenter_vcenter"
-                    and relative_x == 2
-                )
-                if not is_restart:
-                    return super().wait_click_feature(feature, *args, **kwargs)
-
-                if self.host_ignore_next_restart_confirmation:
-                    self.host_ignore_next_restart_confirmation = False
-                    return super().wait_click_feature(feature, *args, **kwargs)
-
-                if self.host_echo_confirmed_since_restart:
-                    # The preceding kill was already proven by an absorbed
-                    # echo. Restart normally without counting it twice.
-                    self.host_echo_confirmed_since_restart = False
-                    return super().wait_click_feature(feature, *args, **kwargs)
-
-                next_confirmed = self.host_confirmed + 1
-                if next_confirmed >= target:
-                    # Click the visible cancel/leave button itself instead of
-                    # the adjacent restart button. This proves the kill while
-                    # avoiding an unnecessary extra battle.
-                    final_kwargs = dict(kwargs)
-                    final_kwargs["relative_x"] = 0.5
-                    clicked = super().wait_click_feature(
-                        feature,
-                        *args,
-                        **final_kwargs,
-                    )
-                    if clicked:
-                        self.wait_in_team_and_world(time_out=120)
-                        self.host_record_confirmation("restart_screen")
-                    return clicked
-
-                clicked = super().wait_click_feature(feature, *args, **kwargs)
-                if clicked:
-                    self.host_record_confirmation("restart_screen")
-                return clicked
 
             def run(self) -> None:
                 WWOneTimeTask.run(self)
@@ -174,22 +122,22 @@ def main(argv: list[str] | None = None) -> int:
                 except TargetReached:
                     self.log_info(COMPLETED_MARKER)
                     return
-                if self.host_confirmed < target:
+                if self.host_absorbed < target:
                     raise RuntimeError(
                         "confirmed retry exhausted its bounded combat attempts: "
-                        f"confirmed={self.host_confirmed}/{target}"
+                        f"absorbed={self.host_absorbed}/{target}"
                     )
 
         run_task(config, task=FarmEchoTask, debug=False, exit_after=False)
-        if confirmed < target:
+        if absorbed < target:
             raise RuntimeError(
-                f"confirmed retry returned early: confirmed={confirmed}/{target}"
+                f"confirmed retry returned early: absorbed={absorbed}/{target}"
             )
         _write_result(
             result_path,
             success=True,
             reason=COMPLETED_MARKER,
-            confirmed_count=confirmed,
+            absorbed_count=absorbed,
             target_count=target,
             started_at=started.isoformat(),
             finished_at=datetime.now().astimezone().isoformat(),
@@ -200,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             result_path,
             success=False,
             reason=str(exc),
-            confirmed_count=confirmed,
+            absorbed_count=absorbed,
             target_count=target,
             traceback=traceback.format_exc(),
             started_at=started.isoformat(),

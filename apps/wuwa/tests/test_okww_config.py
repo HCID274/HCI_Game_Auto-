@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from wuwa_auto.okww import config
+from wuwa_auto.okww.confirmed_retry import (
+    MAX_FARM_ECHO_RUNTIME_SECONDS,
+    run_confirmed_farm_echo_retry,
+)
 from wuwa_auto.okww.runner import (
     preflight_farm_echo_task,
     preflight_weekly_garden_task,
@@ -124,6 +130,14 @@ class OkConfigurationTests(unittest.TestCase):
 
 
 class OkRunnerPreflightTests(unittest.TestCase):
+    def test_absorption_retry_rejects_runtime_over_one_hour(self) -> None:
+        with pytest.raises(ValueError, match="within"):
+            run_confirmed_farm_echo_retry(
+                target_count=5,
+                attempt_limit=60,
+                runtime_limit_seconds=MAX_FARM_ECHO_RUNTIME_SECONDS + 1,
+            )
+
     def test_farm_echo_runner_uses_farm_echo_preflight(self) -> None:
         with patch("wuwa_auto.okww.runner._run_task") as run_task:
             run_farm_echo_task()

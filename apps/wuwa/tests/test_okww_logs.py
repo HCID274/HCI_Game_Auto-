@@ -3,6 +3,7 @@ from pathlib import Path
 from wuwa_auto.okww.logs import (
     SUCCESS_MARKER,
     LogCursor,
+    count_farm_echo_absorptions,
     count_farm_echo_completions,
     count_farm_echo_kill_confirmations,
     find_failure,
@@ -77,6 +78,7 @@ FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
 FarmEchoTask:farm echo yolo find True
 """
     assert count_farm_echo_kill_confirmations(text) == 2
+    assert count_farm_echo_absorptions(text) == 2
 
 
 def test_cumulative_host_confirmation_overrides_upstream_evidence() -> None:
@@ -87,3 +89,17 @@ FarmEchoTask:farm echo walk_find_echo True
 FarmEchoTask:HOST_FARM_ECHO_KILL_CONFIRMED 2/2 source=echo_absorbed
 """
     assert count_farm_echo_kill_confirmations(text) == 2
+
+
+def test_absorption_count_ignores_kills_without_echo_drop() -> None:
+    text = """
+FarmEchoTask:farm echo walk_find_echo None
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/5
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 2/5
+"""
+    assert count_farm_echo_kill_confirmations(text) == 3
+    assert count_farm_echo_absorptions(text) == 2

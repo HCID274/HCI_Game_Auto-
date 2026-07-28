@@ -6,7 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from wuwa_auto.okww.logs import count_farm_echo_kill_confirmations
+from wuwa_auto.okww.logs import (
+    count_farm_echo_absorptions,
+    count_farm_echo_kill_confirmations,
+)
 from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.user_context import load_reporting_context
 
@@ -115,11 +118,6 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     followup: list[ReportItem] = []
     recovery = result.config.get("farm_echo_recovery") or {}
     boss_runs = count_farm_echo_kill_confirmations(text)
-    confirmed_runs = result.config.get("confirmed_farm_echo_count")
-    if confirmed_runs is not None:
-        boss_runs = int(confirmed_runs)
-    if recovery.get("triggered"):
-        boss_runs = int(recovery.get("total_completed") or boss_runs)
     if boss_runs:
         boss_index = result.config.get("boss_challenge_index")
         if boss_index is None:
@@ -130,24 +128,24 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                 # OK logs its internal zero-based list index; the GUI is one-based.
                 boss_index = int(teleports[-1].group("index")) + 1
         label = f"讨伐强敌第{boss_index}项" if boss_index else "讨伐强敌"
-        if recovery.get("triggered"):
-            target = int(recovery.get("target_count") or boss_runs)
-            wording = f"{label} 已完成{boss_runs}/{target}次"
-        else:
-            wording = f"{label} {boss_runs}次"
-        followup.append(ReportItem("boss-challenge", wording))
+        followup.append(ReportItem("boss-challenge", f"{label} {boss_runs}次"))
 
     if recovery.get("triggered"):
         retry_completed = int(recovery.get("retry_completed") or 0)
+        recovery_attempts = int(recovery.get("recovery_attempts") or 1)
         total_completed = int(recovery.get("total_completed") or boss_runs)
         target = int(recovery.get("target_count") or total_completed)
         if result.status == "success":
             if retry_completed:
                 recovery_wording = (
-                    f"讨伐中途倒地1次，已自动退本回血并补跑{retry_completed}次"
+                    f"讨伐中途倒地{recovery_attempts}次，"
+                    "已自动退本回血并补吸收声骸"
+                    f"{retry_completed}次"
                 )
             else:
-                recovery_wording = "讨伐中途倒地1次，已自动退本回血"
+                recovery_wording = (
+                    f"讨伐中途倒地{recovery_attempts}次，已自动退本回血"
+                )
             followup.append(
                 ReportItem(
                     "boss-death-recovered",
@@ -162,21 +160,38 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
             issues.append(
                 ReportItem(
                     "boss-death-recovery-incomplete",
-                    f"讨伐中途倒地，{recovery_state}；本轮累计完成{total_completed}/{target}次",
+                    f"讨伐中途倒地{recovery_attempts}次，{recovery_state}；"
+                    "声骸累计吸收"
+                    f"{total_completed}/{target}次",
                 )
             )
 
-    echo_picked = sum(
-        text.count(marker)
-        for marker in (
-            "FarmEchoTask:farm echo on the face",
-            "FarmEchoTask:farm echo yolo find True",
-            "FarmEchoTask:farm echo walk_circle_find_echo True",
-            "FarmEchoTask:farm echo walk_find_echo True",
-        )
+    echo_picked = count_farm_echo_absorptions(text)
+    structured_absorptions = result.config.get(
+        "confirmed_farm_echo_absorption_count"
     )
+    if structured_absorptions is not None:
+        echo_picked = int(structured_absorptions)
+    if recovery.get("triggered"):
+        echo_picked = int(recovery.get("total_completed") or echo_picked)
     if echo_picked:
         followup.append(ReportItem("echo-picked", f"吸收声骸{echo_picked}次"))
+
+    absorption_target = result.config.get("farm_echo_absorption_target")
+    if absorption_target is None and (
+        result.config.get("workflow_task") == "farm_echo_confirmed_retry"
+    ):
+        absorption_target = result.config.get("target_count")
+    if (
+        absorption_target is not None
+        and echo_picked < int(absorption_target)
+    ):
+        issues.append(
+            ReportItem(
+                "echo-absorption-incomplete",
+                f"声骸吸收目标仅完成{echo_picked}/{int(absorption_target)}次",
+            )
+        )
 
     optional_failures = {
         "GardenTask Failed": "幻梦游园执行异常",

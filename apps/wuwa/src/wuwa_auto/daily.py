@@ -5,6 +5,7 @@ from datetime import datetime
 
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
 from wuwa_auto.input.viiper import managed_virtual_mouse
+from wuwa_auto.okww.absorption_flow import ensure_daily_farm_echo_absorptions
 from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
@@ -45,6 +46,8 @@ def _run_workflow(task_name: str, task_runner) -> int:
                 acceleration_connected = True
                 log.info("%s workflow: start OK-WW task", task_name)
                 result = task_runner()
+                if task_name == "daily":
+                    result = ensure_daily_farm_echo_absorptions(result)
                 result = maybe_recover_farm_echo_death(result)
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"

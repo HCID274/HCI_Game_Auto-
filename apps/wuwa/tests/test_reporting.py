@@ -191,10 +191,12 @@ DailyTask:Daily Task Completed
     assert all(item.item_id != "boss-challenge" for item in facts.followup)
 
 
-def test_confirmed_retry_uses_structured_kill_count(tmp_path: Path) -> None:
-    text = "\n".join(
-        ["FarmEchoTask:farm echo walk_find_echo None"] * 5
-    )
+def test_confirmed_retry_uses_structured_absorption_count(tmp_path: Path) -> None:
+    text = """
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+FarmEchoTask:farm echo walk_find_echo True
+"""
     facts = parse_run(
         _result(
             tmp_path,
@@ -202,13 +204,16 @@ def test_confirmed_retry_uses_structured_kill_count(tmp_path: Path) -> None:
             config={
                 "boss_challenge_index": 2,
                 "workflow_task": "farm_echo_confirmed_retry",
-                "confirmed_farm_echo_count": 2,
+                "confirmed_farm_echo_absorption_count": 2,
             },
         )
     )
     narrative = build_fallback_narrative(facts)
 
-    assert facts.followup[0].text == "讨伐强敌第2项 2次"
+    assert [item.text for item in facts.followup] == [
+        "讨伐强敌第2项 2次",
+        "吸收声骸2次",
+    ]
     assert narrative.summary.startswith("鸣潮后续任务完成")
 
 
@@ -216,7 +221,11 @@ def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
     tmp_path: Path,
 ) -> None:
     text = "\n".join(
-        ["FarmEchoTask:farm echo walk_find_echo None"] * 5
+        [
+            "FarmEchoTask:farm echo walk_find_echo True",
+            "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)",
+        ]
+        * 5
     )
     result = _result(
         tmp_path,
@@ -227,6 +236,7 @@ def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
             "farm_echo_recovery": {
                 "triggered": True,
                 "target_count": 5,
+                "recovery_attempts": 2,
                 "retry_completed": 2,
                 "total_completed": 5,
                 "first_safe_recovery": True,
@@ -239,9 +249,38 @@ def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
 
     assert facts.overall_status == "completed"
     assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 已完成5/5次",
-        "讨伐中途倒地1次，已自动退本回血并补跑2次",
+        "讨伐强敌第2项 5次",
+        "讨伐中途倒地2次，已自动退本回血并补吸收声骸2次",
+        "吸收声骸5次",
     ]
+
+
+def test_absorption_timeout_reports_partial_target(tmp_path: Path) -> None:
+    text = """
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+FarmEchoTask:farm echo walk_find_echo True
+"""
+    facts = parse_run(
+        _result(
+            tmp_path,
+            text,
+            status="failed",
+            reason="FarmEcho absorption target timed out after 3600 seconds",
+            config={
+                "boss_challenge_index": 2,
+                "workflow_task": "farm_echo_confirmed_retry",
+                "target_count": 5,
+                "confirmed_farm_echo_absorption_count": 2,
+            },
+        )
+    )
+
+    assert [item.text for item in facts.followup] == [
+        "讨伐强敌第2项 2次",
+        "吸收声骸2次",
+    ]
+    assert facts.issues[-1].text == "声骸吸收目标仅完成2/5次"
 
 
 def test_ai_cannot_promote_battle_pass_action_to_claimed_reward(

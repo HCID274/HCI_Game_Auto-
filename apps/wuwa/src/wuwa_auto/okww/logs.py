@@ -28,6 +28,9 @@ FARM_ECHO_RESTART_CONFIRMATION = (
     "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter"
 )
 HOST_FARM_ECHO_CONFIRMATION = "HOST_FARM_ECHO_KILL_CONFIRMED"
+HOST_FARM_ECHO_ABSORPTION_CONFIRMATION = (
+    "HOST_FARM_ECHO_ABSORPTION_CONFIRMED"
+)
 FARM_ECHO_PICKUP_CONFIRMATION_MARKERS = (
     "FarmEchoTask:farm echo on the face",
     "FarmEchoTask:farm echo yolo find True",
@@ -124,6 +127,25 @@ def count_farm_echo_kill_confirmations(text: str) -> int:
     if pending_echo_pickup:
         confirmed += 1
     return confirmed
+
+
+def count_farm_echo_absorptions(text: str) -> int:
+    """Count actual echo pickups, preferring the host's cumulative fact."""
+    host_counts: list[int] = []
+    for line in text.splitlines():
+        if HOST_FARM_ECHO_ABSORPTION_CONFIRMATION not in line:
+            continue
+        suffix = line.split(HOST_FARM_ECHO_ABSORPTION_CONFIRMATION, 1)[1].strip()
+        numerator = suffix.split("/", 1)[0].strip()
+        if numerator.isdigit():
+            host_counts.append(int(numerator))
+    if host_counts:
+        return max(host_counts)
+    return sum(
+        1
+        for line in text.splitlines()
+        if any(marker in line for marker in FARM_ECHO_PICKUP_CONFIRMATION_MARKERS)
+    )
 
 
 def is_recoverable_farm_echo_death(text: str) -> bool:

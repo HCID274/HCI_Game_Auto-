@@ -1,6 +1,6 @@
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
@@ -12,8 +12,8 @@ FarmEchoTask:raise_not_in_combat char dead
 FarmEchoTask:info_set Revive Failed
 Daily Task exception stopped
 """
-COMPLETION = "FarmEchoTask:farm echo walk_find_echo None\n"
-CONFIRMATION = (
+ABSORPTION = "FarmEchoTask:farm echo walk_find_echo True\n"
+RESTART_CONFIRMATION = (
     "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter "
     "(769, 900) after_sleep 0\n"
 )
@@ -25,7 +25,7 @@ def _result(
     text: str,
     *,
     status: str,
-    confirmed: int | None = None,
+    absorbed: int | None = None,
 ) -> OkRunResult:
     run_dir = root / run_id
     run_dir.mkdir(parents=True)
@@ -36,8 +36,8 @@ def _result(
         "repeat_farm_count": 5,
         "boss_challenge_index": 2,
     }
-    if confirmed is not None:
-        config["confirmed_farm_echo_count"] = confirmed
+    if absorbed is not None:
+        config["confirmed_farm_echo_absorption_count"] = absorbed
     return OkRunResult(
         run_id=run_id,
         status=status,
@@ -58,13 +58,13 @@ def _safe(reason: str = "healed") -> FarmEchoRecoveryResult:
 
 def test_death_recovers_and_retries_only_remaining_count(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
-    initial = _result(runs, "initial", CONFIRMATION * 3 + DEATH, status="failed")
+    initial = _result(runs, "initial", ABSORPTION * 3 + DEATH, status="failed")
     retry = _result(
         runs,
         "retry",
-        CONFIRMATION * 2,
+        ABSORPTION * 2,
         status="success",
-        confirmed=2,
+        absorbed=2,
     )
 
     with patch(
@@ -94,6 +94,7 @@ def test_death_recovers_and_retries_only_remaining_count(tmp_path: Path) -> None
     run_retry.assert_called_once_with(
         target_count=2,
         attempt_limit=24,
+        runtime_limit_seconds=ANY,
     )
 
 
@@ -103,9 +104,9 @@ def test_death_before_first_completion_retries_full_target(tmp_path: Path) -> No
     retry = _result(
         runs,
         "retry",
-        CONFIRMATION * 5,
+        ABSORPTION * 5,
         status="success",
-        confirmed=5,
+        absorbed=5,
     )
 
     with patch(
@@ -133,6 +134,7 @@ def test_death_before_first_completion_retries_full_target(tmp_path: Path) -> No
     run_retry.assert_called_once_with(
         target_count=5,
         attempt_limit=60,
+        runtime_limit_seconds=ANY,
     )
 
 
@@ -143,17 +145,17 @@ def test_structured_zero_does_not_count_stale_restart_click(
     initial = _result(
         runs,
         "initial",
-        CONFIRMATION + DEATH,
+        RESTART_CONFIRMATION + DEATH,
         status="failed",
-        confirmed=0,
+        absorbed=0,
     )
     initial.config["repeat_farm_count"] = 1
     retry = _result(
         runs,
         "retry",
-        "HOST_FARM_ECHO_KILL_CONFIRMED 1/1\n",
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
         status="success",
-        confirmed=1,
+        absorbed=1,
     )
 
     with patch(
@@ -177,26 +179,94 @@ def test_structured_zero_does_not_count_stale_restart_click(
     assert recovery["retry_requested"] == 1
     assert recovery["total_completed"] == 1
     override.assert_called_once_with(12)
-    run_retry.assert_called_once_with(target_count=1, attempt_limit=12)
+    run_retry.assert_called_once_with(
+        target_count=1,
+        attempt_limit=12,
+        runtime_limit_seconds=ANY,
+    )
 
 
-def test_second_death_is_made_safe_but_never_retried_again(tmp_path: Path) -> None:
+def test_second_death_retries_again_within_the_shared_deadline(
+    tmp_path: Path,
+) -> None:
     runs = tmp_path / "runs"
-    initial = _result(runs, "initial", CONFIRMATION * 3 + DEATH, status="failed")
-    retry = _result(
+    initial = _result(runs, "initial", ABSORPTION * 3 + DEATH, status="failed")
+    first_retry = _result(
         runs,
-        "retry",
-        CONFIRMATION + DEATH,
+        "retry-1",
+        ABSORPTION + DEATH,
         status="failed",
-        confirmed=1,
+        absorbed=1,
+    )
+    second_retry = _result(
+        runs,
+        "retry-2",
+        ABSORPTION,
+        status="success",
+        absorbed=1,
     )
 
     with patch(
         "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
     ), patch(
         "wuwa_auto.okww.recovery_flow._recover_safely",
-        side_effect=[_safe("first"), _safe("final")],
+        side_effect=[_safe("first"), _safe("second")],
     ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=[first_retry, second_retry],
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["total_completed"] == 5
+    assert recovery["recovery_attempts"] == 2
+    assert recovery["final_safe_recovery"] is True
+    assert recover.call_count == 2
+    assert run_retry.call_count == 2
+    assert run_retry.call_args_list[0].kwargs["target_count"] == 2
+    assert run_retry.call_args_list[1].kwargs["target_count"] == 1
+
+
+def test_recovery_retry_shares_the_one_hour_absorption_budget(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        DEATH,
+        status="failed",
+        absorbed=0,
+    )
+    initial.config.update(
+        {
+            "repeat_farm_count": 1,
+            "target_count": 1,
+            "farm_echo_runtime_limit_seconds": 3600,
+        }
+    )
+    retry = _result(
+        runs,
+        "retry",
+        ABSORPTION,
+        status="success",
+        absorbed=1,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.time.monotonic",
+        side_effect=[0.0, 100.0, 200.0],
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ), patch(
         "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
         side_effect=lambda count: nullcontext(),
     ), patch(
@@ -207,9 +277,48 @@ def test_second_death_is_made_safe_but_never_retried_again(tmp_path: Path) -> No
     ):
         result = maybe_recover_farm_echo_death(initial)
 
+    assert result.status == "success"
+    run_retry.assert_called_once_with(
+        target_count=1,
+        attempt_limit=12,
+        runtime_limit_seconds=2900.0,
+    )
+
+
+def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        DEATH,
+        status="failed",
+        absorbed=0,
+    )
+    initial.config.update(
+        {
+            "target_count": 1,
+            "farm_echo_runtime_limit_seconds": 3600,
+            "farm_echo_runtime_elapsed_seconds": 3600,
+        }
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.time.monotonic",
+        side_effect=[0.0, 100.0, 100.0],
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry"
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
     assert result.status == "failed"
-    recovery = result.config["farm_echo_recovery"]
-    assert recovery["total_completed"] == 4
-    assert recovery["final_safe_recovery"] is True
-    assert recover.call_count == 2
-    assert run_retry.call_count == 1
+    assert "budget exhausted" in result.config["farm_echo_recovery"]["retry_error"]
+    assert result.config["farm_echo_recovery"]["first_safe_recovery"] is True
+    run_retry.assert_not_called()
