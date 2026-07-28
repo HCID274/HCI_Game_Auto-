@@ -77,7 +77,9 @@ uv run wuwa-auto report 20260727_001843
 
 幻梦游园不再放在每日 OK-WW 配置中，而由
 `Game_Wuwa_WeeklyGarden_Sunday` 每周日 08:00 独立执行。两项计划任务复用同一
-全局互斥锁，周日任务不会与延长运行的每日总控抢占桌面。
+全局互斥锁；周常遇到仍在运行的每日总控时最多等待 3.5 小时，释放后才启动。
+日常与周常各自收敛并各发一条最终飞书，不共享日志切片或报告。日常计划任务仍
+以 3 小时为硬保险；周常计划任务的 8 小时上限包含锁等待和自身运行时间。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/register_chain_task.ps1

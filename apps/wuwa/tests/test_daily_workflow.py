@@ -208,3 +208,50 @@ def test_settlement_exception_cannot_report_a_stale_success(
     assert ABSORPTION.strip() in Path(final_result.log_slice_path).read_text(
         encoding="utf-8"
     )
+
+
+def test_daily_and_weekly_are_independent_report_transactions(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    daily = _result(
+        runs,
+        "daily",
+        ABSORPTION * 5,
+        status="success",
+        absorbed=5,
+    )
+    daily.config["workflow_task"] = "daily"
+    weekly = _result(
+        runs,
+        "weekly",
+        "GardenTask:乐园任务完成, 已达到上限\n",
+        status="success",
+        absorbed=0,
+    )
+    weekly.config["workflow_task"] = "weekly_garden"
+    cleanup = _cleanup()
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse",
+        return_value=nullcontext(),
+    ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
+        return_value=daily,
+    ) as ensure_absorptions, patch(
+        "wuwa_auto.daily.maybe_recover_farm_echo_death",
+        side_effect=lambda result: result,
+    ), patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=cleanup,
+    ), patch("wuwa_auto.daily.report_run") as report:
+        daily_code = _run_workflow("daily", lambda: daily)
+        weekly_code = _run_workflow("weekly_garden", lambda: weekly)
+
+    assert daily_code == 0
+    assert weekly_code == 0
+    ensure_absorptions.assert_called_once_with(daily)
+    assert [call.args[0].run_id for call in report.call_args_list] == [
+        "daily",
+        "weekly",
+    ]
