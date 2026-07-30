@@ -167,6 +167,15 @@ def _completion_evidence(run: StaminaRun) -> str:
     if (
         run.status == "completed"
         and run.planned_count is not None
+        and run.completed_instances >= run.planned_count
+    ):
+        return (
+            f"{run.name}完成{run.completed_instances}次，"
+            f"覆盖计划{run.planned_count}次"
+        )
+    if (
+        run.status == "completed"
+        and run.planned_count is not None
         and run.rounds is not None
         and run.rewards_per_round is not None
         and run.rounds * run.rewards_per_round >= run.planned_count

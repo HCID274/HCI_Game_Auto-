@@ -201,6 +201,7 @@ def parse_m7a_run(
     pending_activity_name = ""
     pending_activity_remaining: int | None = None
     pending_activity_batch_count = 0
+    pending_plan_batch_count = 0
     capturing_training_dungeons = False
     last_plan_constraint = ""
     redemption_total = 0
@@ -219,6 +220,7 @@ def parse_m7a_run(
                 active_section = label.removeprefix("开始").strip()
                 if active_section != "执行体力计划":
                     active_plan = None
+                    pending_plan_batch_count = 0
                 if active_section != "检测活动":
                     active_activity = None
                     pending_activity_batch_count = 0
@@ -242,8 +244,14 @@ def parse_m7a_run(
                 farm_rewards = int(farm_match.group("rewards"))
                 if _in_power_plan_section(active_section) and active_plan is not None:
                     active_plan.name = farm_name
-                    active_plan.rounds = farm_rounds
-                    active_plan.rewards_per_round = farm_rewards
+                    if active_plan.rounds is None:
+                        active_plan.rounds = farm_rounds
+                        active_plan.rewards_per_round = farm_rewards
+                    else:
+                        active_plan.rounds += farm_rounds
+                        if active_plan.rewards_per_round != farm_rewards:
+                            active_plan.rewards_per_round = None
+                    pending_plan_batch_count = farm_rounds * farm_rewards
                 elif (
                     pending_activity_name
                     and pending_activity_remaining is not None
@@ -433,6 +441,7 @@ def parse_m7a_run(
             last_plan_constraint = ""
             active_activity = None
             pending_activity_batch_count = 0
+            pending_plan_batch_count = 0
             active_plan = StaminaRun(
                 name=plan_match.group("name").strip(),
                 plan_index=int(plan_match.group("index")),
@@ -444,7 +453,11 @@ def parse_m7a_run(
             active_section = f"体力计划：{active_plan.name}"
 
         completed_instance_match = INSTANCE_COMPLETED_PATTERN.match(message)
-        if completed_instance_match and active_plan is not None:
+        if (
+            completed_instance_match
+            and active_plan is not None
+            and pending_plan_batch_count == 0
+        ):
             active_plan.completed_instances = max(
                 active_plan.completed_instances,
                 int(completed_instance_match.group("count")),
@@ -455,6 +468,9 @@ def parse_m7a_run(
             and _in_power_plan_section(active_section)
             and active_plan is not None
         ):
+            if pending_plan_batch_count > 0:
+                active_plan.completed_instances += pending_plan_batch_count
+                pending_plan_batch_count = 0
             active_plan.status = "completed"
             _append_daily_event(
                 report,

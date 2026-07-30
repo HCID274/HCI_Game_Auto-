@@ -249,6 +249,32 @@ class ReminderTests(unittest.TestCase):
 
 
 class LogParserTests(unittest.TestCase):
+    def test_same_plan_multiple_batches_are_accumulated(self) -> None:
+        content = """\
+|                                                 开始执行体力计划                                                  |
+2026-07-30 10:09:18,440 | INFO | 执行体力计划 [1/7]: 拟造花萼（赤） - 海原电视塔, 计划次数: 127
+----------------------------- 开始刷拟造花萼（赤） - 海原电视塔，总计1轮，每轮包含24次 ------------------------------
+2026-07-30 10:13:26,092 | INFO | 第1次副本完成
+2026-07-30 10:13:36,515 | INFO | 副本任务完成
+------------------------------ 开始刷拟造花萼（赤） - 海原电视塔，总计1轮，每轮包含4次 ------------------------------
+2026-07-30 10:15:07,461 | INFO | 第1次副本完成
+2026-07-30 10:15:17,872 | INFO | 副本任务完成
+2026-07-30 10:15:17,872 | INFO | 体力计划剩余: 拟造花萼（赤） - 海原电视塔, 剩余次数: 99
+"""
+
+        report = parse_m7a_run(content, now=datetime(2026, 7, 30, 10, 16))
+
+        self.assertEqual(len(report.stamina_runs), 1)
+        stamina = report.stamina_runs[0]
+        self.assertEqual(stamina.completed_instances, 28)
+        self.assertEqual(stamina.rounds, 2)
+        self.assertIsNone(stamina.rewards_per_round)
+        self.assertEqual(stamina.remaining_plan_count, 99)
+        self.assertIn(
+            "1. 拟造花萼（赤）·海原电视塔 28次，剩余计划99次",
+            build_fallback_narrative(report).daily,
+        )
+
     def test_activity_priority_keeps_activity_and_own_plan_counters(self) -> None:
         content = """\
 2026-07-27 10:47:48,707 | INFO | 位面分裂剩余次数：12

@@ -28,6 +28,8 @@ def _plan_fully_completed(item: StaminaRun) -> bool:
         return False
     if item.remaining_plan_count == 0:
         return True
+    if item.planned_count is not None and item.completed_instances >= item.planned_count:
+        return True
     return (
         item.planned_count is not None
         and item.rounds is not None
@@ -48,7 +50,7 @@ def _format_stamina_run(item: StaminaRun) -> str:
         name = f"{item.activity_name}：{name}"
 
     details: list[str] = []
-    if item.source == "activity" and item.completed_instances:
+    if item.completed_instances:
         details.append(f"{item.completed_instances}次")
     elif item.rounds == 1 and item.rewards_per_round is not None:
         details.append(f"{item.rewards_per_round}次")
@@ -336,8 +338,8 @@ def _validate_stamina_wording(
         if item.source == "activity":
             if item.activity_name:
                 required.append(item.activity_name)
-            if item.completed_instances:
-                required.append(f"{item.completed_instances}次")
+        if item.completed_instances:
+            required.append(f"{item.completed_instances}次")
         if item.remaining_plan_count == 0:
             required.append("已完成")
         elif item.remaining_plan_count is not None:
