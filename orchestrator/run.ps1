@@ -126,6 +126,21 @@ function Remove-RetiredTasks {
     }
 }
 
+function Invoke-DesktopPreflight {
+    if ($DryRun -or $runMode -eq 'validate') { return }
+
+    $firewallScript = Join-Path $repoRoot 'apps\wuwa\scripts\configure_codex_firewall.ps1'
+    if (-not (Test-Path -LiteralPath $firewallScript -PathType Leaf)) {
+        throw "desktop preflight script not found: $firewallScript"
+    }
+
+    Write-OrchestratorLog 'start desktop firewall preflight'
+    & $firewallScript 2>&1 | ForEach-Object {
+        Write-OrchestratorLog "desktop firewall preflight: $_"
+    }
+    Write-OrchestratorLog 'finish desktop firewall preflight'
+}
+
 $startedAt = (Get-Date).ToString('o')
 $starRailCode = 99
 $starRailCleanupCode = 99
@@ -145,6 +160,7 @@ try {
     }
     else {
         Write-OrchestratorLog "run mode=$runMode dry_run=$([bool]$DryRun)"
+        Invoke-DesktopPreflight
         switch ($runMode) {
             'daily-chain' {
                 Remove-RetiredTasks

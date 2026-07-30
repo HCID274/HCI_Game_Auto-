@@ -106,7 +106,7 @@ namespace Hcid274 {
 $package = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue
 if (-not $package) {
     Write-Host "Codex package is not installed; firewall setup skipped"
-    exit 0
+    return
 }
 
 $packageSid = [Hcid274.AppContainerSid]::Derive($package.PackageFamilyName)
@@ -129,7 +129,7 @@ if (-not $existing) {
         -Group "HCID274 Game Automation" `
         -Direction Inbound `
         -Action Block `
-        -Profile Private,Public `
+        -Profile Any `
         -Protocol Any `
         -Package $packageSid | Out-Null
 }
@@ -139,10 +139,65 @@ else {
         -Enabled True `
         -Direction Inbound `
         -Action Block `
-        -Profile Private,Public | Out-Null
+        -Profile Any | Out-Null
 }
 
 Write-Host "Codex inbound firewall rule ready: $ruleName ($packageSid)"
+
+# Codex is packaged, but its visible desktop process is a full-trust
+# ChatGPT.exe.  A package-SID rule does not suppress Windows Defender
+# Firewall's per-program listen prompt for that process.  Its WindowsApps
+# path changes after every Store update, so refresh stable program rules on
+# every unattended orchestrator start instead of relying on the old version's
+# automatically generated "Query User" rules.
+$manifest = Get-AppxPackageManifest -Package $package
+$application = @($manifest.Package.Applications.Application) |
+    Where-Object { $_.EntryPoint -eq "Windows.FullTrustApplication" } |
+    Select-Object -First 1
+if (-not $application -or -not $application.Executable) {
+    throw "Codex full-trust executable was not found in the package manifest"
+}
+
+$relativeExecutable = ([string]$application.Executable).Replace('/', '\')
+$fullTrustExecutable = Join-Path $package.InstallLocation $relativeExecutable
+if (-not (Test-Path -LiteralPath $fullTrustExecutable -PathType Leaf)) {
+    throw "Codex full-trust executable does not exist: $fullTrustExecutable"
+}
+
+foreach ($protocol in @('TCP', 'UDP')) {
+    $programRuleName = "HCID274_Codex_FullTrust_Inbound_Block_$protocol"
+    $programRule = Get-NetFirewallRule -Name $programRuleName -ErrorAction SilentlyContinue
+    if ($programRule) {
+        $programFilter = $programRule | Get-NetFirewallApplicationFilter
+        if ($programFilter.Program -ne $fullTrustExecutable) {
+            Remove-NetFirewallRule -Name $programRuleName
+            $programRule = $null
+        }
+    }
+
+    if (-not $programRule) {
+        New-NetFirewallRule `
+            -Name $programRuleName `
+            -DisplayName "HCID274 Codex full-trust inbound block ($protocol)" `
+            -Description "Prevent Codex full-trust process firewall prompts after app updates" `
+            -Group "HCID274 Game Automation" `
+            -Direction Inbound `
+            -Action Block `
+            -Profile Any `
+            -Protocol $protocol `
+            -Program $fullTrustExecutable | Out-Null
+    }
+    else {
+        Set-NetFirewallRule `
+            -Name $programRuleName `
+            -Enabled True `
+            -Direction Inbound `
+            -Action Block `
+            -Profile Any | Out-Null
+    }
+
+    Write-Host "Codex full-trust firewall rule ready: $programRuleName ($fullTrustExecutable)"
+}
 
 if (-not $SkipPromptClose) {
     $pickerHosts = @(
