@@ -14,6 +14,11 @@ FarmEchoTask:info_set Revive Failed
 Daily Task exception stopped
 """
 ABSORPTION = "FarmEchoTask:farm echo walk_find_echo True\n"
+RESTORED_TACET_FAILURE = """
+DailyTask:open_daily
+DailyTask:can't find gray_book_boss, make sure f2 is the hotkey for book
+Daily Task exception stopped
+"""
 
 
 def _result(
@@ -255,3 +260,131 @@ def test_daily_and_weekly_are_independent_report_transactions(
         "daily",
         "weekly",
     ]
+
+
+def test_restored_tacet_challenge_is_exited_and_daily_retried_once(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        RESTORED_TACET_FAILURE,
+        status="failed",
+        absorbed=0,
+    )
+    initial.config["workflow_task"] = "daily"
+    retry = _result(
+        runs,
+        "retry",
+        ABSORPTION * 5 + "Daily Task Completed\n",
+        status="success",
+        absorbed=5,
+    )
+    retry.config["workflow_task"] = "daily"
+    cleanup = _cleanup()
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse",
+        return_value=nullcontext(),
+    ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.stop_daily_workers"
+    ) as stop_worker, patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ) as recover_world, patch(
+        "wuwa_auto.daily.run_daily_task",
+        return_value=retry,
+    ) as retry_daily, patch(
+        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
+        side_effect=lambda result: result,
+    ), patch(
+        "wuwa_auto.daily.maybe_recover_farm_echo_death",
+        side_effect=lambda result: result,
+    ), patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=cleanup,
+    ), patch("wuwa_auto.daily.report_run") as report:
+        exit_code = _run_workflow("daily", lambda: initial)
+
+    assert exit_code == 0
+    stop_worker.assert_called_once()
+    recover_world.assert_called_once()
+    retry_daily.assert_called_once()
+    report.assert_called_once()
+    final_result = report.call_args.args[0]
+    assert final_result.status == "success"
+    recovery_history = final_result.config["daily_state_recoveries"]
+    assert recovery_history[-1]["success"] is True
+    assert recovery_history[-1]["kind"] == "restored-tacet-challenge"
+    combined = Path(final_result.log_slice_path).read_text(encoding="utf-8")
+    assert RESTORED_TACET_FAILURE.strip() in combined
+    assert "Daily Task Completed" in combined
+
+
+def test_tacet_death_waits_for_world_and_retries_daily_once(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        "TacetTask:raise_not_in_combat char dead\n"
+        "TacetTask:info_set Revive Failed\n"
+        "Daily Task exception stopped\n",
+        status="failed",
+        absorbed=0,
+    )
+    initial.config["workflow_task"] = "daily"
+    retry = _result(
+        runs,
+        "retry",
+        "Daily Task Completed\n",
+        status="success",
+        absorbed=5,
+    )
+    retry.config["workflow_task"] = "daily"
+    cleanup = _cleanup()
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse",
+        return_value=nullcontext(),
+    ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.stop_daily_workers"
+    ), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ) as recover_world, patch(
+        "wuwa_auto.daily.run_daily_task",
+        return_value=retry,
+    ) as retry_daily, patch(
+        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
+        side_effect=lambda result: result,
+    ), patch(
+        "wuwa_auto.daily.maybe_recover_farm_echo_death",
+        side_effect=lambda result: result,
+    ), patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=cleanup,
+    ), patch("wuwa_auto.daily.report_run") as report:
+        exit_code = _run_workflow("daily", lambda: initial)
+
+    assert exit_code == 0
+    recover_world.assert_called_once()
+    retry_daily.assert_called_once()
+    final_result = report.call_args.args[0]
+    assert final_result.config["daily_state_recoveries"][-1]["kind"] == (
+        "tacet-death-teleport"
+    )

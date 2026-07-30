@@ -261,6 +261,80 @@ def run_farm_echo_death_recovery(
     )
 
 
+def run_world_state_recovery(
+    run_dir: Path,
+    *,
+    attempt: int,
+) -> FarmEchoRecoveryResult:
+    """Start/reuse the game and leave a challenge restored across restarts."""
+    desktop.require_admin()
+    desktop.require_supported_display()
+    result_path = run_dir / f"world-state-recovery-{attempt}.json"
+    command = [
+        str(OK_PYTHON_EXE),
+        str(RECOVERY_WORKER),
+        str(OK_WORKING_DIR),
+        str(result_path),
+        "world",
+    ]
+    log.info("starting world-state recovery attempt=%s", attempt)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=OK_WORKING_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=RECOVERY_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        evidence = desktop.save_step_screenshot(
+            f"ok_world_state_recovery_{attempt}_timeout"
+        )
+        return FarmEchoRecoveryResult(
+            success=False,
+            reason=f"world-state recovery timed out after {RECOVERY_TIMEOUT:.0f}s",
+            evidence_path=str(evidence),
+            worker_result_path=str(result_path),
+        )
+
+    payload: dict[str, object] = {}
+    if result_path.is_file():
+        try:
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, json.JSONDecodeError):
+            log.exception("invalid world-state recovery result: %s", result_path)
+    success = completed.returncode == 0 and payload.get("success") is True
+    evidence = desktop.save_step_screenshot(
+        f"ok_world_state_recovery_{attempt}_{'completed' if success else 'failed'}"
+    )
+    reason = str(
+        payload.get("reason")
+        or completed.stdout.strip()
+        or f"world-state recovery worker exited with code {completed.returncode}"
+    )
+    log.info(
+        "world-state recovery attempt=%s success=%s reason=%s evidence=%s",
+        attempt,
+        success,
+        reason,
+        evidence,
+    )
+    return FarmEchoRecoveryResult(
+        success=success,
+        reason=reason,
+        evidence_path=str(evidence),
+        worker_result_path=str(result_path),
+    )
+
+
 def _post_message_click(
     hwnd: int,
     position: tuple[int, int],

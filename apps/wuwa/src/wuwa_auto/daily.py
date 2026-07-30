@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
 from wuwa_auto.input.viiper import managed_virtual_mouse
@@ -10,6 +11,8 @@ from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
     run_weekly_garden_task,
+    stop_daily_workers,
+    write_result,
     write_workflow_failure,
 )
 from wuwa_auto.okww.config import (
@@ -18,6 +21,10 @@ from wuwa_auto.okww.config import (
     temporary_farm_echo_repeat_count,
 )
 from wuwa_auto.okww.confirmed_retry import run_confirmed_farm_echo_retry
+from wuwa_auto.okww.recovery import (
+    FarmEchoRecoveryResult,
+    run_world_state_recovery,
+)
 from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
 from wuwa_auto.reporting.service import report_run
 from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
@@ -25,6 +32,117 @@ from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
 from wuwa_auto.uu.service import ensure_connected
 
 log = logging.getLogger(__name__)
+
+DAILY_START_BOOK_FAILURE = (
+    "DailyTask:open_daily",
+    "can't find gray_book_boss, make sure f2 is the hotkey for book",
+)
+TACET_DEATH_RECOVERY_FAILURE = (
+    "TacetTask:raise_not_in_combat char dead",
+    "TacetTask:info_set Revive Failed",
+)
+
+
+def _read_result_log(result: OkRunResult) -> str:
+    path = Path(result.log_slice_path)
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def _compose_daily_start_recovery(
+    initial: OkRunResult,
+    *,
+    retry: OkRunResult | None,
+    recovery: FarmEchoRecoveryResult,
+    recovery_kind: str,
+) -> OkRunResult:
+    base_dir = Path(initial.log_slice_path).parent.parent
+    run_id = f"{initial.run_id}_daily_start_recovery"
+    run_dir = base_dir / run_id
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_id = f"{initial.run_id}_daily_start_recovery_{suffix}"
+        run_dir = base_dir / run_id
+    run_dir.mkdir(parents=True)
+
+    parts = [f"=== HOST INITIAL {initial.run_id} ===\n{_read_result_log(initial).rstrip()}"]
+    if retry is not None:
+        parts.append(f"=== HOST RETRY {retry.run_id} ===\n{_read_result_log(retry).rstrip()}")
+    log_path = run_dir / "ok-current-run.log"
+    log_path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+
+    final = retry or initial
+    config = dict(final.config)
+    recovery_history = list(initial.config.get("daily_state_recoveries") or [])
+    recovery_history.append({
+        "kind": recovery_kind,
+        "triggered": True,
+        "success": recovery.success,
+        "reason": recovery.reason,
+        "initial_run_id": initial.run_id,
+        "retry_run_id": retry.run_id if retry is not None else "",
+    })
+    config["daily_state_recoveries"] = recovery_history
+    started = datetime.fromisoformat(initial.started_at)
+    finished = datetime.fromisoformat(final.finished_at)
+    if retry is None:
+        reason = f"daily world-state recovery failed: {recovery.reason}"
+    else:
+        reason = final.reason
+    composite = OkRunResult(
+        run_id=run_id,
+        status=final.status if retry is not None else "failed",
+        reason=reason,
+        started_at=initial.started_at,
+        finished_at=final.finished_at,
+        duration_seconds=round((finished - started).total_seconds()),
+        log_slice_path=str(log_path),
+        evidence_path=(
+            final.evidence_path
+            or recovery.evidence_path
+            or initial.evidence_path
+        ),
+        config=config,
+        exit_code=final.exit_code if retry is not None else 1,
+    )
+    write_result(composite, run_dir)
+    return composite
+
+
+def _maybe_recover_daily_state(result: OkRunResult) -> OkRunResult:
+    """Recover known residual/death states once each before final reporting."""
+    current = result
+    recoverable_states = (
+        ("restored-tacet-challenge", DAILY_START_BOOK_FAILURE),
+        ("tacet-death-teleport", TACET_DEATH_RECOVERY_FAILURE),
+    )
+    for recovery_kind, markers in recoverable_states:
+        if current.status == "success":
+            break
+        text = _read_result_log(current)
+        if not all(marker in text for marker in markers):
+            continue
+
+        stop_daily_workers()
+        recovery = run_world_state_recovery(
+            Path(current.log_slice_path).parent,
+            attempt=1,
+        )
+        if not recovery.success:
+            return _compose_daily_start_recovery(
+                current,
+                retry=None,
+                recovery=recovery,
+                recovery_kind=recovery_kind,
+            )
+        retry = run_daily_task()
+        current = _compose_daily_start_recovery(
+            current,
+            retry=retry,
+            recovery=recovery,
+            recovery_kind=recovery_kind,
+        )
+    return current
 
 
 def _settle_business_transaction(
@@ -35,6 +153,7 @@ def _settle_business_transaction(
     current = result
     try:
         if task_name == "daily":
+            current = _maybe_recover_daily_state(current)
             current = ensure_daily_farm_echo_absorptions(current)
         return maybe_recover_farm_echo_death(current)
     except Exception as exc:
