@@ -132,8 +132,11 @@ def validate_daily_configuration() -> dict[str, Any]:
     _validate_common_paths()
     daily = _load_json(OK_DAILY_CONFIG)
     additional = daily.get("Additional Tasks to Run After Daily Task") or []
-    if TELEPORT_AND_FARM_4C not in additional:
-        raise RuntimeError(f"DailyTask must enable {TELEPORT_AND_FARM_4C!r}")
+    if TELEPORT_AND_FARM_4C in additional:
+        raise RuntimeError(
+            f"DailyTask must disable {TELEPORT_AND_FARM_4C!r}; "
+            "the host workflow runs it before DailyTask"
+        )
 
     nightmare_targets: list[Any] = []
     if AUTO_FARM_NIGHTMARE in additional:

@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from wuwa_auto.cleanup import CleanupResult
-from wuwa_auto.daily import _run_workflow
+from wuwa_auto.daily import _run_boss_then_daily_task, _run_workflow
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.runner import OkRunResult
 
@@ -184,9 +184,6 @@ def test_settlement_exception_cannot_report_a_stale_success(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
-        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
-        return_value=initial,
-    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=RuntimeError("recovery crashed"),
     ), patch(
@@ -241,9 +238,6 @@ def test_daily_and_weekly_are_independent_report_transactions(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
-        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
-        return_value=daily,
-    ) as ensure_absorptions, patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=lambda result: result,
     ), patch(
@@ -255,7 +249,6 @@ def test_daily_and_weekly_are_independent_report_transactions(
 
     assert daily_code == 0
     assert weekly_code == 0
-    ensure_absorptions.assert_called_once_with(daily)
     assert [call.args[0].run_id for call in report.call_args_list] == [
         "daily",
         "weekly",
@@ -302,9 +295,6 @@ def test_restored_tacet_challenge_is_exited_and_daily_retried_once(
         "wuwa_auto.daily.run_daily_task",
         return_value=retry,
     ) as retry_daily, patch(
-        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
-        side_effect=lambda result: result,
-    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=lambda result: result,
     ), patch(
@@ -370,9 +360,6 @@ def test_tacet_death_waits_for_world_and_retries_daily_once(
         "wuwa_auto.daily.run_daily_task",
         return_value=retry,
     ) as retry_daily, patch(
-        "wuwa_auto.daily.ensure_daily_farm_echo_absorptions",
-        side_effect=lambda result: result,
-    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=lambda result: result,
     ), patch(
@@ -388,3 +375,153 @@ def test_tacet_death_waits_for_world_and_retries_daily_once(
     assert final_result.config["daily_state_recoveries"][-1]["kind"] == (
         "tacet-death-teleport"
     )
+
+
+def test_daily_workflow_runs_boss_before_daily_and_reports_once(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    boss = _result(
+        runs,
+        "boss",
+        ABSORPTION * 5,
+        status="success",
+        absorbed=5,
+    )
+    daily = _result(
+        runs,
+        "daily-after-boss",
+        "DailyTask:Daily Task Completed\n",
+        status="success",
+        absorbed=0,
+    )
+    daily.config["workflow_task"] = "daily"
+    cleanup = _cleanup()
+    order: list[str] = []
+
+    def run_boss(**_: object) -> OkRunResult:
+        order.append("boss")
+        return boss
+
+    def settle_boss(result: OkRunResult) -> OkRunResult:
+        order.append("settle-boss")
+        return result
+
+    def stop_worker() -> int:
+        order.append("stop-worker")
+        return 0
+
+    def run_daily() -> OkRunResult:
+        order.append("daily")
+        return daily
+
+    def settle_daily(result: OkRunResult) -> OkRunResult:
+        order.append("settle-daily")
+        return result
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse",
+        return_value=nullcontext(),
+    ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.daily.run_confirmed_farm_echo_retry",
+        side_effect=run_boss,
+    ), patch(
+        "wuwa_auto.daily.maybe_recover_farm_echo_death",
+        side_effect=settle_boss,
+    ) as recover_boss, patch(
+        "wuwa_auto.daily.stop_daily_workers",
+        side_effect=stop_worker,
+    ), patch(
+        "wuwa_auto.daily.run_daily_task",
+        side_effect=run_daily,
+    ), patch(
+        "wuwa_auto.daily._maybe_recover_daily_state",
+        side_effect=settle_daily,
+    ), patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=cleanup,
+    ), patch("wuwa_auto.daily.report_run") as report:
+        exit_code = _run_workflow("daily", _run_boss_then_daily_task)
+
+    assert exit_code == 0
+    assert order == [
+        "boss",
+        "settle-boss",
+        "stop-worker",
+        "daily",
+        "settle-daily",
+    ]
+    recover_boss.assert_called_once_with(boss)
+    report.assert_called_once()
+    final_result = report.call_args.args[0]
+    assert final_result.status == "success"
+    assert final_result.config["daily_sequence"] == {
+        "order": ["farm_echo", "daily"],
+        "boss_run_id": "boss",
+        "boss_status": "success",
+        "boss_reason": "test",
+        "daily_run_id": "daily-after-boss",
+        "daily_status": "success",
+        "daily_reason": "test",
+        "settled": True,
+    }
+    combined = Path(final_result.log_slice_path).read_text(encoding="utf-8")
+    assert combined.index("HOST PRE-DAILY BOSS") < combined.index("HOST DAILY")
+    assert combined.count(ABSORPTION.strip()) == 5
+    assert "Daily Task Completed" in combined
+
+
+def test_daily_continues_after_boss_failure_and_reports_partial_once(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    boss = _result(
+        runs,
+        "boss-failed",
+        ABSORPTION * 2,
+        status="failed",
+        absorbed=2,
+    )
+    daily = _result(
+        runs,
+        "daily-completed",
+        "DailyTask:Daily Task Completed\n",
+        status="success",
+        absorbed=0,
+    )
+    daily.config["workflow_task"] = "daily"
+    cleanup = _cleanup()
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse",
+        return_value=nullcontext(),
+    ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.daily.run_confirmed_farm_echo_retry",
+        return_value=boss,
+    ), patch(
+        "wuwa_auto.daily.maybe_recover_farm_echo_death",
+        return_value=boss,
+    ), patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_daily_task",
+        return_value=daily,
+    ) as run_daily, patch(
+        "wuwa_auto.daily._maybe_recover_daily_state",
+        return_value=daily,
+    ), patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=cleanup,
+    ), patch("wuwa_auto.daily.report_run") as report:
+        exit_code = _run_workflow("daily", _run_boss_then_daily_task)
+
+    assert exit_code == 1
+    run_daily.assert_called_once()
+    report.assert_called_once()
+    final_result = report.call_args.args[0]
+    assert final_result.config["daily_sequence"]["boss_status"] == "failed"
+    assert final_result.config["daily_sequence"]["daily_status"] == "success"

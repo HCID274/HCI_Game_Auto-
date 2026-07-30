@@ -283,6 +283,47 @@ FarmEchoTask:farm echo walk_find_echo True
     assert facts.issues[-1].text == "声骸吸收目标仅完成2/5次"
 
 
+def test_pre_daily_boss_failure_and_daily_success_is_partial(
+    tmp_path: Path,
+) -> None:
+    text = """
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+FarmEchoTask:farm echo walk_find_echo True
+FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(
+        _result(
+            tmp_path,
+            text,
+            status="failed",
+            reason="pre-daily FarmEcho failed; DailyTask completed",
+            config={
+                "boss_challenge_index": 2,
+                "workflow_task": "daily",
+                "confirmed_farm_echo_absorption_count": 2,
+                "farm_echo_absorption_target": 5,
+                "daily_sequence": {
+                    "boss_status": "failed",
+                    "daily_status": "success",
+                    "settled": True,
+                },
+            },
+        )
+    )
+
+    assert facts.overall_status == "partial_success"
+    assert [item.text for item in facts.followup] == [
+        "讨伐强敌第2项 2次",
+        "吸收声骸2次",
+    ]
+    assert [item.text for item in facts.issues] == [
+        "主流程失败：pre-daily FarmEcho failed; DailyTask completed",
+        "声骸吸收目标仅完成2/5次",
+    ]
+
+
 def test_ai_cannot_promote_battle_pass_action_to_claimed_reward(
     tmp_path: Path,
 ) -> None:

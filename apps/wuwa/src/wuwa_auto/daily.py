@@ -6,7 +6,6 @@ from pathlib import Path
 
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
 from wuwa_auto.input.viiper import managed_virtual_mouse
-from wuwa_auto.okww.absorption_flow import ensure_daily_farm_echo_absorptions
 from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
@@ -145,6 +144,102 @@ def _maybe_recover_daily_state(result: OkRunResult) -> OkRunResult:
     return current
 
 
+def _compose_ordered_daily_result(
+    boss: OkRunResult,
+    daily: OkRunResult,
+) -> OkRunResult:
+    """Merge the pre-daily boss phase and DailyTask into one report boundary."""
+    runs_dir = Path(boss.log_slice_path).parent.parent
+    base_run_id = f"{boss.run_id}_daily"
+    run_id = base_run_id
+    run_dir = runs_dir / run_id
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_id = f"{base_run_id}_{suffix}"
+        run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True)
+
+    combined_path = run_dir / "ok-current-run.log"
+    combined_path.write_text(
+        f"=== HOST PRE-DAILY BOSS {boss.run_id} ===\n"
+        f"{_read_result_log(boss).rstrip()}\n\n"
+        f"=== HOST DAILY {daily.run_id} ===\n"
+        f"{_read_result_log(daily).rstrip()}\n",
+        encoding="utf-8",
+    )
+
+    config = dict(boss.config)
+    config.update(daily.config)
+    config["workflow_task"] = "daily"
+    config["confirmed_farm_echo_absorption_count"] = int(
+        boss.config.get("confirmed_farm_echo_absorption_count") or 0
+    )
+    config["farm_echo_absorption_target"] = EXPECTED_REPEAT_FARM_COUNT
+    if "farm_echo_recovery" in boss.config:
+        config["farm_echo_recovery"] = boss.config["farm_echo_recovery"]
+    config["daily_sequence"] = {
+        "order": ["farm_echo", "daily"],
+        "boss_run_id": boss.run_id,
+        "boss_status": boss.status,
+        "boss_reason": boss.reason,
+        "daily_run_id": daily.run_id,
+        "daily_status": daily.status,
+        "daily_reason": daily.reason,
+        "settled": True,
+    }
+
+    completed = boss.status == "success" and daily.status == "success"
+    if completed:
+        reason = "pre-daily FarmEcho and DailyTask completed"
+    else:
+        failures = []
+        if boss.status != "success":
+            failures.append(f"pre-daily FarmEcho failed: {boss.reason}")
+        if daily.status != "success":
+            failures.append(f"DailyTask failed: {daily.reason}")
+        reason = "; ".join(failures)
+
+    started = datetime.fromisoformat(boss.started_at)
+    finished = datetime.fromisoformat(daily.finished_at)
+    result = OkRunResult(
+        run_id=run_id,
+        status="success" if completed else "failed",
+        reason=reason,
+        started_at=boss.started_at,
+        finished_at=daily.finished_at,
+        duration_seconds=round((finished - started).total_seconds()),
+        log_slice_path=str(combined_path),
+        evidence_path=(
+            daily.evidence_path
+            if daily.status != "success"
+            else boss.evidence_path
+        ),
+        config=config,
+        exit_code=0 if completed else 1,
+    )
+    write_result(result, run_dir)
+    return result
+
+
+def _run_boss_then_daily_task() -> OkRunResult:
+    """Run five confirmed boss absorptions before the pure daily task."""
+    target = EXPECTED_REPEAT_FARM_COUNT
+    attempt_limit = confirmed_retry_attempt_limit(target)
+    with temporary_farm_echo_repeat_count(attempt_limit):
+        boss = run_confirmed_farm_echo_retry(
+            target_count=target,
+            attempt_limit=attempt_limit,
+        )
+    boss = maybe_recover_farm_echo_death(boss)
+
+    # The boss phase is best-effort: DailyTask must still get its own chance
+    # and the merged report will accurately expose a partial result.
+    stop_daily_workers()
+    daily = _maybe_recover_daily_state(run_daily_task())
+    return _compose_ordered_daily_result(boss, daily)
+
+
 def _settle_business_transaction(
     task_name: str,
     result: OkRunResult,
@@ -153,9 +248,13 @@ def _settle_business_transaction(
     current = result
     try:
         if task_name == "daily":
+            sequence = current.config.get("daily_sequence") or {}
+            if isinstance(sequence, dict) and sequence.get("settled") is True:
+                return current
             current = _maybe_recover_daily_state(current)
-            current = ensure_daily_farm_echo_absorptions(current)
-        return maybe_recover_farm_echo_death(current)
+        if task_name in {"daily", "farm_echo"}:
+            return maybe_recover_farm_echo_death(current)
+        return current
     except Exception as exc:
         reason = f"{task_name} business transaction settlement exception: {exc}"
         log.exception(reason)
@@ -238,7 +337,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
 
 
 def run_daily_workflow() -> int:
-    return _run_workflow("daily", run_daily_task)
+    return _run_workflow("daily", _run_boss_then_daily_task)
 
 
 def run_farm_echo_workflow() -> int:

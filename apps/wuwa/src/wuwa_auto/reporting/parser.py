@@ -217,11 +217,18 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
 
     if result.status == "success" and issues:
         status = "partial_success"
-    elif result.status != "success" and recovery.get("triggered") and (
-        int(recovery.get("total_completed") or 0) > 0
-        or recovery.get("first_safe_recovery") is True
-    ):
-        status = "partial_success"
+    elif result.status != "success":
+        sequence = result.config.get("daily_sequence") or {}
+        sequence_has_success = isinstance(sequence, dict) and any(
+            sequence.get(key) == "success"
+            for key in ("boss_status", "daily_status")
+        )
+        recovery_has_progress = recovery.get("triggered") and (
+            int(recovery.get("total_completed") or 0) > 0
+            or recovery.get("first_safe_recovery") is True
+        )
+        if sequence_has_success or recovery_has_progress:
+            status = "partial_success"
     if cleanup_data and not cleanup_data.get("completed", False):
         if status == "completed":
             status = "partial_success"

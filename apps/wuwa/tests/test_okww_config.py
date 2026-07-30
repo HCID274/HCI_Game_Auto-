@@ -102,13 +102,11 @@ class OkConfigurationTests(unittest.TestCase):
         load_json.assert_called_once_with(config.OK_GARDEN_CONFIG)
         self.assertEqual(facts, {"garden_config": {}})
 
-    def test_daily_preflight_keeps_required_farm_echo_policy(self) -> None:
+    def test_daily_preflight_requires_host_ordered_farm_echo_policy(self) -> None:
         daily = {
             "Which to Farm": "Tacet Suppression",
             "Which Tacet Suppression to Farm": 6,
-            "Additional Tasks to Run After Daily Task": [
-                config.TELEPORT_AND_FARM_4C,
-            ],
+            "Additional Tasks to Run After Daily Task": [],
         }
 
         def load_json(path: object) -> dict[str, object]:
@@ -127,6 +125,20 @@ class OkConfigurationTests(unittest.TestCase):
 
         self.assertEqual(facts["daily_farm_index"], 6)
         self.assertEqual(facts["repeat_farm_count"], 5)
+
+    def test_daily_preflight_rejects_duplicate_post_daily_farm_echo(self) -> None:
+        daily = {
+            "Additional Tasks to Run After Daily Task": [
+                config.TELEPORT_AND_FARM_4C,
+            ],
+        }
+
+        with patch.object(config, "_validate_common_paths"), patch.object(
+            config,
+            "_load_json",
+            return_value=daily,
+        ), self.assertRaisesRegex(RuntimeError, "must disable"):
+            config.validate_daily_configuration()
 
 
 class OkRunnerPreflightTests(unittest.TestCase):
