@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'farm-echo', 'weekly-garden')]
+    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )

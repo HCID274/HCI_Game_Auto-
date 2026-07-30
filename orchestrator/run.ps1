@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'farm-echo', 'weekly-garden', 'validate', 'integration-smoke')]
+    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     $requestedMode = (Get-Content -LiteralPath $modeRequestPath -Raw).Trim()
-    if ($requestedMode -notin @('farm-echo', 'weekly-garden')) {
+    if ($requestedMode -notin @('wuwa-daily', 'farm-echo', 'weekly-garden')) {
         throw "unsupported one-shot mode: $requestedMode"
     }
     $runMode = $requestedMode
@@ -183,6 +183,11 @@ try {
                 $starRailCode = 0
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName FarmEcho -Label 'Wuthering Waves farm echo'
+            }
+            'wuwa-daily' {
+                $starRailCode = 0
+                $starRailCleanupCode = 0
+                $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Daily -Label 'Wuthering Waves daily'
             }
             'weekly-garden' {
                 $starRailCode = 0
