@@ -103,7 +103,20 @@ DailyTask:Daily Task Completed
 
     assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
     assert [item.text for item in facts.issues] == [
-        "梦魇巢穴存在未解锁或不可达目标，已跳过1处"
+        "梦魇巢穴传送未确认生效，已跳过1处"
+    ]
+    assert facts.overall_status == "partial_success"
+
+
+def test_host_nightmare_travel_marker_uses_precise_wording(tmp_path: Path) -> None:
+    text = """
+NightmareNestTask:HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED target=go_nest:48:28 reason=button_still_visible_after_retry
+DailyTask:Daily Task Completed
+"""
+    facts = parse_run(_result(tmp_path, text))
+
+    assert [item.text for item in facts.issues] == [
+        "梦魇巢穴传送未确认生效，已跳过1处"
     ]
     assert facts.overall_status == "partial_success"
 

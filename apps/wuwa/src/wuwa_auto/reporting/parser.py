@@ -201,14 +201,16 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         if marker in text and not any(item.text == wording for item in issues):
             issues.append(ReportItem(f"optional-{marker}", wording))
 
-    unreachable_nests = text.count(
+    host_unconfirmed_travel = text.count("HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED")
+    legacy_unconfirmed_travel = text.count(
         "NightmareNestTask:nightmare nest unreachable, skip this run"
     )
-    if unreachable_nests:
+    unconfirmed_travel = host_unconfirmed_travel or legacy_unconfirmed_travel
+    if unconfirmed_travel:
         issues.append(
             ReportItem(
-                "nightmare-nest-unreachable",
-                f"梦魇巢穴存在未解锁或不可达目标，已跳过{unreachable_nests}处",
+                "nightmare-nest-travel-unconfirmed",
+                f"梦魇巢穴传送未确认生效，已跳过{unconfirmed_travel}处",
             )
         )
 
