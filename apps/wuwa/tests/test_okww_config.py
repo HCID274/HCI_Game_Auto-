@@ -13,6 +13,8 @@ from wuwa_auto.okww.confirmed_retry import (
     run_confirmed_farm_echo_retry,
 )
 from wuwa_auto.okww.runner import (
+    DAILY_WORKER_ENTRYPOINT,
+    _build_task_command,
     preflight_farm_echo_task,
     preflight_weekly_garden_task,
     run_farm_echo_task,
@@ -142,6 +144,13 @@ class OkConfigurationTests(unittest.TestCase):
 
 
 class OkRunnerPreflightTests(unittest.TestCase):
+    def test_daily_runner_uses_host_worker_without_upstream_source_edit(self) -> None:
+        command = _build_task_command(1, "daily")
+
+        self.assertEqual(Path(command[1]), DAILY_WORKER_ENTRYPOINT)
+        self.assertEqual(Path(command[2]), config.OK_WORKING_DIR)
+        self.assertNotIn(str(config.OK_ENTRYPOINT), command)
+
     def test_absorption_retry_rejects_runtime_over_one_hour(self) -> None:
         with pytest.raises(ValueError, match="within"):
             run_confirmed_farm_echo_retry(

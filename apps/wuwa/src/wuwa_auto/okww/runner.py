@@ -13,6 +13,7 @@ from typing import Callable
 
 import psutil
 
+from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
 from wuwa_auto.okww.config import (
     EXPECTED_REPEAT_FARM_COUNT,
     validate_daily_configuration,
@@ -35,6 +36,9 @@ log = logging.getLogger(__name__)
 STARTUP_LOG_TIMEOUT = 180.0
 LOG_STALL_TIMEOUT = 2700.0
 POLL_INTERVAL = 1.0
+DAILY_WORKER_ENTRYPOINT = Path(__file__).with_name("daily_worker.py")
+
+
 @dataclass(frozen=True)
 class OkRunResult:
     run_id: str
@@ -209,6 +213,23 @@ def write_workflow_failure(
     return result
 
 
+def _build_task_command(task_index: int, task_label: str) -> list[str]:
+    if task_label == "daily":
+        return [
+            str(OK_PYTHONW_EXE),
+            str(DAILY_WORKER_ENTRYPOINT),
+            str(OK_WORKING_DIR),
+        ]
+    return [
+        str(OK_PYTHONW_EXE),
+        str(OK_ENTRYPOINT),
+        "--headless",
+        "-t",
+        str(task_index),
+        "-e",
+    ]
+
+
 def _run_task(
     *,
     task_index: int,
@@ -229,16 +250,7 @@ def _run_task(
 
     # ok-ww.exe is a graphical PyAppify application manager.  The real CLI is
     # the installed app's bundled interpreter plus working/main.py.
-    command = [
-        str(OK_PYTHONW_EXE),
-        str(OK_ENTRYPOINT),
-        # The first OK logger parser reserves short ``-h`` for help.  The
-        # framework's long form survives parse_known_args and reaches OK.
-        "--headless",
-        "-t",
-        str(task_index),
-        "-e",
-    ]
+    command = _build_task_command(task_index, task_label)
     log.info("starting OK-WW %s: %s", task_label, command)
     launcher = subprocess.Popen(
         command,
@@ -253,6 +265,7 @@ def _run_task(
     status = "failed"
     reason = "unknown"
     evidence: Path | None = None
+    captured_nightmare_transition = False
 
     while True:
         now = time.monotonic()
@@ -273,6 +286,19 @@ def _run_task(
                     )
                 ):
                     log.info("OK-WW progress: %s", line)
+                if (
+                    TRAVEL_NOT_CONFIRMED_MARKER in line
+                    and not captured_nightmare_transition
+                ):
+                    try:
+                        save_step_screenshot(
+                            "ok_nightmare_travel_not_confirmed"
+                        )
+                    except Exception:
+                        log.exception(
+                            "could not capture nightmare travel evidence"
+                        )
+                    captured_nightmare_transition = True
 
         current_text = "".join(collected)
         failure = find_failure(current_text)
