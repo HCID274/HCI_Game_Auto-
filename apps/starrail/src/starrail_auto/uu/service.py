@@ -5,9 +5,13 @@ import time
 from pathlib import Path
 
 from game_automation_core.uu.supervisor import run_with_restart_budget
+from game_automation_core.uu.update import recover_mandatory_update
 
 from starrail_auto.uu.config import (
     CONFIRM_TIMEOUT,
+    MANDATORY_UPDATE_POLL_INTERVAL,
+    MANDATORY_UPDATE_RELAUNCH_GRACE,
+    MANDATORY_UPDATE_TIMEOUT,
     POST_CLICK_WAIT,
     POST_MOVE_DELAY,
     REUSE_CONFIRM_TIMEOUT,
@@ -22,10 +26,12 @@ from starrail_auto.uu.config import (
     UU_STARTUP_MAX_RESTARTS,
 )
 from starrail_auto.uu.desktop import (
+    accept_mandatory_update,
     click,
     dismiss_known_popups,
     focus_uu_window,
     keep_uu_in_background_on_exit,
+    mandatory_update_visible,
     minimize_uu_window,
     move_mouse_to,
     require_admin,
@@ -35,7 +41,12 @@ from starrail_auto.uu.desktop import (
     wait_for_image,
 )
 from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
-from starrail_auto.uu.processes import is_uu_running, kill_uu, start_uu
+from starrail_auto.uu.processes import (
+    is_uu_running,
+    kill_uu,
+    start_uu,
+    uu_primary_pids,
+)
 from starrail_auto.windows.desktop_guard import (
     DesktopBlockedError,
     describe_window,
@@ -63,7 +74,27 @@ def _confirm_starrail_active(timeout: float) -> bool:
     return identity is not None and stop is not None
 
 
-def _run_startup_attempt(attempt_no: int) -> None:
+def _recover_mandatory_update(context: str) -> bool:
+    try:
+        return recover_mandatory_update(
+            accept_update=lambda: accept_mandatory_update(context),
+            update_visible=lambda timeout: mandatory_update_visible(timeout),
+            primary_pids=uu_primary_pids,
+            start_process=start_uu,
+            focus_window=focus_uu_window,
+            timeout=MANDATORY_UPDATE_TIMEOUT,
+            relaunch_grace=MANDATORY_UPDATE_RELAUNCH_GRACE,
+            poll_interval=MANDATORY_UPDATE_POLL_INTERVAL,
+        )
+    except TimeoutError as exc:
+        raise startup_error(
+            "mandatory_update_recovery",
+            str(exc),
+            retryable=False,
+        ) from exc
+
+
+def _run_startup_attempt(attempt_no: int, *, update_used: bool = False) -> None:
     log.info("UU startup attempt %d started", attempt_no)
     try:
         foreground = require_desktop_ready()
@@ -83,6 +114,14 @@ def _run_startup_attempt(attempt_no: int) -> None:
     except RuntimeError as exc:
         raise startup_error("focus_uu_window", str(exc)) from exc
     log.info("UU window focused: %s", title)
+    if _recover_mandatory_update("startup focus"):
+        if update_used:
+            raise startup_error(
+                "mandatory_update_loop",
+                "mandatory update reappeared after one completed update",
+                retryable=False,
+            )
+        return _run_startup_attempt(attempt_no, update_used=True)
     dismiss_known_popups("startup focus")
 
     if was_running:
@@ -120,6 +159,14 @@ def _run_startup_attempt(attempt_no: int) -> None:
     )
     click(second)
     time.sleep(POST_CLICK_WAIT)
+    if _recover_mandatory_update("before acceleration confirmation"):
+        if update_used:
+            raise startup_error(
+                "mandatory_update_loop",
+                "mandatory update reappeared after one completed update",
+                retryable=False,
+            )
+        return _run_startup_attempt(attempt_no, update_used=True)
     dismiss_known_popups("before acceleration confirmation")
 
     confirmed = wait_for_image(

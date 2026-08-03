@@ -35,6 +35,8 @@ class UuDesktopConfig:
     update_notice: Path
     update_actions: tuple[tuple[str, Path], ...]
     admin_hint: str
+    mandatory_update_notice: Path | None = None
+    mandatory_update_action: Path | None = None
     window_timeout: float = 30.0
     window_poll_interval: float = 0.5
     minimize_timeout: float = 5.0
@@ -374,6 +376,48 @@ class UuDesktopController:
             "dismiss_known_uu_popups",
             f"popup remained after {dismissed} action(s) during {context}",
         )
+
+    def mandatory_update_visible(self, *, timeout: float | None = None) -> bool:
+        template = self.config.mandatory_update_notice
+        if template is None:
+            return False
+        if not template.is_file():
+            raise UuStartupError(
+                "mandatory_update_preflight",
+                f"required template not found: {template}",
+                retryable=False,
+            )
+        return self.try_locate_image(
+            template,
+            timeout=(
+                self.config.popup_detect_timeout if timeout is None else timeout
+            ),
+        ) is not None
+
+    def accept_mandatory_update(self, context: str) -> bool:
+        if not self.mandatory_update_visible():
+            return False
+        self.save_screenshot("uu_mandatory_update_detected")
+        action = self.config.mandatory_update_action
+        if action is None or not action.is_file():
+            raise UuStartupError(
+                "mandatory_update_preflight",
+                f"mandatory update detected during {context}, but action template is missing: {action}",
+                retryable=False,
+            )
+        target = self.try_locate_image(
+            action,
+            timeout=self.config.popup_action_timeout,
+        )
+        if target is None:
+            raise self.startup_error(
+                "mandatory_update_action",
+                f"mandatory update detected during {context}, but upgrade action was not found",
+                retryable=False,
+            )
+        self.click_after_evidence(target, "mandatory_update")
+        log.info("mandatory UU update accepted during %s", context)
+        return True
 
 
 __all__ = ["UuDesktopConfig", "UuDesktopController", "pyautogui"]

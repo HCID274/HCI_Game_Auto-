@@ -19,6 +19,10 @@ def is_any_uu_process_running() -> bool:
     return _controller.is_any_running()
 
 
+def uu_primary_pids() -> frozenset[int]:
+    return _controller.primary_pids()
+
+
 def start_uu() -> None:
     _controller.start()
 

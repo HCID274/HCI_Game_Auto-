@@ -20,6 +20,8 @@ from starrail_auto.uu.config import (
     IMAGE_CONFIDENCE,
     IMAGE_RETRY_INTERVAL,
     TPL_UPDATE_NOTICE,
+    TPL_MANDATORY_UPDATE_ACTION,
+    TPL_MANDATORY_UPDATE_NOTICE,
     UU_MINIMIZE_BEST_EFFORT_TIMEOUT,
     UU_POPUP_ACTION_TIMEOUT,
     UU_POPUP_DETECT_TIMEOUT,
@@ -42,6 +44,8 @@ _controller = UuDesktopController(
         update_notice=TPL_UPDATE_NOTICE,
         update_actions=UU_UPDATE_POPUP_ACTIONS,
         admin_hint="`uv run starrail-auto elevate uu start`",
+        mandatory_update_notice=TPL_MANDATORY_UPDATE_NOTICE,
+        mandatory_update_action=TPL_MANDATORY_UPDATE_ACTION,
         window_timeout=UU_WINDOW_TIMEOUT,
         window_poll_interval=WINDOW_CHECK_INTERVAL,
         minimize_timeout=UU_MINIMIZE_BEST_EFFORT_TIMEOUT,
@@ -145,3 +149,11 @@ def move_mouse_to(position: tuple[int, int]) -> None:
 
 def dismiss_known_popups(context: str) -> None:
     _controller.dismiss_known_popups(context)
+
+
+def mandatory_update_visible(timeout: float = UU_POPUP_DETECT_TIMEOUT) -> bool:
+    return _controller.mandatory_update_visible(timeout=timeout)
+
+
+def accept_mandatory_update(context: str) -> bool:
+    return _controller.accept_mandatory_update(context)

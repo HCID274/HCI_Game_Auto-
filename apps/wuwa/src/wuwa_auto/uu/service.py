@@ -5,11 +5,15 @@ import time
 from pathlib import Path
 
 from game_automation_core.uu.supervisor import run_with_restart_budget
+from game_automation_core.uu.update import recover_mandatory_update
 
 from wuwa_auto.uu.config import (
     CARD_TIMEOUT,
     CONFIRM_TIMEOUT,
     MAX_RESTARTS,
+    MANDATORY_UPDATE_POLL_INTERVAL,
+    MANDATORY_UPDATE_RELAUNCH_GRACE,
+    MANDATORY_UPDATE_TIMEOUT,
     POST_CLICK_DELAY,
     POST_HOVER_DELAY,
     RESTART_DELAY,
@@ -22,12 +26,14 @@ from wuwa_auto.uu.config import (
     TPL_STOP_ACCELERATION,
 )
 from wuwa_auto.uu.desktop import (
+    accept_mandatory_update,
     click_after_evidence,
     dismiss_known_popups,
     focus_uu_window,
     hover_after_evidence,
     minimize_on_exit,
     minimize_uu_window,
+    mandatory_update_visible,
     park_cursor_for_detection,
     require_admin,
     require_supported_display,
@@ -37,7 +43,12 @@ from wuwa_auto.uu.desktop import (
     wait_for_image,
 )
 from wuwa_auto.uu.errors import UuStartupError, UuStartupFinalError
-from wuwa_auto.uu.processes import is_uu_running, start_uu, terminate_uu
+from wuwa_auto.uu.processes import (
+    is_uu_running,
+    start_uu,
+    terminate_uu,
+    uu_primary_pids,
+)
 from wuwa_auto.windows.desktop_guard import (
     DesktopBlockedError,
     describe_window,
@@ -82,7 +93,27 @@ def _confirm_wuthering_active(timeout: float) -> bool:
     return active is not None and stop is not None
 
 
-def _run_attempt(attempt: int) -> None:
+def _recover_mandatory_update(context: str) -> bool:
+    try:
+        return recover_mandatory_update(
+            accept_update=lambda: accept_mandatory_update(context),
+            update_visible=lambda timeout: mandatory_update_visible(timeout),
+            primary_pids=uu_primary_pids,
+            start_process=start_uu,
+            focus_window=focus_uu_window,
+            timeout=MANDATORY_UPDATE_TIMEOUT,
+            relaunch_grace=MANDATORY_UPDATE_RELAUNCH_GRACE,
+            poll_interval=MANDATORY_UPDATE_POLL_INTERVAL,
+        )
+    except TimeoutError as exc:
+        raise startup_error(
+            "mandatory_update_recovery",
+            str(exc),
+            retryable=False,
+        ) from exc
+
+
+def _run_attempt(attempt: int, *, update_used: bool = False) -> None:
     log.info("UU attempt %d", attempt)
     try:
         foreground = require_desktop_ready()
@@ -100,6 +131,14 @@ def _run_attempt(attempt: int) -> None:
     except RuntimeError as exc:
         raise startup_error("focus_uu", str(exc)) from exc
     log.info("UU focused: %s", title)
+    if _recover_mandatory_update("focus"):
+        if update_used:
+            raise startup_error(
+                "mandatory_update_loop",
+                "mandatory update reappeared after one completed update",
+                retryable=False,
+            )
+        return _run_attempt(attempt, update_used=True)
     dismiss_known_popups("focus")
     save_step_screenshot("uu_focused")
 
@@ -131,6 +170,14 @@ def _run_attempt(attempt: int) -> None:
         log.info("UU Wuthering card is already hovered")
     click_after_evidence(start, "start_acceleration")
     time.sleep(POST_CLICK_DELAY)
+    if _recover_mandatory_update("post acceleration"):
+        if update_used:
+            raise startup_error(
+                "mandatory_update_loop",
+                "mandatory update reappeared after one completed update",
+                retryable=False,
+            )
+        return _run_attempt(attempt, update_used=True)
     dismiss_known_popups("post acceleration")
 
     if not _confirm_wuthering_active(CONFIRM_TIMEOUT):

@@ -40,6 +40,9 @@ class UuIdentityTests(unittest.TestCase):
             "starrail_auto.uu.service.focus_uu_window",
             return_value="UU加速器",
         ), patch(
+            "starrail_auto.uu.service._recover_mandatory_update",
+            return_value=False,
+        ), patch(
             "starrail_auto.uu.service.dismiss_known_popups"
         ), patch(
             "starrail_auto.uu.service._confirm_starrail_active",

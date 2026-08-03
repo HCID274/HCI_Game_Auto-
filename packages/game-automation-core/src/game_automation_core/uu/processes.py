@@ -67,6 +67,13 @@ class UuProcessController:
     def is_any_running(self) -> bool:
         return bool(self.managed_processes())
 
+    def primary_pids(self) -> frozenset[int]:
+        return frozenset(
+            process.pid
+            for process in self.managed_processes()
+            if process.name().casefold() in self.spec.primary_names
+        )
+
     def start(self) -> None:
         executable = self.spec.executable
         if not executable.is_file():
@@ -101,4 +108,3 @@ class UuProcessController:
                 pass
         _, still_alive = psutil.wait_procs(alive, timeout=kill_timeout)
         return not still_alive and not self.managed_processes()
-

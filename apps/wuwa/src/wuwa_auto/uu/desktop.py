@@ -23,6 +23,8 @@ from wuwa_auto.uu.config import (
     TPL_UPDATE_CLOSE,
     TPL_UPDATE_CONFIRM,
     TPL_UPDATE_NOTICE,
+    TPL_MANDATORY_UPDATE_ACTION,
+    TPL_MANDATORY_UPDATE_NOTICE,
     UPDATE_ACTION_TIMEOUT,
     UPDATE_DETECT_TIMEOUT,
     UPDATE_MAX_DISMISSALS,
@@ -43,6 +45,8 @@ _controller = UuDesktopController(
         update_notice=TPL_UPDATE_NOTICE,
         update_actions=(("confirm", TPL_UPDATE_CONFIRM), ("close", TPL_UPDATE_CLOSE)),
         admin_hint="`uv run wuwa-auto elevate uu <action>`",
+        mandatory_update_notice=TPL_MANDATORY_UPDATE_NOTICE,
+        mandatory_update_action=TPL_MANDATORY_UPDATE_ACTION,
         window_timeout=WINDOW_TIMEOUT,
         window_poll_interval=WINDOW_POLL_INTERVAL,
         minimize_timeout=MINIMIZE_TIMEOUT,
@@ -147,3 +151,11 @@ def hover_after_evidence(position: tuple[int, int], step_name: str) -> None:
 
 def dismiss_known_popups(context: str) -> None:
     _controller.dismiss_known_popups(context)
+
+
+def mandatory_update_visible(timeout: float = UPDATE_DETECT_TIMEOUT) -> bool:
+    return _controller.mandatory_update_visible(timeout=timeout)
+
+
+def accept_mandatory_update(context: str) -> bool:
+    return _controller.accept_mandatory_update(context)
