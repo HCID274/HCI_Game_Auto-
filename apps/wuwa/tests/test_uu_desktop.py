@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from wuwa_auto.uu import desktop
 
@@ -61,3 +62,18 @@ def test_focus_uu_window_uses_verified_activation(monkeypatch):
 
     assert desktop.focus_uu_window(timeout=0.1) == "网易UU加速器"
     assert activations == [(123, 1.5)]
+
+
+def test_uu_actions_use_active_virtual_hid(monkeypatch):
+    mouse = Mock()
+    mouse.move_to.return_value = (2558, 720)
+    monkeypatch.setattr(desktop, "active_virtual_mouse", lambda: mouse)
+    monkeypatch.setattr(desktop._controller, "save_screenshot", Mock())
+
+    desktop.park_cursor_for_detection()
+    desktop.hover_after_evidence((840, 575), "wuthering_card")
+    desktop.click_after_evidence((840, 734), "start_acceleration")
+
+    assert mouse.move_to.call_args_list[0].args == (2558, 720)
+    assert mouse.move_to.call_args_list[1].args == (840, 575)
+    mouse.click_at.assert_called_once_with(840, 734)

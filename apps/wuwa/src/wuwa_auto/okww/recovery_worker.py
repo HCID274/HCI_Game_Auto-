@@ -9,11 +9,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from .confirmed_retry_worker import _virtual_hid_click
+except ImportError:  # executed directly by OK-WW's bundled Python
+    from confirmed_retry_worker import _virtual_hid_click
+
 
 RECOVERY_STARTED_MARKER = "HOST_FARM_ECHO_RECOVERY_STARTED"
 RECOVERY_COMPLETED_MARKER = "HOST_FARM_ECHO_RECOVERY_COMPLETED"
 WORLD_RECOVERY_STARTED_MARKER = "HOST_WORLD_STATE_RECOVERY_STARTED"
 WORLD_RECOVERY_COMPLETED_MARKER = "HOST_WORLD_STATE_RECOVERY_COMPLETED"
+RECOVERY_HID_CLICK_MARKER = "HOST_FARM_ECHO_RECOVERY_VIRTUAL_HID_CLICK"
 
 
 def _write_result(path: Path, **values: object) -> None:
@@ -45,7 +51,65 @@ def main(argv: list[str] | None = None) -> int:
         from src.task.DomainTask import DomainTask
         from src.task.WWOneTimeTask import WWOneTimeTask
 
-        class FarmEchoDeathRecoveryTask(DomainTask):
+        class VirtualHidRecoveryMixin:
+            def click(
+                self,
+                x: object = -1,
+                y: object = -1,
+                move_back: bool = False,
+                name: object = None,
+                interval: float = -1,
+                move: bool = False,
+                down_time: float = 0.01,
+                after_sleep: float = 0,
+                key: str = "left",
+                **kwargs: object,
+            ) -> object:
+                if (
+                    key == "left"
+                    and isinstance(x, (int, float))
+                    and isinstance(y, (int, float))
+                    and not (0 < x < 1 or 0 < y < 1)
+                ):
+                    if not self.check_interval(interval):
+                        self.executor.reset_scene()
+                        return False
+                    target_x = self.width // 2 if x == -1 else int(x)
+                    target_y = self.height // 2 if y == -1 else int(y)
+                    absolute_x, absolute_y = (
+                        self.executor.interaction.capture.get_abs_cords(
+                            target_x, target_y
+                        )
+                    )
+                    _virtual_hid_click(
+                        absolute_x,
+                        absolute_y,
+                        hold=max(0.08, float(down_time)),
+                        log_action=bool(name),
+                    )
+                    if name:
+                        self.log_info(
+                            f"{RECOVERY_HID_CLICK_MARKER} "
+                            f"{absolute_x},{absolute_y} {name}"
+                        )
+                    if after_sleep > 0:
+                        self.sleep(after_sleep)
+                    self.executor.reset_scene()
+                    return True
+                return super().click(
+                    x,
+                    y,
+                    move_back=move_back,
+                    name=name,
+                    interval=interval,
+                    move=move,
+                    down_time=down_time,
+                    after_sleep=after_sleep,
+                    key=key,
+                    **kwargs,
+                )
+
+        class FarmEchoDeathRecoveryTask(VirtualHidRecoveryMixin, DomainTask):
             name = "Farm Echo Death Recovery"
 
             def run(self) -> None:
@@ -63,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise RuntimeError("recovery finished outside world team state")
                 self.log_info(RECOVERY_COMPLETED_MARKER)
 
-        class WorldStateRecoveryTask(DomainTask):
+        class WorldStateRecoveryTask(VirtualHidRecoveryMixin, DomainTask):
             name = "World State Recovery"
 
             def run(self) -> None:

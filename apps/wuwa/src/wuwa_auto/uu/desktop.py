@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from game_automation_core.uu.desktop import (
     pyautogui,
 )
 from game_automation_core.windows.desktop_guard import activate_window
+from wuwa_auto.input.viiper import active_virtual_mouse
 from wuwa_auto.uu.config import (
     DEBUG_DIR,
     EXPECTED_PRIMARY_SCREEN_SIZE,
@@ -35,6 +37,8 @@ from wuwa_auto.uu.config import (
     WINDOW_TIMEOUT,
 )
 from wuwa_auto.uu.processes import is_uu_running
+
+log = logging.getLogger(__name__)
 
 _controller = UuDesktopController(
     UuDesktopConfig(
@@ -66,7 +70,13 @@ def _leave_pyautogui_failsafe_corner() -> None:
 
 
 def park_cursor_for_detection() -> None:
-    _controller.park_cursor_for_detection()
+    mouse = active_virtual_mouse()
+    if mouse is None:
+        _controller.park_cursor_for_detection()
+        return
+    width, height = EXPECTED_PRIMARY_SCREEN_SIZE
+    reached = mouse.move_to(width - 2, height // 2)
+    log.info("parked cursor through virtual HID at %s", reached)
 
 
 def require_admin() -> None:
@@ -142,11 +152,21 @@ def wait_for_image(
 
 
 def click_after_evidence(position: tuple[int, int], step_name: str) -> None:
-    _controller.click_after_evidence(position, step_name)
+    mouse = active_virtual_mouse()
+    if mouse is None:
+        _controller.click_after_evidence(position, step_name)
+        return
+    _controller.save_screenshot(f"uu_{step_name}_before_click")
+    mouse.click_at(*position)
 
 
 def hover_after_evidence(position: tuple[int, int], step_name: str) -> None:
-    _controller.hover_after_evidence(position, step_name)
+    mouse = active_virtual_mouse()
+    if mouse is None:
+        _controller.hover_after_evidence(position, step_name)
+        return
+    _controller.save_screenshot(f"uu_{step_name}_before_hover")
+    mouse.move_to(*position)
 
 
 def dismiss_known_popups(context: str) -> None:

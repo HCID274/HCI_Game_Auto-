@@ -7,9 +7,12 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
+import socketserver
 import struct
 import subprocess
+import threading
 import time
 import urllib.request
 import zipfile
@@ -32,6 +35,8 @@ VIIPER_ZIP_SHA256 = "a02b06751d64e43e7700aba8ee1f7e3e4f5f4e7f370a11722ff922ab075
 VIIPER_EXE_SHA256 = "1868d682f4cc6d62349bbccbf0727b05d3eb6e22027ac34f0f1d9b1de56f2ddc"
 MOUSE_PACKET = struct.Struct("<Bhhhh")
 LEFT_BUTTON = 0x01
+CONTROL_PORT_ENV = "WUWA_VIRTUAL_HID_CONTROL_PORT"
+CONTROL_TOKEN_ENV = "WUWA_VIRTUAL_HID_CONTROL_TOKEN"
 
 
 class VirtualHidError(RuntimeError):
@@ -315,7 +320,7 @@ class VirtualHidMouse:
         x: int,
         y: int,
         *,
-        tolerance: int = 2,
+        tolerance: int = 4,
         timeout: float = 4,
     ) -> tuple[int, int]:
         target = (int(x), int(y))
@@ -356,15 +361,88 @@ class VirtualHidMouse:
             f"virtual mouse could not reach {target}; cursor={self.cursor_position()}"
         )
 
-    def click_at(self, x: int, y: int, *, hold: float = 0.08) -> None:
+    def click_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        hold: float = 0.08,
+        log_action: bool = True,
+    ) -> None:
         reached = self.move_to(x, y)
         self.send(buttons=LEFT_BUTTON)
         time.sleep(hold)
         self.send()
-        log.info("virtual HID clicked target=%s reached=%s", (x, y), reached)
+        if log_action:
+            log.info("virtual HID clicked target=%s reached=%s", (x, y), reached)
+
+
+class _VirtualHidControlServer:
+    """Expose the workflow-owned HID to trusted local worker processes."""
+
+    def __init__(self, mouse: VirtualHidMouse) -> None:
+        self.mouse = mouse
+        self.token = secrets.token_urlsafe(24)
+        self._lock = threading.Lock()
+        owner = self
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                try:
+                    payload = json.loads(self.rfile.readline(4096).decode("utf-8"))
+                    if payload.get("token") != owner.token:
+                        raise VirtualHidError("invalid virtual HID control token")
+                    if payload.get("action") != "click":
+                        raise VirtualHidError("unsupported virtual HID control action")
+                    with owner._lock:
+                        owner.mouse.click_at(
+                            int(payload["x"]),
+                            int(payload["y"]),
+                            hold=float(payload.get("hold", 0.08)),
+                            log_action=bool(payload.get("log_action", True)),
+                        )
+                    response = {"ok": True}
+                except Exception as exc:
+                    response = {"ok": False, "error": str(exc)}
+                self.wfile.write(
+                    json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
+                )
+
+        class Server(socketserver.ThreadingTCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="wuwa-virtual-hid-control",
+            daemon=True,
+        )
+
+    @property
+    def port(self) -> int:
+        return int(self.server.server_address[1])
+
+    def start(self) -> None:
+        self.thread.start()
+        os.environ[CONTROL_PORT_ENV] = str(self.port)
+        os.environ[CONTROL_TOKEN_ENV] = self.token
+        log.info("virtual HID worker control ready on localhost port %s", self.port)
+
+    def close(self) -> None:
+        os.environ.pop(CONTROL_PORT_ENV, None)
+        os.environ.pop(CONTROL_TOKEN_ENV, None)
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
 
 
 _active_mouse: VirtualHidMouse | None = None
+
+
+def active_virtual_mouse() -> VirtualHidMouse | None:
+    """Return the workflow-owned HID within the current process, if active."""
+    return _active_mouse
 
 
 @contextmanager
@@ -375,11 +453,14 @@ def managed_virtual_mouse() -> Iterator[VirtualHidMouse]:
         yield _active_mouse
         return
     with VirtualHidMouse() as mouse:
+        control = _VirtualHidControlServer(mouse)
+        control.start()
         _active_mouse = mouse
         try:
             yield mouse
         finally:
             _active_mouse = None
+            control.close()
 
 
 def probe_virtual_mouse() -> dict[str, object]:

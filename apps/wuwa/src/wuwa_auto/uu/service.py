@@ -57,6 +57,9 @@ from wuwa_auto.windows.desktop_guard import (
 
 log = logging.getLogger(__name__)
 
+_CARD_ACTION_MAX_HORIZONTAL_DISTANCE = 140
+_CARD_SELECTION_ATTEMPTS = 3
+
 
 def _ensure_process() -> bool:
     already_running = is_uu_running()
@@ -113,6 +116,46 @@ def _recover_mandatory_update(context: str) -> bool:
         ) from exc
 
 
+def _locate_verified_wuthering_start() -> tuple[int, int]:
+    """Bind the generic start action to a freshly selected Wuwa card."""
+    # A generic action can belong to the previously hovered Star Rail card.
+    # Clear all hover state, locate Wuwa's identity, then create exactly one
+    # hover state before accepting the generic start button.
+    for selection_attempt in range(1, _CARD_SELECTION_ATTEMPTS + 1):
+        park_cursor_for_detection()
+        time.sleep(POST_HOVER_DELAY)
+        card = wait_for_image(
+            TPL_GAME_CARD,
+            step_name="locate_wuthering_card",
+            timeout=CARD_TIMEOUT,
+        )
+        hover_after_evidence(card, "wuthering_card")
+        time.sleep(POST_HOVER_DELAY)
+        start = wait_for_image(
+            TPL_START_ACCELERATION,
+            step_name="locate_start_acceleration",
+            timeout=START_BUTTON_TIMEOUT,
+        )
+        horizontal_distance = abs(start[0] - card[0])
+        if horizontal_distance <= _CARD_ACTION_MAX_HORIZONTAL_DISTANCE:
+            return start
+        save_step_screenshot("uu_start_action_wrong_card")
+        log.warning(
+            "rejected generic UU start action for another card: "
+            "attempt=%d card=%s start=%s horizontal_distance=%d",
+            selection_attempt,
+            card,
+            start,
+            horizontal_distance,
+        )
+
+    raise startup_error(
+        "bind_start_to_wuthering_card",
+        "generic start action remained bound to another game after "
+        f"{_CARD_SELECTION_ATTEMPTS} Wuthering card selections",
+    )
+
+
 def _run_attempt(attempt: int, *, update_used: bool = False) -> None:
     log.info("UU attempt %d", attempt)
     try:
@@ -146,28 +189,7 @@ def _run_attempt(attempt: int, *, update_used: bool = False) -> None:
         log.info("existing Wuthering Waves acceleration confirmed")
         return
 
-    # A restart preserves the system cursor position.  If it is already over
-    # the game card, UU starts in the hovered state and the normal card template
-    # is intentionally absent.  Accept that state directly; otherwise park the
-    # cursor so the unhovered card can be matched deterministically.
-    start = try_locate_image(TPL_START_ACCELERATION, timeout=REUSE_TIMEOUT)
-    if start is None:
-        park_cursor_for_detection()
-        time.sleep(POST_HOVER_DELAY)
-        card = wait_for_image(
-            TPL_GAME_CARD,
-            step_name="locate_wuthering_card",
-            timeout=CARD_TIMEOUT,
-        )
-        hover_after_evidence(card, "wuthering_card")
-        time.sleep(POST_HOVER_DELAY)
-        start = wait_for_image(
-            TPL_START_ACCELERATION,
-            step_name="locate_start_acceleration",
-            timeout=START_BUTTON_TIMEOUT,
-        )
-    else:
-        log.info("UU Wuthering card is already hovered")
+    start = _locate_verified_wuthering_start()
     click_after_evidence(start, "start_acceleration")
     time.sleep(POST_CLICK_DELAY)
     if _recover_mandatory_update("post acceleration"):

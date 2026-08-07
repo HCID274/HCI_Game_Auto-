@@ -41,6 +41,10 @@ def main(argv: list[str] | None = None) -> int:
         "do_run",
         "ensure_main",
         "wait_in_team_and_world",
+        "wait_ocr",
+        "find_one",
+        "click_box",
+        "open_boss_book",
     )
     _require(
         DomainTask,
