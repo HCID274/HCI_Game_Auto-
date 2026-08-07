@@ -54,6 +54,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "cleanup", help="close Wuwa/OK, disconnect Wuwa acceleration, then exit UU"
     )
 
+    client = commands.add_parser("client", help="inspect or prepare official launcher")
+    client.add_argument("action", choices=["prepare", "stop-launcher"])
+
     report = commands.add_parser("report", help="rebuild a local report preview")
     report.add_argument(
         "run_id",
@@ -185,6 +188,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         from wuwa_auto.cleanup import cleanup_after_run
 
         return 0 if cleanup_after_run(acceleration_was_connected=True).completed else 2
+    if args.command == "client":
+        if args.action == "stop-launcher":
+            from wuwa_auto.client.launcher import stop_client_launchers
+
+            return 0 if stop_client_launchers() >= 0 else 1
+        from wuwa_auto.client.launcher import ensure_client_ready
+        from wuwa_auto.input.viiper import managed_virtual_mouse
+
+        with managed_virtual_mouse() as mouse:
+            result = ensure_client_ready(mouse)
+        logging.getLogger(__name__).info("client preparation result: %s", result)
+        return 0
     if args.command == "report":
         from wuwa_auto.reporting.service import report_run
 

@@ -8,7 +8,9 @@ def test_cleanup_closes_every_owned_component() -> None:
         "wuwa_auto.cleanup.stop_pyappify_launchers"
     ), patch("wuwa_auto.cleanup._running_ok_processes", return_value=[]), patch(
         "wuwa_auto.cleanup.stop_wuthering_game"
-    ), patch("wuwa_auto.cleanup._game_running", return_value=False), patch(
+    ), patch("wuwa_auto.cleanup.stop_client_launchers"), patch(
+        "wuwa_auto.cleanup._game_running", return_value=False
+    ), patch("wuwa_auto.cleanup.is_client_launcher_running", return_value=False), patch(
         "wuwa_auto.cleanup.is_uu_running", return_value=True
     ), patch("wuwa_auto.cleanup.disconnect") as disconnect, patch(
         "wuwa_auto.cleanup.terminate_uu", return_value=True
@@ -29,7 +31,9 @@ def test_disconnect_failure_is_preserved_but_uu_is_still_exited() -> None:
         "wuwa_auto.cleanup.stop_pyappify_launchers"
     ), patch("wuwa_auto.cleanup._running_ok_processes", return_value=[]), patch(
         "wuwa_auto.cleanup.stop_wuthering_game"
-    ), patch("wuwa_auto.cleanup._game_running", return_value=False), patch(
+    ), patch("wuwa_auto.cleanup.stop_client_launchers"), patch(
+        "wuwa_auto.cleanup._game_running", return_value=False
+    ), patch("wuwa_auto.cleanup.is_client_launcher_running", return_value=False), patch(
         "wuwa_auto.cleanup.is_uu_running", return_value=True
     ), patch(
         "wuwa_auto.cleanup.disconnect", side_effect=RuntimeError("not verified")

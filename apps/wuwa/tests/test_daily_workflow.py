@@ -2,6 +2,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from wuwa_auto.cleanup import CleanupResult
 from wuwa_auto.daily import _run_boss_then_daily_task, _run_workflow
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
@@ -19,6 +21,14 @@ DailyTask:open_daily
 DailyTask:can't find gray_book_boss, make sure f2 is the hotkey for book
 Daily Task exception stopped
 """
+
+
+@pytest.fixture(autouse=True)
+def _prepare_official_client():
+    with patch("wuwa_auto.daily.validate_okww_compatibility"), patch(
+        "wuwa_auto.daily.ensure_client_ready"
+    ) as prepare:
+        yield prepare
 
 
 def _result(

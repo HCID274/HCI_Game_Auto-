@@ -7,6 +7,10 @@ from dataclasses import asdict, dataclass, field
 
 import psutil
 
+from wuwa_auto.client.launcher import (
+    is_client_launcher_running,
+    stop_client_launchers,
+)
 from wuwa_auto.okww.runner import (
     _running_ok_processes,
     stop_daily_workers,
@@ -57,11 +61,12 @@ def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
 
     try:
         stop_wuthering_game()
+        stop_client_launchers()
     except Exception as exc:
         result.issues.append(f"鸣潮关闭异常：{exc}")
-    result.game_closed = not _game_running()
+    result.game_closed = not _game_running() and not is_client_launcher_running()
     if not result.game_closed:
-        result.issues.append("鸣潮进程未完全退出")
+        result.issues.append("鸣潮客户端或启动器进程未完全退出")
 
     if is_uu_running():
         try:

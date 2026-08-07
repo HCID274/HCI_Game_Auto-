@@ -23,6 +23,24 @@ USBIP_DIR = VENDOR_DIR / "usbip-win2" / "0.9.7.8"
 USBIP_INSTALLER = USBIP_DIR / "USBip-0.9.7.8-x64.exe"
 
 UU_EXE = Path(r"D:\2_Software\4_Games\Netease\UU\uu_launcher.exe")
+WUWA_INSTALL_DIR = Path(r"D:\2_Software\4_Games\Wuthering Waves")
+WUWA_LAUNCHER_EXE = WUWA_INSTALL_DIR / "launcher.exe"
+WUWA_CLIENT_EXE = (
+    WUWA_INSTALL_DIR
+    / "Wuthering Waves Game"
+    / "Client"
+    / "Binaries"
+    / "Win64"
+    / "Client-Win64-Shipping.exe"
+)
+WUWA_LAUNCHER_READY_TEMPLATE = TEMPLATES_DIR / "client_launcher_ready.png"
+WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_primary_anchor.png"
+)
+WUWA_CLIENT_LOGIN_TEMPLATE = TEMPLATES_DIR / "client_login_connect.png"
+WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE = TEMPLATES_DIR / "client_monthly_reward.png"
+WUWA_CLIENT_REWARD_RESULT_TEMPLATE = TEMPLATES_DIR / "client_reward_result_close.png"
+WUWA_CLIENT_NETWORK_RETRY_TEMPLATE = TEMPLATES_DIR / "client_network_retry.png"
 OK_WW_EXE = Path(
     r"D:\2_Software\4_Games\Wuthering Waves\01Auto\ok-ww\ok-ww.exe"
 )

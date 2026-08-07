@@ -4,8 +4,10 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from wuwa_auto.client.launcher import ensure_client_ready
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
 from wuwa_auto.input.viiper import managed_virtual_mouse
+from wuwa_auto.okww.compatibility import validate_okww_compatibility
 from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
@@ -281,13 +283,23 @@ def _run_workflow(task_name: str, task_runner) -> int:
     failure_evidence = None
 
     try:
+        validate_okww_compatibility()
         # Keep a real PnP HID mouse present for game UI input and UU cleanup.
-        with managed_virtual_mouse():
+        with managed_virtual_mouse() as mouse:
             try:
                 log.info("%s workflow: local virtual HID mouse is ready", task_name)
                 log.info("%s workflow: ensure Wuthering Waves acceleration", task_name)
                 ensure_connected()
                 acceleration_connected = True
+                log.info("%s workflow: prepare official Wuthering Waves client", task_name)
+                client = ensure_client_ready(mouse)
+                log.info(
+                    "%s workflow: client ready pid=%s updated=%s actions=%s",
+                    task_name,
+                    client.game_pid,
+                    client.updated,
+                    client.launcher_actions,
+                )
                 log.info("%s workflow: start OK-WW task", task_name)
                 result = task_runner()
                 # A retry is part of this workflow's business transaction, not
