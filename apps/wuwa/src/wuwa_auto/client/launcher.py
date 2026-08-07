@@ -33,6 +33,8 @@ from wuwa_auto.settings import (
     WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
     WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
     WUWA_CLIENT_REWARD_RESULT_TEMPLATE,
+    WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
+    WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
     WUWA_INSTALL_DIR,
     WUWA_LAUNCHER_EXE,
     WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE,
@@ -47,6 +49,7 @@ GAME_WINDOW_TIMEOUT_SECONDS = 300.0
 CLIENT_UPDATE_TIMEOUT_SECONDS = 9000.0
 POLL_INTERVAL_SECONDS = 5.0
 READY_RETRY_SECONDS = 60.0
+CLIENT_RESTART_TIMEOUT_SECONDS = 180.0
 WORLD_STABLE_POLLS = 2
 MAX_CLICKS_PER_STATE = 2
 PRIMARY_ANCHOR_TO_BUTTON_CENTER = (117, 0)
@@ -74,6 +77,12 @@ class ClientPreparationResult:
 
 class ClientLauncherError(RuntimeError):
     pass
+
+
+class _ClientRestartRequired(RuntimeError):
+    def __init__(self, previous_pid: int) -> None:
+        super().__init__(f"client update requested restart for pid={previous_pid}")
+        self.previous_pid = previous_pid
 
 
 def _normal(path: Path) -> Path:
@@ -277,6 +286,8 @@ def _require_templates() -> None:
             WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
             WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
             WUWA_CLIENT_REWARD_RESULT_TEMPLATE,
+            WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
+            WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
         )
         if not path.is_file()
     ]
@@ -407,6 +418,26 @@ def _world_hud_visible(window: WindowInfo) -> bool:
     return visible
 
 
+def _client_update_restart_target(game: WindowInfo) -> tuple[int, int] | None:
+    """Require both the update-complete notice and its confirm action."""
+    region = _search_region(game)
+    notice = _locate(
+        WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
+        confidence=0.88,
+        region=region,
+    )
+    if notice is None or not _point_in_window(notice, game):
+        return None
+    confirm = _locate(
+        WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
+        confidence=0.88,
+        region=region,
+    )
+    if confirm is None or not _point_in_window(confirm, game):
+        return None
+    return confirm
+
+
 def _ensure_game_world(
     mouse: VirtualHidMouse,
     game: WindowInfo,
@@ -445,6 +476,19 @@ def _ensure_game_world(
             sleep(POLL_INTERVAL_SECONDS)
             continue
         stable_world = 0
+
+        update_restart = _client_update_restart_target(game)
+        if update_restart is not None:
+            _restore_game(game)
+            _click_state(
+                mouse,
+                game,
+                update_restart,
+                "confirm_client_update_restart",
+                evidence,
+            )
+            actions.append("confirm_client_update_restart")
+            raise _ClientRestartRequired(game.pid)
 
         network_retry = _locate(
             WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
@@ -557,6 +601,22 @@ def _click_state(
     log.info("client launcher action=%s point=%s", state, point)
 
 
+def _wait_for_restarted_game(
+    previous_pid: int,
+    *,
+    timeout: float = CLIENT_RESTART_TIMEOUT_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> WindowInfo | None:
+    deadline = clock() + timeout
+    while clock() < deadline:
+        current = _game_window()
+        if current is not None and current.pid != previous_pid:
+            return current
+        sleep(POLL_INTERVAL_SECONDS)
+    return None
+
+
 def _launch_launcher() -> None:
     if not WUWA_LAUNCHER_EXE.is_file():
         raise ClientLauncherError(f"launcher not found: {WUWA_LAUNCHER_EXE}")
@@ -620,25 +680,45 @@ def _ensure_client_ready(
     _require_templates()
     evidence: list[str] = []
     actions: list[str] = []
+    updated = False
 
     if game := _game_window():
-        game = _ensure_game_world(
-            mouse,
-            game,
-            timeout=game_timeout,
-            evidence=evidence,
-            actions=actions,
-            sleep=sleep,
-            clock=clock,
-        )
-        evidence.append(str(_save_screenshot("wuwa_client_reused")))
-        stop_client_launchers()
-        return ClientPreparationResult(
-            False,
-            tuple(actions),
-            tuple(evidence),
-            game.pid,
-        )
+        try:
+            game = _ensure_game_world(
+                mouse,
+                game,
+                timeout=game_timeout,
+                evidence=evidence,
+                actions=actions,
+                sleep=sleep,
+                clock=clock,
+            )
+        except _ClientRestartRequired as restart:
+            updated = True
+            game = _wait_for_restarted_game(
+                restart.previous_pid,
+                sleep=sleep,
+                clock=clock,
+            )
+        if game is not None:
+            if updated:
+                game = _ensure_game_world(
+                    mouse,
+                    game,
+                    timeout=game_timeout,
+                    evidence=evidence,
+                    actions=actions,
+                    sleep=sleep,
+                    clock=clock,
+                )
+            evidence.append(str(_save_screenshot("wuwa_client_reused")))
+            stop_client_launchers()
+            return ClientPreparationResult(
+                updated,
+                tuple(actions),
+                tuple(evidence),
+                game.pid,
+            )
 
     launcher = _launcher_window()
     if launcher is None:
@@ -657,7 +737,6 @@ def _ensure_client_ready(
 
     _focus(launcher)
     evidence.append(str(_save_screenshot("wuwa_launcher_open")))
-    updated = False
     deadline = clock() + update_timeout
     last_state_hash = ""
     clicks_for_hash: dict[str, int] = {}
@@ -667,15 +746,34 @@ def _ensure_client_ready(
 
     while clock() < deadline:
         if game := _game_window():
-            game = _ensure_game_world(
-                mouse,
-                game,
-                timeout=game_timeout,
-                evidence=evidence,
-                actions=actions,
-                sleep=sleep,
-                clock=clock,
-            )
+            try:
+                game = _ensure_game_world(
+                    mouse,
+                    game,
+                    timeout=game_timeout,
+                    evidence=evidence,
+                    actions=actions,
+                    sleep=sleep,
+                    clock=clock,
+                )
+            except _ClientRestartRequired as restart:
+                updated = True
+                restarted = _wait_for_restarted_game(
+                    restart.previous_pid,
+                    sleep=sleep,
+                    clock=clock,
+                )
+                if restarted is None and _launcher_window() is None:
+                    _launch_launcher()
+                    _wait_for_window(
+                        _launcher_window,
+                        LAUNCHER_WINDOW_TIMEOUT_SECONDS,
+                        sleep=sleep,
+                        clock=clock,
+                    )
+                waiting_captured = False
+                game_deadline = None
+                continue
             evidence.append(str(_save_screenshot("wuwa_client_window_ready")))
             stop_client_launchers()
             return ClientPreparationResult(

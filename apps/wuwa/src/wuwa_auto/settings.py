@@ -41,6 +41,12 @@ WUWA_CLIENT_LOGIN_TEMPLATE = TEMPLATES_DIR / "client_login_connect.png"
 WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE = TEMPLATES_DIR / "client_monthly_reward.png"
 WUWA_CLIENT_REWARD_RESULT_TEMPLATE = TEMPLATES_DIR / "client_reward_result_close.png"
 WUWA_CLIENT_NETWORK_RETRY_TEMPLATE = TEMPLATES_DIR / "client_network_retry.png"
+WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE = (
+    TEMPLATES_DIR / "client_update_restart_notice.png"
+)
+WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE = (
+    TEMPLATES_DIR / "client_update_restart_confirm.png"
+)
 OK_WW_EXE = Path(
     r"D:\2_Software\4_Games\Wuthering Waves\01Auto\ok-ww\ok-ww.exe"
 )

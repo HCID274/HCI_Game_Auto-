@@ -1,14 +1,22 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw
 
 from wuwa_auto.client.launcher import (
+    _ClientRestartRequired,
     WindowInfo,
     _ensure_game_world,
     _search_region,
     _world_hud_visible,
     ensure_client_ready,
+)
+from wuwa_auto.settings import (
+    WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
+    WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
 )
 
 
@@ -66,6 +74,23 @@ def test_world_hud_requires_three_distributed_ui_regions() -> None:
         "wuwa_auto.client.launcher.pyautogui.screenshot", return_value=screenshot
     ):
         assert _world_hud_visible(game)
+
+
+def test_real_client_update_dialog_matches_both_templates() -> None:
+    fixture = cv2.imread(
+        str(Path(__file__).parent / "fixtures" / "client_update_restart_dialog.png")
+    )
+    assert fixture is not None
+    for template_path in (
+        WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
+        WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
+    ):
+        template = cv2.imread(str(template_path))
+        assert template is not None
+        confidence = float(
+            np.max(cv2.matchTemplate(fixture, template, cv2.TM_CCOEFF_NORMED))
+        )
+        assert confidence >= 0.99
 
 
 def test_existing_game_is_reused_without_opening_launcher() -> None:
@@ -139,6 +164,9 @@ def test_monthly_reward_is_claimed_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._world_hud_visible",
         side_effect=[False, True, True],
     ), patch(
+        "wuwa_auto.client.launcher._client_update_restart_target",
+        return_value=None,
+    ), patch(
         "wuwa_auto.client.launcher._locate",
         side_effect=[None, None, (1200, 700)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
@@ -171,6 +199,9 @@ def test_reward_result_is_closed_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._world_hud_visible",
         side_effect=[False, True, True],
     ), patch(
+        "wuwa_auto.client.launcher._client_update_restart_target",
+        return_value=None,
+    ), patch(
         "wuwa_auto.client.launcher._locate",
         side_effect=[None, (900, 700)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
@@ -202,6 +233,9 @@ def test_network_error_is_retried_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._world_hud_visible",
         side_effect=[False, True, True],
     ), patch(
+        "wuwa_auto.client.launcher._client_update_restart_target",
+        return_value=None,
+    ), patch(
         "wuwa_auto.client.launcher._locate",
         side_effect=[(1000, 600)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
@@ -221,3 +255,71 @@ def test_network_error_is_retried_before_world_is_accepted() -> None:
 
     assert mouse.clicks == [(1000, 600)]
     assert actions == ["retry_game_network"]
+
+
+def test_client_update_complete_is_confirmed_and_requests_restart() -> None:
+    game = _window("Client-Win64-Shipping.exe", 20)
+    clock = FakeClock()
+    mouse = FakeMouse()
+    actions: list[str] = []
+
+    with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
+        "wuwa_auto.client.launcher._world_hud_visible", return_value=False
+    ), patch(
+        "wuwa_auto.client.launcher._client_update_restart_target",
+        return_value=(1000, 700),
+    ), patch("wuwa_auto.client.launcher._restore_game"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("action.png")
+    ):
+        with pytest.raises(_ClientRestartRequired) as raised:
+            _ensure_game_world(
+                mouse,
+                game,
+                timeout=60,
+                evidence=[],
+                actions=actions,
+                sleep=clock.sleep,
+                clock=clock,
+            )
+
+    assert raised.value.previous_pid == 20
+    assert mouse.clicks == [(1000, 700)]
+    assert actions == ["confirm_client_update_restart"]
+
+
+def test_existing_client_update_restart_reenters_world_state_machine() -> None:
+    old_game = _window("Client-Win64-Shipping.exe", 20)
+    new_game = _window("Client-Win64-Shipping.exe", 21)
+    mouse = FakeMouse()
+    calls = 0
+
+    def ensure_world(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            kwargs["actions"].append("confirm_client_update_restart")
+            raise _ClientRestartRequired(old_game.pid)
+        return new_game
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=old_game
+    ), patch(
+        "wuwa_auto.client.launcher._ensure_game_world", side_effect=ensure_world
+    ), patch(
+        "wuwa_auto.client.launcher._wait_for_restarted_game", return_value=new_game
+    ), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
+    ), patch("wuwa_auto.client.launcher.stop_client_launchers"), patch(
+        "wuwa_auto.client.launcher._launch_launcher"
+    ) as launch:
+        result = ensure_client_ready(mouse)
+
+    assert calls == 2
+    assert result.updated
+    assert result.game_pid == 21
+    assert result.launcher_actions == ("confirm_client_update_restart",)
+    launch.assert_not_called()
