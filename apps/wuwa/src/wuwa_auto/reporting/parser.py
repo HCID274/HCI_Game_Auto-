@@ -132,10 +132,10 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
 
     if recovery.get("triggered"):
         retry_completed = int(recovery.get("retry_completed") or 0)
-        recovery_attempts = int(recovery.get("recovery_attempts") or 1)
+        recovery_attempts = int(recovery.get("recovery_attempts") or 0)
         total_completed = int(recovery.get("total_completed") or boss_runs)
         target = int(recovery.get("target_count") or total_completed)
-        if result.status == "success":
+        if recovery_attempts and result.status == "success":
             if retry_completed:
                 recovery_wording = (
                     f"讨伐中途倒地{recovery_attempts}次，"
@@ -152,7 +152,7 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                     recovery_wording,
                 )
             )
-        else:
+        elif recovery_attempts:
             first_safe = recovery.get("first_safe_recovery") is True
             final_safe = recovery.get("final_safe_recovery")
             safe = first_safe and final_safe is not False

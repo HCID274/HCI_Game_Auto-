@@ -8,6 +8,7 @@ from wuwa_auto.okww.logs import (
     count_farm_echo_kill_confirmations,
     find_failure,
     is_recoverable_farm_echo_death,
+    is_recoverable_farm_echo_entry_failure,
 )
 
 
@@ -57,6 +58,15 @@ FarmEchoTask:info_set Revive Failed
 def test_farm_echo_death_requires_both_markers() -> None:
     assert not is_recoverable_farm_echo_death(
         "FarmEchoTask:raise_not_in_combat char dead"
+    )
+
+
+def test_farm_echo_entry_failure_is_recoverable() -> None:
+    assert is_recoverable_farm_echo_entry_failure(
+        "FarmEchoTask:info_set app Teleport to boss failed\n"
+    )
+    assert not is_recoverable_farm_echo_entry_failure(
+        "FarmEchoTask:info_set Teleport to Boss Boss Challenge 1\n"
     )
 
 

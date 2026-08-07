@@ -268,6 +268,36 @@ def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
     ]
 
 
+def test_entry_retry_does_not_claim_a_death_recovery(tmp_path: Path) -> None:
+    text = "\n".join(
+        [
+            "HOST_FARM_ECHO_BOSS_PAGE_RESELECTED",
+            "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5",
+        ]
+    )
+    result = _result(
+        tmp_path,
+        text,
+        config={
+            "boss_challenge_index": 2,
+            "workflow_task": "daily",
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "recovery_attempts": 0,
+                "entry_retry_attempts": 1,
+                "retry_completed": 5,
+                "total_completed": 5,
+            },
+        },
+    )
+
+    facts = parse_run(result)
+
+    assert [item.text for item in facts.followup] == ["吸收声骸5次"]
+    assert all("倒地" not in item.text for item in facts.followup)
+
+
 def test_absorption_timeout_reports_partial_target(tmp_path: Path) -> None:
     text = """
 FarmEchoTask:farm echo walk_find_echo True

@@ -24,6 +24,11 @@ FARM_ECHO_DEATH_MARKERS = (
     "FarmEchoTask:raise_not_in_combat char dead",
     "FarmEchoTask:info_set Revive Failed",
 )
+FARM_ECHO_ENTRY_FAILURE_MARKERS = (
+    "FarmEchoTask:info_set app Teleport to boss failed",
+    "RuntimeError: Teleport to boss failed",
+    "Host failed to verify Boss Challenge guidebook page",
+)
 FARM_ECHO_RESTART_CONFIRMATION = (
     "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter"
 )
@@ -151,3 +156,8 @@ def count_farm_echo_absorptions(text: str) -> int:
 def is_recoverable_farm_echo_death(text: str) -> bool:
     """Require both current-run death facts before touching the game UI."""
     return all(marker in text for marker in FARM_ECHO_DEATH_MARKERS)
+
+
+def is_recoverable_farm_echo_entry_failure(text: str) -> bool:
+    """Recognize a pre-combat guidebook/teleport failure from this run."""
+    return any(marker in text for marker in FARM_ECHO_ENTRY_FAILURE_MARKERS)

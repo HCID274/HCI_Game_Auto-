@@ -322,3 +322,46 @@ def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
     assert "budget exhausted" in result.config["farm_echo_recovery"]["retry_error"]
     assert result.config["farm_echo_recovery"]["first_safe_recovery"] is True
     run_retry.assert_not_called()
+
+
+def test_entry_failure_restarts_without_claiming_death_recovery(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        "FarmEchoTask:info_set app Teleport to boss failed\n"
+        "RuntimeError: Teleport to boss failed\n",
+        status="failed",
+        absorbed=0,
+    )
+    retry = _result(
+        runs,
+        "retry",
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5\n",
+        status="success",
+        absorbed=5,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely"
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["entry_retry_attempts"] == 1
+    assert recovery["recovery_attempts"] == 0
+    assert recovery["total_completed"] == 5
+    recover.assert_not_called()

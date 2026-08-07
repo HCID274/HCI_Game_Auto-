@@ -19,6 +19,7 @@ from wuwa_auto.okww.confirmed_retry import (
 from wuwa_auto.okww.logs import (
     count_farm_echo_absorptions,
     is_recoverable_farm_echo_death,
+    is_recoverable_farm_echo_entry_failure,
 )
 from wuwa_auto.okww.recovery import (
     FarmEchoRecoveryResult,
@@ -82,6 +83,7 @@ def _write_composite(
     attempt_counts: list[int],
     recoveries: list[FarmEchoRecoveryResult],
     retry_error: str = "",
+    entry_retry_attempts: int = 0,
 ) -> OkRunResult:
     initial_completed = attempt_counts[0]
     retry_completed = sum(attempt_counts[1:])
@@ -92,12 +94,13 @@ def _write_composite(
     config = dict(initial.config)
     config["confirmed_farm_echo_absorption_count"] = total_completed
     config["farm_echo_recovery"] = {
-        "triggered": True,
+        "triggered": len(attempts) > 1 or bool(recoveries),
         "target_count": target,
         "initial_completed": initial_completed,
         "first_safe_recovery": recoveries[0].success if recoveries else False,
         "first_recovery_reason": recoveries[0].reason if recoveries else "",
         "recovery_attempts": len(recoveries),
+        "entry_retry_attempts": entry_retry_attempts,
         "recoveries": [
             {
                 "success": recovery.success,
@@ -170,11 +173,14 @@ def _write_composite(
 
 
 def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
-    """Recover deaths and retry the exact remainder within one shared deadline."""
+    """Recover known FarmEcho failures within one shared absorption deadline."""
     if result.status == "success":
         return result
     initial_text = _read_log(result)
-    if not is_recoverable_farm_echo_death(initial_text):
+    if not (
+        is_recoverable_farm_echo_death(initial_text)
+        or is_recoverable_farm_echo_entry_failure(initial_text)
+    ):
         return result
 
     target = int(
@@ -215,19 +221,34 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
     attempts = [result]
     attempt_counts = [initial_completed]
     recoveries: list[FarmEchoRecoveryResult] = []
+    entry_retry_attempts = 0
     retry_error = ""
     try:
         current = result
-        while current.status != "success" and is_recoverable_farm_echo_death(
-            _read_log(current)
-        ):
-            recovery = _recover_safely(
-                Path(current.log_slice_path).parent,
-                attempt=len(recoveries) + 1,
-            )
-            recoveries.append(recovery)
-            if not recovery.success or sum(attempt_counts) >= target:
+        while current.status != "success":
+            current_text = _read_log(current)
+            death_failure = is_recoverable_farm_echo_death(current_text)
+            entry_failure = is_recoverable_farm_echo_entry_failure(current_text)
+            if not (death_failure or entry_failure):
                 break
+            if death_failure:
+                recovery = _recover_safely(
+                    Path(current.log_slice_path).parent,
+                    attempt=len(recoveries) + 1,
+                )
+                recoveries.append(recovery)
+                if not recovery.success or sum(attempt_counts) >= target:
+                    break
+            else:
+                # The next worker begins with ensure_main and a verified F2
+                # boss-page selection, so no death/teleport-heal UI is needed.
+                stop_daily_workers()
+                entry_retry_attempts += 1
+                log.warning(
+                    "FarmEcho pre-combat entry failed; restart remaining target "
+                    "within shared deadline attempt=%s",
+                    entry_retry_attempts,
+                )
 
             remaining = target - sum(attempt_counts)
             remaining_runtime = retry_deadline - time.monotonic()
@@ -272,4 +293,5 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
         attempt_counts=attempt_counts,
         recoveries=recoveries,
         retry_error=retry_error,
+        entry_retry_attempts=entry_retry_attempts,
     )
