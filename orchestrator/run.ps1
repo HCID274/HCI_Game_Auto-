@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden', 'validate', 'integration-smoke')]
+    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     $requestedMode = (Get-Content -LiteralPath $modeRequestPath -Raw).Trim()
-    if ($requestedMode -notin @('wuwa-daily', 'farm-echo', 'weekly-garden')) {
+    if ($requestedMode -notin @('wuwa-daily', 'farm-echo', 'weekly-garden', 'wuwa-cleanup')) {
         throw "unsupported one-shot mode: $requestedMode"
     }
     $runMode = $requestedMode
@@ -193,6 +193,11 @@ try {
                 $starRailCode = 0
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName WeeklyGarden -Label 'Wuthering Waves weekly garden'
+            }
+            'wuwa-cleanup' {
+                $starRailCode = 0
+                $starRailCleanupCode = 0
+                $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Cleanup -Label 'Wuthering Waves cleanup only'
             }
             'validate' {
                 $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName Health -Label 'Star Rail CLI health'

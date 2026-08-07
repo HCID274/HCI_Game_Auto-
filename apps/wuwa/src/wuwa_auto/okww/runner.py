@@ -24,6 +24,7 @@ from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
     OK_ENTRYPOINT,
     OK_LOG_FILE,
+    OK_PYTHON_EXE,
     OK_PYTHONW_EXE,
     OK_WORKING_DIR,
     OK_WW_EXE,
@@ -91,13 +92,16 @@ def stop_pyappify_launchers() -> int:
 def stop_daily_workers() -> int:
     """Stop owned headless OK workers while preserving the game process."""
     require_admin()
-    expected = OK_PYTHONW_EXE.resolve()
+    expected = {OK_PYTHONW_EXE.resolve(), OK_PYTHON_EXE.resolve()}
     stopped = 0
     for process in psutil.process_iter(["name"]):
         try:
-            if (process.info["name"] or "").casefold() != "pythonw.exe":
+            if (process.info["name"] or "").casefold() not in {
+                "python.exe",
+                "pythonw.exe",
+            }:
                 continue
-            if Path(process.exe()).resolve() != expected:
+            if Path(process.exe()).resolve() not in expected:
                 continue
             process.terminate()
             process.wait(timeout=10)
