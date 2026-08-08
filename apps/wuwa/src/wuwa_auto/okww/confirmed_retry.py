@@ -16,6 +16,8 @@ from wuwa_auto.okww.runner import (
     STARTUP_LOG_TIMEOUT,
     OkRunResult,
     preflight_farm_echo_task,
+    release_active_mouse_buttons,
+    resume_active_mouse_control,
     write_result,
 )
 from wuwa_auto.settings import (
@@ -33,14 +35,19 @@ MAX_FARM_ECHO_RUNTIME_SECONDS = 3600.0
 
 
 def _stop_process(process: subprocess.Popen[object]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    finally:
+        # The retry worker talks to the parent HID server.  Release after the
+        # child is gone; releasing before terminate can be reasserted by a
+        # final queued mouse-up/down packet from the child.
+        release_active_mouse_buttons()
 
 
 def run_confirmed_farm_echo_retry(
@@ -48,6 +55,7 @@ def run_confirmed_farm_echo_retry(
     target_count: int,
     attempt_limit: int,
     runtime_limit_seconds: float = MAX_FARM_ECHO_RUNTIME_SECONDS,
+    resume_active_realm: bool = False,
 ) -> OkRunResult:
     """Retry until N echoes are absorbed, within one bounded wall-clock window."""
     if (
@@ -68,6 +76,7 @@ def run_confirmed_farm_echo_retry(
             "target_count": target_count,
             "attempt_limit": attempt_limit,
             "farm_echo_runtime_limit_seconds": runtime_limit_seconds,
+            "resume_active_realm": resume_active_realm,
         }
     )
     started = datetime.now().astimezone()
@@ -85,6 +94,8 @@ def run_confirmed_farm_echo_retry(
         str(worker_result_path),
         str(target_count),
     ]
+    if resume_active_realm:
+        command.append("resume")
     log.info(
         "starting confirmed FarmEcho retry target=%s attempt_limit=%s",
         target_count,
@@ -97,6 +108,7 @@ def run_confirmed_farm_echo_retry(
     saw_log_activity = False
     timeout_reason = ""
     with console_path.open("w", encoding="utf-8") as console:
+        resume_active_mouse_control()
         process: subprocess.Popen[object] = subprocess.Popen(
             command,
             cwd=OK_WORKING_DIR,

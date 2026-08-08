@@ -20,10 +20,12 @@ from wuwa_auto.okww.logs import (
     count_farm_echo_absorptions,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
+    is_recoverable_farm_echo_realm_defeat,
 )
 from wuwa_auto.okww.recovery import (
     FarmEchoRecoveryResult,
     run_farm_echo_death_recovery,
+    run_farm_echo_realm_defeat_recovery,
 )
 from wuwa_auto.okww.runner import (
     OkRunResult,
@@ -40,12 +42,17 @@ def _read_log(result: OkRunResult) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
 
 
-def _failed_recovery(reason: str) -> FarmEchoRecoveryResult:
+def _failed_recovery(
+    reason: str,
+    *,
+    realm_defeat: bool = False,
+) -> FarmEchoRecoveryResult:
     return FarmEchoRecoveryResult(
         success=False,
         reason=reason,
         evidence_path=None,
         worker_result_path="",
+        realm_defeat=realm_defeat,
     )
 
 
@@ -53,13 +60,19 @@ def _recover_safely(
     run_dir: Path,
     *,
     attempt: int,
+    realm_defeat: bool = False,
 ) -> FarmEchoRecoveryResult:
     try:
         stop_daily_workers()
-        return run_farm_echo_death_recovery(run_dir, attempt=attempt)
+        recovery = (
+            run_farm_echo_realm_defeat_recovery
+            if realm_defeat
+            else run_farm_echo_death_recovery
+        )
+        return recovery(run_dir, attempt=attempt)
     except Exception as exc:
         log.exception("FarmEcho safety recovery attempt=%s failed", attempt)
-        return _failed_recovery(str(exc))
+        return _failed_recovery(str(exc), realm_defeat=realm_defeat)
 
 
 def _unique_composite_dir(base_run_id: str) -> tuple[str, Path]:
@@ -106,6 +119,8 @@ def _write_composite(
                 "success": recovery.success,
                 "reason": recovery.reason,
                 "evidence_path": recovery.evidence_path,
+                "resume_active_realm": recovery.resume_active_realm,
+                "realm_defeat": recovery.realm_defeat,
             }
             for recovery in recoveries
         ],
@@ -225,9 +240,11 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
     retry_error = ""
     try:
         current = result
+        resume_active_realm = False
         while current.status != "success":
             current_text = _read_log(current)
             death_failure = is_recoverable_farm_echo_death(current_text)
+            realm_defeat = is_recoverable_farm_echo_realm_defeat(current_text)
             entry_failure = is_recoverable_farm_echo_entry_failure(current_text)
             if not (death_failure or entry_failure):
                 break
@@ -235,10 +252,12 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
                 recovery = _recover_safely(
                     Path(current.log_slice_path).parent,
                     attempt=len(recoveries) + 1,
+                    realm_defeat=realm_defeat,
                 )
                 recoveries.append(recovery)
                 if not recovery.success or sum(attempt_counts) >= target:
                     break
+                resume_active_realm = recovery.resume_active_realm
             else:
                 # The next worker begins with ensure_main and a verified F2
                 # boss-page selection, so no death/teleport-heal UI is needed.
@@ -249,6 +268,7 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
                     "within shared deadline attempt=%s",
                     entry_retry_attempts,
                 )
+                resume_active_realm = False
 
             remaining = target - sum(attempt_counts)
             remaining_runtime = retry_deadline - time.monotonic()
@@ -257,14 +277,20 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
                     "FarmEcho one-hour absorption budget exhausted during recovery"
                 )
             attempt_limit = confirmed_retry_attempt_limit(remaining)
+            retry_kwargs: dict[str, object] = {
+                "target_count": remaining,
+                "attempt_limit": attempt_limit,
+                "runtime_limit_seconds": min(
+                    MAX_FARM_ECHO_RUNTIME_SECONDS,
+                    remaining_runtime,
+                ),
+            }
+            if resume_active_realm:
+                retry_kwargs["resume_active_realm"] = True
+            resume_active_realm = False
             with temporary_farm_echo_repeat_count(attempt_limit):
                 current = run_confirmed_farm_echo_retry(
-                    target_count=remaining,
-                    attempt_limit=attempt_limit,
-                    runtime_limit_seconds=min(
-                        MAX_FARM_ECHO_RUNTIME_SECONDS,
-                        remaining_runtime,
-                    ),
+                    **retry_kwargs,
                 )
             attempts.append(current)
             attempt_counts.append(

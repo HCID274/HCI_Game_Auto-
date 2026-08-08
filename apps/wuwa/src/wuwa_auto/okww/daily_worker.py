@@ -9,6 +9,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# The bundled OK-WW interpreter starts this file directly, so make the host
+# package importable without installing it into the upstream environment.
+HOST_SRC = Path(__file__).resolve().parents[2]
+if str(HOST_SRC) not in sys.path:
+    sys.path.insert(0, str(HOST_SRC))
+
+from wuwa_auto.okww.daily_activity import install_daily_activity_override
+from wuwa_auto.okww.daily_trace import install_daily_trace
+
 
 CLICK_ATTEMPTS = 2
 TRANSITION_TIMEOUT_SECONDS = 8
@@ -226,8 +235,20 @@ def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, str(working_dir))
 
     from src.task.NightmareNestTask import NightmareNestTask
+    from src.task.DailyTask import DailyTask
+    from src.task.TacetTask import TacetTask
+    from src.task.ForgeryTask import ForgeryTask
+    from src.task.SimulationTask import SimulationTask
 
     install_nightmare_override(NightmareNestTask)
+    install_daily_activity_override(DailyTask)
+    install_daily_trace(
+        DailyTask,
+        nightmare_task_class=NightmareNestTask,
+        tacet_task_class=TacetTask,
+        forgery_task_class=ForgeryTask,
+        simulation_task_class=SimulationTask,
+    )
     if compatibility_only:
         print(COMPATIBILITY_MARKER)
         return 0

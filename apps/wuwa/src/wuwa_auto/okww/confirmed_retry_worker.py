@@ -11,51 +11,72 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from .farm_echo_state import (
+        REALM_DEFEAT_MARKER,
+        REVIVE_DIALOG_MARKER,
+        realm_defeat_visible,
+        revive_dialog_visible,
+    )
+except ImportError:  # executed directly by OK-WW's bundled Python
+    from farm_echo_state import (
+        REALM_DEFEAT_MARKER,
+        REVIVE_DIALOG_MARKER,
+        realm_defeat_visible,
+        revive_dialog_visible,
+    )
+
 
 CONFIRMED_MARKER = "HOST_FARM_ECHO_ABSORPTION_CONFIRMED"
 COMPLETED_MARKER = "HOST_FARM_ECHO_ABSORPTION_TARGET_COMPLETED"
 BOSS_PAGE_RESELECTED_MARKER = "HOST_FARM_ECHO_BOSS_PAGE_RESELECTED"
 BOSS_PAGE_CONFIRMED_MARKER = "HOST_FARM_ECHO_BOSS_PAGE_CONFIRMED"
+ACTIVE_REALM_RESUMED_MARKER = "HOST_FARM_ECHO_ACTIVE_REALM_RESUMED"
 HID_CLICK_MARKER = "HOST_FARM_ECHO_VIRTUAL_HID_CLICK"
+HID_BUTTON_MARKER = "HOST_FARM_ECHO_VIRTUAL_HID_BUTTON"
+
+
+def _virtual_hid_request(request: dict[str, object]) -> dict[str, object]:
+    port = os.environ.get("WUWA_VIRTUAL_HID_CONTROL_PORT")
+    token = os.environ.get("WUWA_VIRTUAL_HID_CONTROL_TOKEN")
+    if not port or not token:
+        raise RuntimeError("host virtual HID control is unavailable")
+    request = {"token": token, **request}
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=8) as client:
+        client.settimeout(8)
+        client.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        response = bytearray()
+        while not response.endswith(b"\n"):
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+    try:
+        return json.loads(response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid virtual HID response: {response!r}") from exc
 
 
 def _virtual_hid_click(
     x: int,
     y: int,
     *,
+    button: str = "left",
     hold: float = 0.2,
     log_action: bool = True,
 ) -> None:
     """Ask the parent workflow to emit a real local USB-HID click."""
-    port = os.environ.get("WUWA_VIRTUAL_HID_CONTROL_PORT")
-    token = os.environ.get("WUWA_VIRTUAL_HID_CONTROL_TOKEN")
-    if not port or not token:
-        raise RuntimeError("host virtual HID control is unavailable")
-
     def send_request(target_x: int, target_y: int) -> dict[str, object]:
-        request = {
-            "token": token,
-            "action": "click",
-            "x": target_x,
-            "y": target_y,
-            "hold": float(hold),
-            "log_action": log_action,
-        }
-        with socket.create_connection(
-            ("127.0.0.1", int(port)), timeout=8
-        ) as client:
-            client.settimeout(8)
-            client.sendall(json.dumps(request).encode("utf-8") + b"\n")
-            response = bytearray()
-            while not response.endswith(b"\n"):
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                response.extend(chunk)
-        try:
-            return json.loads(response.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid virtual HID response: {response!r}") from exc
+        return _virtual_hid_request(
+            {
+                "action": "click",
+                "x": target_x,
+                "y": target_y,
+                "button": button,
+                "hold": float(hold),
+                "log_action": log_action,
+            }
+        )
 
     payload = send_request(int(x), int(y))
     if not payload.get("ok"):
@@ -71,6 +92,47 @@ def _virtual_hid_click(
                 payload = send_request(cursor_x, cursor_y)
     if not payload.get("ok"):
         raise RuntimeError(f"virtual HID click failed: {payload.get('error')}")
+
+
+def _virtual_hid_button(
+    x: int,
+    y: int,
+    *,
+    button: str,
+    pressed: bool,
+) -> None:
+    """Forward a held-button transition to the workflow-owned HID device."""
+    if button not in {"left", "right", "middle"}:
+        raise ValueError(f"unsupported mouse button: {button}")
+    request: dict[str, object] = {
+        "action": "button",
+        "button": button,
+        "pressed": pressed,
+    }
+    if x >= 0 and y >= 0:
+        request.update(x=x, y=y)
+    payload = _virtual_hid_request(request)
+    if not payload.get("ok"):
+        state = "down" if pressed else "up"
+        raise RuntimeError(
+            f"virtual HID button {state} failed: {payload.get('error')}"
+        )
+
+
+def _consume_active_realm_resume(task: object) -> bool:
+    """Consume the one-shot handoff from a host-owned in-place recovery."""
+    if not getattr(task, "_host_resume_active_realm", False):
+        return False
+    task._host_resume_active_realm = False  # type: ignore[attr-defined]
+    task.log_info(ACTIVE_REALM_RESUMED_MARKER)  # type: ignore[attr-defined]
+    return True
+
+
+def _initialize_active_realm_resume(task: object, enabled: bool) -> None:
+    """Carry upstream's first-poll guard across an in-place recovery handoff."""
+    task._host_resume_active_realm = enabled  # type: ignore[attr-defined]
+    if enabled:
+        task._just_entered_boss_realm = True  # type: ignore[attr-defined]
 
 
 def _open_verified_boss_book(
@@ -129,15 +191,20 @@ def _write_result(path: Path, **values: object) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if len(arguments) != 3:
+    if len(arguments) not in {3, 4}:
         raise SystemExit(
-            "usage: confirmed_retry_worker.py OK_WORKING_DIR RESULT_PATH TARGET"
+            "usage: confirmed_retry_worker.py OK_WORKING_DIR RESULT_PATH TARGET "
+            "[resume_active_realm]"
         )
     working_dir = Path(arguments[0]).resolve()
     result_path = Path(arguments[1]).resolve()
     target = int(arguments[2])
     if target < 1:
         raise SystemExit("TARGET must be positive")
+    resume_active_realm = (
+        len(arguments) == 4
+        and arguments[3].strip().casefold() in {"1", "true", "yes", "resume"}
+    )
 
     started = datetime.now().astimezone()
     absorbed = 0
@@ -145,10 +212,11 @@ def main(argv: list[str] | None = None) -> int:
         os.chdir(working_dir)
         sys.path.insert(0, str(working_dir))
 
-        from config import config
         from ok import run_task
         from src.task.FarmEchoTask import FarmEchoTask as UpstreamFarmEchoTask
         from src.task.WWOneTimeTask import WWOneTimeTask
+
+        from config import config
 
         class TargetReached(Exception):
             pass
@@ -159,6 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 super().__init__(*args, **kwargs)
                 self.host_absorbed = 0
+                # Recovery hands the worker back to an already entered boss
+                # realm.  Upstream normally sets this flag immediately after
+                # teleporting; without it the first loading poll can be
+                # mistaken for a completed realm and trigger the exit UI.
+                _initialize_active_realm_resume(self, resume_active_realm)
 
             def open_boss_book(self, name: str, after_sleep: float = 2) -> None:
                 _open_verified_boss_book(
@@ -167,6 +240,36 @@ def main(argv: list[str] | None = None) -> int:
                     name,
                     after_sleep=after_sleep,
                 )
+
+            def manage_boss_interactions(self) -> None:
+                # A full-party defeat in a boss realm bypasses OK-WW's normal
+                # revive-item dialog. Upstream otherwise mistakes this screen
+                # for a completed realm and waits for the echo claim button.
+                # Keep the same fast path as upstream: combat is already being
+                # handled by the combat loop, so do not start blocking OCR
+                # probes for dialogs on every combat tick.
+                if self.in_combat():
+                    return
+                if revive_dialog_visible(self):
+                    self.log_info(REVIVE_DIALOG_MARKER)
+                    raise RuntimeError("FarmEcho character revival is required")
+                if self._in_realm and realm_defeat_visible(self):
+                    self.log_info(REALM_DEFEAT_MARKER)
+                    raise RuntimeError("FarmEcho realm challenge failed")
+                super().manage_boss_interactions()
+
+            def in_realm(self) -> bool:
+                if self._host_resume_active_realm:
+                    return True
+                return super().in_realm()
+
+            def teleport_to_boss_enabled(self) -> bool:
+                # A preceding host recovery may have revived one character in
+                # place. Skip only the first teleport; later realm rounds must
+                # retain upstream's normal restart behavior.
+                if _consume_active_realm_resume(self):
+                    return False
+                return super().teleport_to_boss_enabled()
 
             def click(
                 self,
@@ -183,10 +286,11 @@ def main(argv: list[str] | None = None) -> int:
             ) -> object:
                 # Game 3.5 can ignore OK's configured PostMessage mouse clicks
                 # while its keyboard messages still work. Preserve upstream
-                # recognition and flow, but emit ordinary left clicks through
-                # the already-enumerated local virtual USB mouse.
+                # recognition and flow, but emit mouse buttons through the
+                # already-enumerated local virtual USB mouse. Middle-click is
+                # required for combat target lock; right-click covers dodge.
                 if (
-                    key == "left"
+                    key in {"left", "middle", "right"}
                     and isinstance(x, (int, float))
                     and isinstance(y, (int, float))
                     and not (0 < x < 1 or 0 < y < 1)
@@ -204,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                     _virtual_hid_click(
                         absolute_x,
                         absolute_y,
+                        button=key,
                         hold=max(0.08, float(down_time)),
                         log_action=bool(name),
                     )
@@ -227,6 +332,60 @@ def main(argv: list[str] | None = None) -> int:
                     key=key,
                     **kwargs,
                 )
+
+            def mouse_down(
+                self,
+                x: object = -1,
+                y: object = -1,
+                name: object = None,
+                key: str = "left",
+            ) -> object:
+                if (
+                    key in {"left", "right", "middle"}
+                    and isinstance(x, (int, float))
+                    and isinstance(y, (int, float))
+                    and (
+                        (x == -1 and y == -1)
+                        or (x >= 0 and y >= 0)
+                    )
+                    and not (0 < x < 1 or 0 < y < 1)
+                ):
+                    if x == -1 and y == -1:
+                        absolute_x, absolute_y = -1, -1
+                    else:
+                        absolute_x, absolute_y = (
+                            self.executor.interaction.capture.get_abs_cords(
+                                int(x), int(y)
+                            )
+                        )
+                    _virtual_hid_button(
+                        absolute_x,
+                        absolute_y,
+                        button=key,
+                        pressed=True,
+                    )
+                    if name:
+                        self.log_info(
+                            f"{HID_BUTTON_MARKER} down "
+                            f"{key} {absolute_x},{absolute_y} {name}"
+                        )
+                    self.executor.reset_scene()
+                    return None
+                return super().mouse_down(x, y, name=name, key=key)
+
+            def mouse_up(self, name: object = None, key: str = "left") -> object:
+                if key in {"left", "right", "middle"}:
+                    _virtual_hid_button(
+                        -1,
+                        -1,
+                        button=key,
+                        pressed=False,
+                    )
+                    if name:
+                        self.log_info(f"{HID_BUTTON_MARKER} up {key} {name}")
+                    self.executor.reset_scene()
+                    return None
+                return super().mouse_up(name=name, key=key)
 
             def teleport_to_configured_boss_and_prepare(self) -> None:
                 """Reuse a completed realm left behind by an earlier run."""
@@ -316,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             finished_at=datetime.now().astimezone().isoformat(),
         )
         return 0
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - serialize every worker failure
         _write_result(
             result_path,
             success=False,

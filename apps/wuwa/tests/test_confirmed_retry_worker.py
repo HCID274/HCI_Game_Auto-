@@ -2,11 +2,47 @@ import json
 from unittest.mock import Mock, patch
 
 from wuwa_auto.okww.confirmed_retry_worker import (
+    ACTIVE_REALM_RESUMED_MARKER,
     BOSS_PAGE_CONFIRMED_MARKER,
     BOSS_PAGE_RESELECTED_MARKER,
+    HID_BUTTON_MARKER,
+    _consume_active_realm_resume,
+    _initialize_active_realm_resume,
     _open_verified_boss_book,
+    _virtual_hid_button,
     _virtual_hid_click,
 )
+
+
+def test_active_realm_resume_contract_is_stable() -> None:
+    assert ACTIVE_REALM_RESUMED_MARKER == "HOST_FARM_ECHO_ACTIVE_REALM_RESUMED"
+
+
+def test_active_realm_resume_is_consumed_once() -> None:
+    task = Mock(_host_resume_active_realm=True)
+
+    assert _consume_active_realm_resume(task) is True
+    assert task._host_resume_active_realm is False
+    assert _consume_active_realm_resume(task) is False
+    task.log_info.assert_called_once_with(ACTIVE_REALM_RESUMED_MARKER)
+
+
+def test_active_realm_resume_preserves_upstream_first_poll_guard() -> None:
+    task = Mock(_just_entered_boss_realm=False)
+
+    _initialize_active_realm_resume(task, True)
+
+    assert task._host_resume_active_realm is True
+    assert task._just_entered_boss_realm is True
+
+
+def test_disabled_active_realm_resume_does_not_change_first_poll_guard() -> None:
+    task = Mock(_just_entered_boss_realm=False)
+
+    _initialize_active_realm_resume(task, False)
+
+    assert task._host_resume_active_realm is False
+    assert task._just_entered_boss_realm is False
 
 
 class FakeTask:
@@ -90,6 +126,7 @@ def test_virtual_hid_click_uses_parent_control(monkeypatch) -> None:
         "action": "click",
         "x": 101,
         "y": 428,
+        "button": "left",
         "hold": 0.2,
         "log_action": True,
     }
@@ -119,3 +156,63 @@ def test_virtual_hid_click_accepts_small_accelerated_cursor_miss(monkeypatch) ->
 
     retry = json.loads(second.sendall.call_args.args[0].decode("utf-8"))
     assert (retry["x"], retry["y"]) == (611, 706)
+
+
+def test_virtual_hid_click_forwards_middle_button(monkeypatch) -> None:
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.recv.side_effect = [b'{"ok": true}\n']
+    with patch(
+        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
+        return_value=client,
+    ):
+        _virtual_hid_click(1280, 720, button="middle")
+
+    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
+    assert sent["button"] == "middle"
+
+
+def test_virtual_hid_button_forwards_press_and_release(monkeypatch) -> None:
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.recv.side_effect = [b'{"ok": true}\n']
+    with patch(
+        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
+        return_value=client,
+    ):
+        _virtual_hid_button(1280, 720, button="right", pressed=True)
+
+    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
+    assert sent == {
+        "token": "secret",
+        "action": "button",
+        "button": "right",
+        "pressed": True,
+        "x": 1280,
+        "y": 720,
+    }
+    assert HID_BUTTON_MARKER.startswith("HOST_FARM_ECHO_VIRTUAL_HID_BUTTON")
+
+
+def test_virtual_hid_button_without_coordinates_keeps_current_cursor(monkeypatch) -> None:
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.recv.side_effect = [b'{"ok": true}\n']
+    with patch(
+        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
+        return_value=client,
+    ):
+        _virtual_hid_button(-1, -1, button="left", pressed=True)
+
+    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
+    assert "x" not in sent
+    assert "y" not in sent

@@ -24,6 +24,8 @@ FARM_ECHO_DEATH_MARKERS = (
     "FarmEchoTask:raise_not_in_combat char dead",
     "FarmEchoTask:info_set Revive Failed",
 )
+FARM_ECHO_REALM_DEFEAT_MARKER = "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED"
+FARM_ECHO_REVIVE_DIALOG_MARKER = "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED"
 FARM_ECHO_ENTRY_FAILURE_MARKERS = (
     "FarmEchoTask:info_set app Teleport to boss failed",
     "RuntimeError: Teleport to boss failed",
@@ -155,7 +157,17 @@ def count_farm_echo_absorptions(text: str) -> int:
 
 def is_recoverable_farm_echo_death(text: str) -> bool:
     """Require both current-run death facts before touching the game UI."""
-    return all(marker in text for marker in FARM_ECHO_DEATH_MARKERS)
+    normal_death = all(marker in text for marker in FARM_ECHO_DEATH_MARKERS)
+    return (
+        normal_death
+        or FARM_ECHO_REALM_DEFEAT_MARKER in text
+        or FARM_ECHO_REVIVE_DIALOG_MARKER in text
+    )
+
+
+def is_recoverable_farm_echo_realm_defeat(text: str) -> bool:
+    """Recognize the separately confirmed full-realm defeat state."""
+    return FARM_ECHO_REALM_DEFEAT_MARKER in text
 
 
 def is_recoverable_farm_echo_entry_failure(text: str) -> bool:

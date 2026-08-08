@@ -5,15 +5,15 @@ import json
 import logging
 import subprocess
 import time
-from dataclasses import dataclass
 from collections.abc import Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
 
-from wuwa_auto.input.viiper import managed_virtual_mouse
+from wuwa_auto.input.viiper import managed_virtual_mouse, resume_active_mouse_control
 from wuwa_auto.settings import (
     OK_PYTHON_EXE,
     OK_PYTHONW_EXE,
@@ -64,7 +64,7 @@ class _MouseInput(ctypes.Structure):
 
 
 class _InputUnion(ctypes.Union):
-    _fields_ = [("mi", _MouseInput)]
+    _fields_ = [("mi", _MouseInput)]  # noqa: RUF012 - required by ctypes
 
 
 class _Input(ctypes.Structure):
@@ -78,6 +78,8 @@ class FarmEchoRecoveryResult:
     reason: str
     evidence_path: str | None
     worker_result_path: str
+    resume_active_realm: bool = False
+    realm_defeat: bool = False
 
 
 @contextmanager
@@ -182,22 +184,50 @@ def run_farm_echo_death_recovery(
     attempt: int,
 ) -> FarmEchoRecoveryResult:
     """Keep the game alive and ask OK-WW to exit the realm and heal."""
+    return _run_farm_echo_recovery(run_dir, attempt=attempt, mode="death")
+
+
+def run_farm_echo_realm_defeat_recovery(
+    run_dir: Path,
+    *,
+    attempt: int,
+) -> FarmEchoRecoveryResult:
+    """Restart a confirmed failed realm and verify that combat resumes."""
+    return _run_farm_echo_recovery(
+        run_dir,
+        attempt=attempt,
+        mode="realm_defeat",
+    )
+
+
+def _run_farm_echo_recovery(
+    run_dir: Path,
+    *,
+    attempt: int,
+    mode: str,
+) -> FarmEchoRecoveryResult:
+    """Run one host-owned FarmEcho recovery mode with shared evidence."""
     desktop.require_admin()
     desktop.require_supported_display()
     hwnd = _focus_game_window()
     _validate_game_window(hwnd)
-    before = desktop.save_step_screenshot(
-        f"ok_farm_echo_recovery_{attempt}_before"
+    evidence_prefix = (
+        "ok_farm_echo_realm_defeat_recovery"
+        if mode == "realm_defeat"
+        else "ok_farm_echo_recovery"
     )
+    before = desktop.save_step_screenshot(f"{evidence_prefix}_{attempt}_before")
     result_path = run_dir / f"farm-echo-recovery-{attempt}.json"
     command = [
         str(OK_PYTHON_EXE),
         str(RECOVERY_WORKER),
         str(OK_WORKING_DIR),
         str(result_path),
+        mode,
     ]
     log.info("starting FarmEcho death recovery attempt=%s", attempt)
     try:
+        resume_active_mouse_control()
         completed = subprocess.run(
             command,
             cwd=OK_WORKING_DIR,
@@ -213,13 +243,14 @@ def run_farm_echo_death_recovery(
         )
     except subprocess.TimeoutExpired:
         evidence = desktop.save_step_screenshot(
-            f"ok_farm_echo_recovery_{attempt}_timeout"
+            f"{evidence_prefix}_{attempt}_timeout"
         )
         return FarmEchoRecoveryResult(
             success=False,
             reason=f"recovery worker timed out after {RECOVERY_TIMEOUT:.0f}s",
             evidence_path=str(evidence),
             worker_result_path=str(result_path),
+            realm_defeat=mode == "realm_defeat",
         )
 
     payload: dict[str, object] = {}
@@ -231,14 +262,15 @@ def run_farm_echo_death_recovery(
         except (OSError, json.JSONDecodeError):
             log.exception("invalid FarmEcho recovery result: %s", result_path)
     success = completed.returncode == 0 and payload.get("success") is True
+    resume_active_realm = bool(payload.get("resume_active_realm"))
     if success:
         evidence = desktop.save_step_screenshot(
-            f"ok_farm_echo_recovery_{attempt}_completed"
+            f"{evidence_prefix}_{attempt}_completed"
         )
         reason = str(payload.get("reason") or "recovery completed")
     else:
         evidence = desktop.save_step_screenshot(
-            f"ok_farm_echo_recovery_{attempt}_failed"
+            f"{evidence_prefix}_{attempt}_failed"
         )
         reason = str(
             payload.get("reason")
@@ -258,6 +290,8 @@ def run_farm_echo_death_recovery(
         reason=reason,
         evidence_path=str(evidence),
         worker_result_path=str(result_path),
+        resume_active_realm=resume_active_realm,
+        realm_defeat=mode == "realm_defeat",
     )
 
 
@@ -279,6 +313,7 @@ def run_world_state_recovery(
     ]
     log.info("starting world-state recovery attempt=%s", attempt)
     try:
+        resume_active_mouse_control()
         completed = subprocess.run(
             command,
             cwd=OK_WORKING_DIR,

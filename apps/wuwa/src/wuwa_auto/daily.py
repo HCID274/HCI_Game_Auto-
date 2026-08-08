@@ -352,6 +352,11 @@ def run_daily_workflow() -> int:
     return _run_workflow("daily", _run_boss_then_daily_task)
 
 
+def run_daily_only_workflow() -> int:
+    """Run and report DailyTask without the optional pre-daily boss phase."""
+    return _run_workflow("daily", run_daily_task)
+
+
 def run_farm_echo_workflow() -> int:
     target_count = EXPECTED_REPEAT_FARM_COUNT
     if FARM_ECHO_TARGET_REQUEST.is_file():

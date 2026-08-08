@@ -9,6 +9,7 @@ from typing import Sequence
 
 from wuwa_auto.daily import (
     run_daily_workflow,
+    run_daily_only_workflow,
     run_farm_echo_workflow,
     run_weekly_garden_workflow,
 )
@@ -48,6 +49,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("daily", help="ensure UU, then run the OK-WW daily chain")
+    commands.add_parser(
+        "daily-only",
+        help="ensure UU, then run only OK-WW DailyTask without the boss phase",
+    )
     commands.add_parser("farm-echo", help="run only OK-WW FarmEchoTask")
     commands.add_parser("weekly-garden", help="run only OK-WW GardenTask")
     commands.add_parser(
@@ -180,6 +185,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_daily_task().exit_code
     if args.command == "daily":
         return run_daily_workflow()
+    if args.command == "daily-only":
+        return run_daily_only_workflow()
     if args.command == "farm-echo":
         return run_farm_echo_workflow()
     if args.command == "weekly-garden":

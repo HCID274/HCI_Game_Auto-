@@ -6,20 +6,29 @@ import json
 import logging
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 import psutil
 
-from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
+from wuwa_auto.input.viiper import (
+    release_active_mouse_buttons,
+    resume_active_mouse_control,
+)
 from wuwa_auto.okww.config import (
     EXPECTED_REPEAT_FARM_COUNT,
     validate_daily_configuration,
     validate_farm_echo_configuration,
     validate_weekly_garden_configuration,
 )
+from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
+from wuwa_auto.okww.daily_activity import (
+    parse_activity_marker,
+    parse_activity_panel_marker,
+)
+from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
     OK_ENTRYPOINT,
@@ -94,21 +103,34 @@ def stop_daily_workers() -> int:
     require_admin()
     expected = {OK_PYTHONW_EXE.resolve(), OK_PYTHON_EXE.resolve()}
     stopped = 0
-    for process in psutil.process_iter(["name"]):
-        try:
-            if (process.info["name"] or "").casefold() not in {
-                "python.exe",
-                "pythonw.exe",
-            }:
+    try:
+        for process in psutil.process_iter(["name"]):
+            try:
+                if (process.info["name"] or "").casefold() not in {
+                    "python.exe",
+                    "pythonw.exe",
+                }:
+                    continue
+                if Path(process.exe()).resolve() not in expected:
+                    continue
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except psutil.TimeoutExpired:
+                    # This is an owned headless worker.  It must be gone
+                    # before the final HID release, otherwise it can send a
+                    # stale button packet after cleanup.
+                    process.kill()
+                    process.wait(timeout=5)
+                stopped += 1
+                log.info("stopped owned OK-WW worker pid=%s", process.pid)
+            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.TimeoutExpired):
                 continue
-            if Path(process.exe()).resolve() not in expected:
-                continue
-            process.terminate()
-            process.wait(timeout=10)
-            stopped += 1
-            log.info("stopped owned OK-WW worker pid=%s", process.pid)
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.TimeoutExpired):
-            continue
+    finally:
+        # A worker can queue a final button packet while termination is in
+        # flight.  Clear the shared HID state only after all owned workers
+        # have been asked to stop and waited on, so no packet can reassert it.
+        release_active_mouse_buttons()
     return 0 if stopped else 1
 
 
@@ -256,6 +278,7 @@ def _run_task(
     # the installed app's bundled interpreter plus working/main.py.
     command = _build_task_command(task_index, task_label)
     log.info("starting OK-WW %s: %s", task_label, command)
+    resume_active_mouse_control()
     launcher = subprocess.Popen(
         command,
         cwd=OK_WORKING_DIR,
@@ -307,10 +330,30 @@ def _run_task(
         current_text = "".join(collected)
         failure = find_failure(current_text)
         if failure:
-            reason = f"OK-WW failure marker: {failure}"
+            if task_label == "daily":
+                daily_activity = parse_activity_marker(current_text)
+            else:
+                daily_activity = {}
+            if daily_activity.get("state") == "unverified":
+                reason = (
+                    "OK-WW daily activity unverified: "
+                    f"{daily_activity.get('reason') or '状态未确认'}"
+                )
+            else:
+                reason = f"OK-WW failure marker: {failure}"
             evidence = save_step_screenshot("ok_daily_failed")
             break
         if success_marker in current_text:
+            if task_label == "daily":
+                daily_activity = parse_activity_marker(current_text)
+                facts["daily_activity"] = daily_activity
+                if daily_activity.get("state") != "verified":
+                    reason = (
+                        "OK-WW DailyTask completed without verified daily "
+                        "activity claim"
+                    )
+                    evidence = save_step_screenshot("ok_daily_activity_unverified")
+                    break
             status = "success"
             reason = success_marker
             evidence = save_step_screenshot(f"ok_{task_label}_completed")
@@ -338,6 +381,16 @@ def _run_task(
     finished = datetime.now().astimezone()
     if not slice_path.exists():
         slice_path.write_text("".join(collected), encoding="utf-8")
+    if task_label == "daily":
+        current_text = "".join(collected)
+        daily_activity = parse_activity_marker(current_text)
+        panel = parse_activity_panel_marker(current_text)
+        if panel:
+            labels = panel.get("labels") or []
+            panel["comparison"] = compare_activity_panel(labels, log_text=current_text)
+            daily_activity["panel"] = panel
+            facts["daily_activity_panel"] = panel
+        facts["daily_activity"] = daily_activity
     result = OkRunResult(
         run_id=run_id,
         status=status,

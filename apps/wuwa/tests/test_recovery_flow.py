@@ -3,9 +3,11 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
-from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
+from wuwa_auto.okww.recovery_flow import (
+    _recover_safely,
+    maybe_recover_farm_echo_death,
+)
 from wuwa_auto.okww.runner import OkRunResult
-
 
 DEATH = """
 FarmEchoTask:raise_not_in_combat char dead
@@ -17,6 +19,7 @@ RESTART_CONFIRMATION = (
     "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter "
     "(769, 900) after_sleep 0\n"
 )
+REALM_DEFEAT = "FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n"
 
 
 def _result(
@@ -54,6 +57,16 @@ def _result(
 
 def _safe(reason: str = "healed") -> FarmEchoRecoveryResult:
     return FarmEchoRecoveryResult(True, reason, None, "recovery.json")
+
+
+def _safe_in_place() -> FarmEchoRecoveryResult:
+    return FarmEchoRecoveryResult(
+        True,
+        "revived in place",
+        None,
+        "recovery.json",
+        resume_active_realm=True,
+    )
 
 
 def test_death_recovers_and_retries_only_remaining_count(tmp_path: Path) -> None:
@@ -136,6 +149,99 @@ def test_death_before_first_completion_retries_full_target(tmp_path: Path) -> No
         attempt_limit=60,
         runtime_limit_seconds=ANY,
     )
+
+
+def test_realm_defeat_uses_confirmed_retry_recovery(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        REALM_DEFEAT,
+        status="failed",
+        absorbed=0,
+    )
+    retry = _result(
+        runs,
+        "retry",
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5\n",
+        status="success",
+        absorbed=5,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    assert result.config["farm_echo_recovery"]["total_completed"] == 5
+    recover.assert_called_once_with(
+        Path(initial.log_slice_path).parent,
+        attempt=1,
+        realm_defeat=True,
+    )
+
+
+def test_failed_realm_recovery_keeps_realm_classification(tmp_path: Path) -> None:
+    with patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_farm_echo_realm_defeat_recovery",
+        side_effect=RuntimeError("recovery worker failed"),
+    ):
+        result = _recover_safely(
+            tmp_path,
+            attempt=1,
+            realm_defeat=True,
+        )
+
+    assert result.success is False
+    assert result.realm_defeat is True
+
+
+def test_in_place_recovery_passes_one_shot_realm_handoff(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(runs, "initial", DEATH, status="failed", absorbed=3)
+    retry = _result(
+        runs,
+        "retry",
+        ABSORPTION * 2,
+        status="success",
+        absorbed=2,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        return_value=_safe_in_place(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    assert run_retry.call_args.kwargs["resume_active_realm"] is True
 
 
 def test_structured_zero_does_not_count_stale_restart_click(

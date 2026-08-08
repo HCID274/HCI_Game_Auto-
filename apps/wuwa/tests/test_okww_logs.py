@@ -9,6 +9,7 @@ from wuwa_auto.okww.logs import (
     find_failure,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
+    is_recoverable_farm_echo_realm_defeat,
 )
 
 
@@ -58,6 +59,19 @@ FarmEchoTask:info_set Revive Failed
 def test_farm_echo_death_requires_both_markers() -> None:
     assert not is_recoverable_farm_echo_death(
         "FarmEchoTask:raise_not_in_combat char dead"
+    )
+
+
+def test_confirmed_realm_defeat_is_recoverable_without_revive_dialog() -> None:
+    text = "FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n"
+
+    assert is_recoverable_farm_echo_realm_defeat(text)
+    assert is_recoverable_farm_echo_death(text)
+
+
+def test_host_confirmed_revive_dialog_is_recoverable() -> None:
+    assert is_recoverable_farm_echo_death(
+        "FarmEchoTask:HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED\n"
     )
 
 
