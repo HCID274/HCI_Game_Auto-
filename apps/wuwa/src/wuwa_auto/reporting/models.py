@@ -18,12 +18,14 @@ class RunFacts:
     reason: str
     duration_seconds: int
     workflow_task: str = "daily"
+    daily_activity: dict[str, Any] = field(default_factory=dict)
     daily: list[ReportItem] = field(default_factory=list)
     weekly: list[ReportItem] = field(default_factory=list)
     followup: list[ReportItem] = field(default_factory=list)
     issues: list[ReportItem] = field(default_factory=list)
     cleanup: dict[str, Any] = field(default_factory=dict)
     user_context: dict[str, str] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -36,3 +38,5 @@ class NarrativeReport:
     weekly: list[str]
     followup: list[str]
     issues: list[str]
+    analysis: dict[str, Any] = field(default_factory=dict)
+    token_usage: dict[str, Any] = field(default_factory=dict)

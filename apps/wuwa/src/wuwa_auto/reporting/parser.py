@@ -6,11 +6,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+from game_automation_core.reporting.agent import build_evidence_bundle
+
+from wuwa_auto.okww.daily_activity import (
+    parse_activity_marker,
+    parse_activity_panel_marker,
+)
+from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.logs import (
     count_farm_echo_absorptions,
     count_farm_echo_kill_confirmations,
 )
 from wuwa_auto.reporting.models import ReportItem, RunFacts
+from wuwa_auto.reporting.noise import known_upstream_noise_lines
 from wuwa_auto.reporting.user_context import load_reporting_context
 
 DAILY_POINTS = re.compile(r"total daily points (?P<points>\d+)")
@@ -55,6 +63,85 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         issues.append(ReportItem("run-failure", f"主流程失败：{result.reason}"))
 
     daily: list[ReportItem] = []
+    daily_activity = parse_activity_marker(text)
+    panel = parse_activity_panel_marker(text)
+    if panel:
+        labels = panel.get("labels") or []
+        panel["comparison"] = compare_activity_panel(labels, log_text=text)
+        daily_activity["panel"] = panel
+    if daily_activity.get("state") == "unverified":
+        reason = str(daily_activity.get("reason") or "状态未确认")
+        issues.append(
+            ReportItem(
+                "daily-activity-unverified",
+                f"每日活跃度奖励未确认：{reason}",
+            )
+        )
+    comparison = panel.get("comparison") if panel else None
+    if isinstance(comparison, dict):
+        tasks = comparison.get("tasks") or []
+        observed_points = daily_activity.get("points")
+        if observed_points is None:
+            observed_points = comparison.get("current_points_from_tasks")
+        if observed_points is not None and daily_activity.get("state") != "verified":
+            daily.append(
+                ReportItem(
+                    "daily-activity-progress",
+                    f"每日活跃度当前{observed_points}/{comparison.get('target', 100)}，仅记录取证结果",
+                )
+            )
+        # Once the post-claim total is verified at/above 100, the game has
+        # settled the completed rows.  The panel may then intentionally show
+        # other optional “前往” tasks (for example +40 daily quest); those
+        # are not failures of today's reward and must not downgrade a real
+        # success to “部分完成”.
+        activity_verified = daily_activity.get("state") == "verified"
+        if not activity_verified:
+            for task in tasks:
+                if not isinstance(task, dict) or task.get("completed"):
+                    continue
+                key = str(task.get("key") or "task")
+                points_value = int(task.get("points") or 0)
+                label = str(task.get("label") or key)
+                state = str(task.get("state") or "unknown")
+                reason = str(task.get("reason") or "")
+                if state == "unsupported":
+                    issues.append(
+                        ReportItem(
+                            f"daily-activity-unsupported-{key}",
+                            f"每日活跃任务未完成：{label}(+{points_value})；{reason}",
+                        )
+                    )
+                elif state == "unavailable":
+                    issues.append(
+                        ReportItem(
+                            f"daily-activity-unavailable-{key}",
+                            f"每日活跃任务未完成：{label}(+{points_value})；{reason}",
+                        )
+                    )
+                elif state == "unknown":
+                    issues.append(
+                        ReportItem(
+                            f"daily-activity-unknown-{key}",
+                            f"每日活跃任务未完成：{label}(+{points_value})；"
+                            "本地能力映射未覆盖，暂不判定可达上限",
+                        )
+                    )
+            # An unknown visible objective makes a global upper-bound claim
+            # unsound; report the objective itself instead of saying the
+            # known subset can reach only 0/100.
+            if (
+                comparison.get("can_reach_target_now") is False
+                and not comparison.get("unknown_tasks")
+            ):
+                reachable = comparison.get("reachable_now_points")
+                issues.append(
+                    ReportItem(
+                        "daily-activity-capability-gap",
+                        f"按本次面板与日志，现有可用 OK-WW 入口最多可达{reachable}/100；"
+                        "剩余任务中存在上游未提供或本次资源不可用的项目",
+                    )
+                )
     tacet_attempts = text.count("TacetTask:start walk_to_treasure")
     tacet_unclaimed = text.count("TacetTask:is not claim treasure, restart challenge")
     tacet_runs = max(0, tacet_attempts - tacet_unclaimed)
@@ -68,13 +155,31 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         daily.append(ReportItem("tacet-suppression", details))
 
     points = list(DAILY_POINTS.finditer(text))
-    if "claim daily reward via  coordinate" in text:
-        detected_points = int(points[-1].group("points")) if points else None
-        if detected_points is not None and detected_points >= 100:
+    claim_action = "claim daily reward via  coordinate" in text or bool(
+        re.search(r"HOST_DAILY_ACTIVITY_CLAIM_ACTION .*\"host_clicks\":\s*[1-9]", text)
+    )
+    if daily_activity.get("state") == "verified" and not claim_action:
+        verified_points = daily_activity.get("points")
+        daily.append(
+            ReportItem(
+                "daily-activity-verified",
+                f"每日活跃度已确认达到100（当前{verified_points}点，奖励状态已结算）"
+                if verified_points is not None
+                else "每日活跃度已确认达到100，奖励状态已结算",
+            )
+        )
+    if claim_action:
+        detected_points = daily_activity.get("points")
+        if detected_points is None and points:
+            detected_points = int(points[-1].group("points"))
+        if daily_activity.get("state") == "verified":
+            suffix = ""
+            if detected_points is not None:
+                suffix = f"（活跃度{detected_points}点，已确认100%）"
             daily.append(
                 ReportItem(
                     "daily-activity-reward",
-                    f"领取每日活跃度奖励（活跃度{detected_points}点）",
+                    f"领取每日活跃度奖励{suffix}",
                 )
             )
         else:
@@ -118,6 +223,17 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     followup: list[ReportItem] = []
     recovery = result.config.get("farm_echo_recovery") or {}
     boss_runs = count_farm_echo_kill_confirmations(text)
+    structured_absorptions = result.config.get(
+        "confirmed_farm_echo_absorption_count"
+    )
+    if structured_absorptions is not None:
+        # Confirmed-retry starts the next challenge only after the defeated
+        # boss's echo has been absorbed.  A structured 5/5 absorption result
+        # therefore proves five completed boss clears even if an upstream UI
+        # click marker was missed in the log.
+        boss_runs = max(boss_runs, int(structured_absorptions))
+    if recovery.get("triggered"):
+        boss_runs = max(boss_runs, int(recovery.get("total_completed") or 0))
     if boss_runs:
         boss_index = result.config.get("boss_challenge_index")
         if boss_index is None:
@@ -135,16 +251,31 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         recovery_attempts = int(recovery.get("recovery_attempts") or 0)
         total_completed = int(recovery.get("total_completed") or boss_runs)
         target = int(recovery.get("target_count") or total_completed)
+        recovery_history = recovery.get("recoveries") or []
+        realm_defeat_attempts = sum(
+            1
+            for item in recovery_history
+            if isinstance(item, dict) and item.get("realm_defeat") is True
+        )
+        death_attempts = max(0, recovery_attempts - realm_defeat_attempts)
+
+        def recovery_summary(action: str) -> str:
+            events: list[str] = []
+            if realm_defeat_attempts:
+                events.append(f"讨伐副本团灭{realm_defeat_attempts}次")
+            if death_attempts:
+                events.append(f"讨伐中途倒地{death_attempts}次")
+            events.append(action)
+            return "，".join(events)
+
         if recovery_attempts and result.status == "success":
             if retry_completed:
-                recovery_wording = (
-                    f"讨伐中途倒地{recovery_attempts}次，"
-                    "已自动退本回血并补吸收声骸"
-                    f"{retry_completed}次"
+                recovery_wording = recovery_summary(
+                    f"已自动恢复并补吸收声骸{retry_completed}次"
                 )
             else:
-                recovery_wording = (
-                    f"讨伐中途倒地{recovery_attempts}次，已自动退本回血"
+                recovery_wording = recovery_summary(
+                    "已自动恢复并继续挑战"
                 )
             followup.append(
                 ReportItem(
@@ -156,20 +287,17 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
             first_safe = recovery.get("first_safe_recovery") is True
             final_safe = recovery.get("final_safe_recovery")
             safe = first_safe and final_safe is not False
-            recovery_state = "已退本回血" if safe else "安全恢复未完成"
+            recovery_state = "已自动恢复并重试" if safe else "自动恢复未完成"
             issues.append(
                 ReportItem(
                     "boss-death-recovery-incomplete",
-                    f"讨伐中途倒地{recovery_attempts}次，{recovery_state}；"
+                    f"{recovery_summary(recovery_state)}；"
                     "声骸累计吸收"
                     f"{total_completed}/{target}次",
                 )
             )
 
     echo_picked = count_farm_echo_absorptions(text)
-    structured_absorptions = result.config.get(
-        "confirmed_farm_echo_absorption_count"
-    )
     if structured_absorptions is not None:
         echo_picked = int(structured_absorptions)
     if recovery.get("triggered"):
@@ -231,9 +359,12 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         )
         if sequence_has_success or recovery_has_progress:
             status = "partial_success"
-    if cleanup_data and not cleanup_data.get("completed", False):
-        if status == "completed":
-            status = "partial_success"
+    if (
+        cleanup_data
+        and not cleanup_data.get("completed", False)
+        and status == "completed"
+    ):
+        status = "partial_success"
 
     return RunFacts(
         overall_status=status,
@@ -244,8 +375,15 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         weekly=weekly,
         followup=followup,
         issues=issues,
+        daily_activity=daily_activity,
         cleanup=cleanup_data,
         user_context=load_reporting_context(),
+        evidence=build_evidence_bundle(
+            game="wuwa",
+            log_text=text,
+            source=str(path),
+            ignored_line_numbers=known_upstream_noise_lines(text),
+        ),
     )
 
 
@@ -259,5 +397,7 @@ def deterministic_summary(facts: RunFacts) -> str:
         "completed": f"{subject}完成",
         "partial_success": f"{subject}部分完成",
         "failed": f"{subject}失败",
+        "in_progress": f"{subject}仍在进行",
+        "stalled": f"{subject}疑似卡住",
     }.get(facts.overall_status, f"{subject}状态未确认")
     return f"{status}，耗时{_format_duration(facts.duration_seconds)}"
