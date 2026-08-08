@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import ctypes
-import time
+import ctypes  # noqa: F401 - keep legacy test/adapter monkeypatch compatibility
+import time  # noqa: F401 - keep legacy test/adapter monkeypatch compatibility
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,17 +11,17 @@ from pathlib import Path
 from game_automation_core.uu.desktop import (
     UuDesktopConfig,
     UuDesktopController,
-    pyautogui,
 )
 from game_automation_core.windows.desktop_guard import activate_window
+
 from starrail_auto.uu.config import (
     DEBUG_DIR,
     EXPECTED_PRIMARY_SCREEN_SIZE,
     IMAGE_CONFIDENCE,
     IMAGE_RETRY_INTERVAL,
-    TPL_UPDATE_NOTICE,
     TPL_MANDATORY_UPDATE_ACTION,
     TPL_MANDATORY_UPDATE_NOTICE,
+    TPL_UPDATE_NOTICE,
     UU_MINIMIZE_BEST_EFFORT_TIMEOUT,
     UU_POPUP_ACTION_TIMEOUT,
     UU_POPUP_DETECT_TIMEOUT,

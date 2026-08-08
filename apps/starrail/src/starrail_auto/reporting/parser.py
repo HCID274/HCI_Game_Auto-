@@ -5,6 +5,8 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from game_automation_core.reporting.agent import build_evidence_bundle
+
 from starrail_auto.reporting.models import RunEvent, RunReport, StaminaRun
 
 LOG_LINE_PATTERN = re.compile(
@@ -192,7 +194,12 @@ def parse_m7a_run(
     """Parse only the content after the run's recorded byte checkpoint."""
     preferences = preferences or {}
     power_plan_remaining = power_plan_remaining or {}
-    report = RunReport(run_stage=run_stage, retries=retries, custom_context=preferences)
+    report = RunReport(
+        run_stage=run_stage,
+        retries=retries,
+        custom_context=preferences,
+        evidence=build_evidence_bundle(game="starrail", log_text=content),
+    )
     events: list[tuple[datetime, str, str]] = []
     active_section = ""
     active_plan: StaminaRun | None = None

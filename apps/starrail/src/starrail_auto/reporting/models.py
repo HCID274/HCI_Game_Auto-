@@ -55,6 +55,7 @@ class RunReport:
     run_stage: str = ""
     retries: int = 0
     custom_context: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_prompt_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -70,3 +71,5 @@ class NarrativeReport:
     current_task: str = ""
     issues: list[str] = field(default_factory=list)
     training_todos: list[str] = field(default_factory=list)
+    analysis: dict[str, Any] = field(default_factory=dict)
+    token_usage: dict[str, Any] = field(default_factory=dict)

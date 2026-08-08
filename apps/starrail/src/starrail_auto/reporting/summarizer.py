@@ -3,8 +3,16 @@
 import json
 import logging
 import re
+from dataclasses import replace
 from typing import Any
 
+from game_automation_core.reporting.agent import (
+    TokenUsage,
+    diagnostics_match_status,
+    redact_sensitive_data,
+    token_usage_from_response,
+    validate_diagnostics,
+)
 from openai import OpenAI
 
 from starrail_auto.reporting.models import NarrativeReport, RunReport, StaminaRun
@@ -21,6 +29,15 @@ log = logging.getLogger(__name__)
 
 class AISummaryError(RuntimeError):
     """Raised when AI wording is unavailable or invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        token_usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.token_usage = token_usage or TokenUsage().to_dict()
 
 
 def _plan_fully_completed(item: StaminaRun) -> bool:
@@ -91,7 +108,11 @@ def _numbered(items: list[str]) -> str:
     return "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
 
 
-def build_fallback_narrative(report: RunReport) -> NarrativeReport:
+def build_fallback_narrative(
+    report: RunReport,
+    *,
+    token_usage: dict[str, Any] | None = None,
+) -> NarrativeReport:
     """Produce a useful report even when DeepSeek is unavailable."""
     daily_items: list[str] = []
     for event in report.daily_events:
@@ -146,7 +167,10 @@ def build_fallback_narrative(report: RunReport) -> NarrativeReport:
         and report.stopped_normally
         and report.overall_status != "completed"
     ):
-        samples = report.recovered_warnings[:3]
+        samples = [
+            str(redact_sensitive_data(item))
+            for item in report.recovered_warnings[:3]
+        ]
         issues.append(f"过程告警已恢复：{'；'.join(samples)}")
     if report.overall_status == "stalled":
         issues.append(f"疑似卡住：{report.current_reason}")
@@ -159,7 +183,10 @@ def build_fallback_narrative(report: RunReport) -> NarrativeReport:
             state = "疑似卡住"
         else:
             state = "仍在进行"
-        current_task = f"{state}：{report.current_task}。{report.current_reason}"
+        current_task = (
+            f"{state}：{redact_sensitive_data(report.current_task)}。"
+            f"{redact_sensitive_data(report.current_reason)}"
+        )
 
     training_plan = report.custom_context.get("training_plan", {})
     completed_goals = training_plan.get("completed_this_run", [])
@@ -175,12 +202,13 @@ def build_fallback_narrative(report: RunReport) -> NarrativeReport:
     ]
 
     return NarrativeReport(
-        daily=daily,
-        routine_tasks=routine_tasks,
-        other_tasks=other_tasks,
-        current_task=current_task,
-        issues=issues,
-        training_todos=training_todos,
+        daily=str(redact_sensitive_data(daily)),
+        routine_tasks=[str(redact_sensitive_data(item)) for item in routine_tasks],
+        other_tasks=[str(redact_sensitive_data(item)) for item in other_tasks],
+        current_task=str(redact_sensitive_data(current_task)),
+        issues=[str(redact_sensitive_data(item)) for item in issues],
+        training_todos=[str(redact_sensitive_data(item)) for item in training_todos],
+        token_usage=token_usage or TokenUsage().to_dict(),
     )
 
 
@@ -198,6 +226,9 @@ def _parse_narrative_response(data: Any) -> NarrativeReport:
     if not isinstance(current_task, str):
         raise AISummaryError("DeepSeek response field current_task is invalid")
 
+    analysis = data.get("analysis", {})
+    if not isinstance(analysis, dict):
+        analysis = {}
     return NarrativeReport(
         daily=data["daily"].strip(),
         routine_tasks=string_list("routine_tasks"),
@@ -205,11 +236,12 @@ def _parse_narrative_response(data: Any) -> NarrativeReport:
         current_task=current_task.strip(),
         issues=string_list("issues"),
         training_todos=string_list("training_todos"),
+        analysis=analysis,
     )
 
 
 def _stamina_fact(item: StaminaRun) -> dict[str, Any]:
-    return {
+    payload = {
         "name": item.name.replace(" - ", "·"),
         "source": item.source,
         "activity_name": item.activity_name,
@@ -224,6 +256,7 @@ def _stamina_fact(item: StaminaRun) -> dict[str, Any]:
         "reason": item.reason,
         "character_context": item.character_context,
     }
+    return payload
 
 
 def _build_ai_input(report: RunReport) -> dict[str, Any]:
@@ -256,7 +289,9 @@ def _build_ai_input(report: RunReport) -> dict[str, Any]:
         }
     )
 
-    return {
+    payload = {
+        "agent_schema_version": "game-report-agent.v1",
+        "game": "starrail",
         "overall_status": report.overall_status,
         "ordered_daily_events": ordered_daily_events,
         "routine_rewards": [
@@ -281,7 +316,9 @@ def _build_ai_input(report: RunReport) -> dict[str, Any]:
         "detected_training_target": report.detected_training_target,
         "detected_training_dungeons": report.detected_training_dungeons,
         "custom_context": report.custom_context,
+        "evidence": report.evidence,
     }
+    return redact_sensitive_data(payload)
 
 
 def summarize_with_ai(report: RunReport) -> NarrativeReport:
@@ -308,16 +345,37 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
         response_format={"type": "json_object"},
         max_tokens=AI_MAX_TOKENS,
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise AISummaryError("DeepSeek returned empty content")
+    usage = token_usage_from_response(response, model=model)
     try:
-        narrative = _parse_narrative_response(json.loads(content))
-    except json.JSONDecodeError as exc:
-        raise AISummaryError(f"DeepSeek returned invalid JSON: {exc}") from exc
-    _validate_stamina_wording(report, narrative)
-    _validate_other_task_wording(report, narrative)
-    return narrative
+        content = response.choices[0].message.content
+        if not content:
+            raise AISummaryError("DeepSeek returned empty content")
+        data = json.loads(content)
+        narrative = _parse_narrative_response(data)
+        _validate_stamina_wording(report, narrative)
+        _validate_daily_event_wording(report, narrative)
+        _validate_current_task_wording(report, narrative)
+        _validate_other_task_wording(report, narrative)
+        _validate_daily_wording(report, narrative)
+    except Exception as exc:
+        raise AISummaryError(str(exc), token_usage=usage.to_dict()) from exc
+    log.info(
+        "DeepSeek StarRail report usage: input_tokens=%s output_tokens=%s "
+        "total_tokens=%s ratio=%s available=%s",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        usage.output_input_ratio,
+        usage.available,
+    )
+    analysis = validate_diagnostics(narrative.analysis, report.evidence)
+    if not diagnostics_match_status(analysis, report.overall_status):
+        analysis = {}
+    return replace(
+        narrative,
+        analysis=analysis,
+        token_usage=usage.to_dict(),
+    )
 
 
 def _validate_stamina_wording(
@@ -335,9 +393,8 @@ def _validate_stamina_wording(
         name = item.name.replace(" - ", "·")
         line = next((value for value in lines if name in value), "")
         required: list[str] = []
-        if item.source == "activity":
-            if item.activity_name:
-                required.append(item.activity_name)
+        if item.source == "activity" and item.activity_name:
+            required.append(item.activity_name)
         if item.completed_instances:
             required.append(f"{item.completed_instances}次")
         if item.remaining_plan_count == 0:
@@ -358,27 +415,190 @@ def _validate_stamina_wording(
             )
 
 
+def _normalized_fact(value: str) -> str:
+    return re.sub(r"[\s：:，,。；;（）()\[\]【】]", "", value)
+
+
+def _validate_fact_list(
+    field: str,
+    expected: list[str],
+    actual: list[str],
+) -> None:
+    """Require a one-to-one, evidence-backed wording for a list field."""
+
+    if len(expected) != len(actual):
+        raise AISummaryError(
+            f"DeepSeek wording changed {field} fact count: "
+            f"expected {len(expected)}, got {len(actual)}"
+        )
+    remaining = list(expected)
+    for value in actual:
+        normalized = _normalized_fact(value)
+        matches = [
+            item
+            for item in remaining
+            if _normalized_fact(item) and _normalized_fact(item) in normalized
+        ]
+        if not matches:
+            raise AISummaryError(
+                f"DeepSeek wording added or changed {field} fact: {value}"
+            )
+        matched = max(matches, key=len)
+        remaining.remove(matched)
+    if remaining:
+        raise AISummaryError(
+            f"DeepSeek wording dropped {field} fact: {remaining[0]}"
+        )
+
+
+def _validate_daily_event_wording(
+    report: RunReport,
+    narrative: NarrativeReport,
+) -> None:
+    """Keep every ordered daily action in the daily block."""
+
+    text = _normalized_fact(narrative.daily)
+    positions: list[int] = []
+    for event in report.daily_events:
+        if event.kind == "stamina":
+            if event.stamina_index is None or not (
+                0 <= event.stamina_index < len(report.stamina_runs)
+            ):
+                continue
+            name = report.stamina_runs[event.stamina_index].name.replace(
+                " - ",
+                "·",
+            )
+            position = text.find(_normalized_fact(name))
+            if position < 0:
+                raise AISummaryError(
+                    f"DeepSeek wording dropped daily stamina event: {name}"
+                )
+            positions.append(position)
+            continue
+        if event.kind == "daily_result":
+            continue
+        expected = (
+            _reward_action(event.label)
+            if event.kind == "reward"
+            else _short_daily_task(event.label)
+        )
+        expected = _normalized_fact(expected)
+        position = text.find(expected)
+        if not expected or position < 0:
+            raise AISummaryError(
+                f"DeepSeek wording dropped daily event: {event.label}"
+            )
+        positions.append(position)
+    if positions != sorted(positions):
+        raise AISummaryError("DeepSeek wording reordered daily events")
+
+
+def _validate_current_task_wording(
+    report: RunReport,
+    narrative: NarrativeReport,
+) -> None:
+    """Keep the observed stop location when a run did not finish normally."""
+
+    expected = _normalized_fact(report.current_task)
+    actual = _normalized_fact(narrative.current_task)
+    if expected and expected not in actual:
+        raise AISummaryError(
+            f"DeepSeek wording dropped current task: {report.current_task}"
+        )
+    if not expected and actual:
+        raise AISummaryError("DeepSeek wording added an unobserved current task")
+
+
 def _validate_other_task_wording(
     report: RunReport,
     narrative: NarrativeReport,
 ) -> None:
-    """Reject AI wording that omits deterministic non-daily task outcomes."""
+    """Reject AI wording that omits or invents deterministic list facts."""
 
-    def normalized(value: str) -> str:
-        return re.sub(r"[\s：:，,。；;（）()]", "", value)
+    fallback = build_fallback_narrative(report)
+    _validate_fact_list(
+        "routine_tasks",
+        fallback.routine_tasks,
+        narrative.routine_tasks,
+    )
+    _validate_fact_list(
+        "other_tasks",
+        fallback.other_tasks,
+        narrative.other_tasks,
+    )
+    _validate_fact_list(
+        "training_todos",
+        fallback.training_todos,
+        narrative.training_todos,
+    )
 
-    actual = normalized("\n".join(narrative.other_tasks))
-    for expected in report.other_tasks:
-        if normalized(expected) not in actual:
-            raise AISummaryError(
-                f"DeepSeek wording dropped other-task fact: {expected}"
+
+def _validate_daily_wording(
+    report: RunReport,
+    narrative: NarrativeReport,
+) -> None:
+    """Keep the authoritative daily status and score in the AI-written block."""
+
+    text = re.sub(r"\s+", "", narrative.daily)
+    score = re.sub(r"\s+", "", report.daily_score)
+    if score != "未读取" and score not in text:
+        raise AISummaryError(
+            f"DeepSeek wording dropped daily score: {report.daily_score}"
+        )
+
+    if report.daily_status == "completed":
+        if "每日实训完成" not in narrative.daily:
+            raise AISummaryError("DeepSeek wording changed completed daily status")
+        if any(
+            marker in narrative.daily
+            for marker in ("未达成", "未确认", "失败", "未领取", "奖励未")
+        ):
+            raise AISummaryError("DeepSeek wording contradicted completed daily status")
+    elif report.daily_status == "failed":
+        if not any(
+            marker in narrative.daily
+            for marker in ("每日实训未达成", "每日实训未完成", "每日实训失败")
+        ):
+            raise AISummaryError("DeepSeek wording changed failed daily status")
+        if any(
+            marker in narrative.daily
+            for marker in (
+                "本轮已完成",
+                "本次已完成",
+                "奖励已领取",
+                "领取成功",
+                "奖励领取成功",
+                "主流程成功",
+                "已完成但",
             )
+        ):
+            raise AISummaryError("DeepSeek wording contradicted failed daily status")
+    elif report.daily_status in {"unknown", "in_progress"} and not any(
+        marker in narrative.daily for marker in ("每日实训未确认", "仍在进行")
+    ):
+        raise AISummaryError("DeepSeek wording changed in-progress daily status")
+    if report.daily_status in {"unknown", "in_progress"} and any(
+        marker in narrative.daily
+        for marker in ("本轮已完成", "本次已完成", "奖励已领取", "领取成功", "成功")
+    ):
+        raise AISummaryError("DeepSeek wording contradicted uncertain daily status")
+
+    if report.daily_status == "failed":
+        for task in report.daily_unfinished:
+            if _short_daily_task(task).replace(" ", "") not in text:
+                raise AISummaryError(
+                    f"DeepSeek wording dropped unfinished daily task: {task}"
+                )
 
 
 def summarize_report(report: RunReport) -> tuple[NarrativeReport, bool]:
     """Return AI wording when possible, otherwise deterministic wording."""
     try:
         return summarize_with_ai(report), True
-    except Exception as exc:
+    except AISummaryError as exc:
+        log.warning("AI response invalid; preserving usage and using fallback: %s", exc)
+        return build_fallback_narrative(report, token_usage=exc.token_usage), False
+    except Exception as exc:  # noqa: BLE001 - AI is an optional wording layer
         log.warning("AI report summary unavailable; using deterministic fallback: %s", exc)
         return build_fallback_narrative(report), False

@@ -4,24 +4,39 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from starrail_auto.integrations.feishu import send_starrail_report_card
 from starrail_auto.m7a.power_plan import load_power_plan_remaining
-from starrail_auto.reporting.models import StaminaRun
+from starrail_auto.reporting.models import (
+    NarrativeReport,
+    RunEvent,
+    RunReport,
+    StaminaRun,
+)
 from starrail_auto.reporting.parser import parse_m7a_run
 from starrail_auto.reporting.prompting.composer import (
     compose_report_messages,
     load_system_sections,
 )
 from starrail_auto.reporting.reminders import format_active_reminders
-from starrail_auto.reporting.service import _title_for, report_main_run
+from starrail_auto.reporting.service import (
+    _redact_narrative,
+    _title_for,
+    report_main_run,
+)
 from starrail_auto.reporting.summarizer import (
     AISummaryError,
     _build_ai_input,
+    _validate_current_task_wording,
+    _validate_daily_event_wording,
+    _validate_daily_wording,
     _validate_other_task_wording,
     _validate_stamina_wording,
     build_fallback_narrative,
+    summarize_report,
+    summarize_with_ai,
 )
 from starrail_auto.reporting.training_plan import (
     load_training_plan,
@@ -603,6 +618,233 @@ class FallbackNarrativeTests(unittest.TestCase):
         self.assertFalse(
             ai_input["ordered_daily_events"][0]["plan_fully_completed"]
         )
+        self.assertEqual(ai_input["agent_schema_version"], "game-report-agent.v1")
+        self.assertEqual(ai_input["evidence"]["game"], "starrail")
+
+    def test_ai_input_redacts_secrets_in_derived_log_facts(self) -> None:
+        report = RunReport(recovered_warnings=["token=SUPERSECRET123"])
+
+        ai_input = _build_ai_input(report)
+
+        self.assertNotIn("SUPERSECRET123", str(ai_input))
+
+    def test_fallback_report_redacts_secret_warnings(self) -> None:
+        report = RunReport(
+            overall_status="failed",
+            stopped_normally=True,
+            recovered_warnings=["token=SUPERSECRET123"],
+        )
+
+        narrative = build_fallback_narrative(report)
+
+        self.assertNotIn("SUPERSECRET123", str(narrative))
+
+    def test_card_narrative_redacts_ai_text(self) -> None:
+        narrative = _redact_narrative(
+            NarrativeReport(
+                daily="token=SUPERSECRET123",
+                issues=["api_key=ANOTHERSECRET"],
+            )
+        )
+
+        self.assertNotIn("SUPERSECRET123", str(narrative))
+        self.assertNotIn("ANOTHERSECRET", str(narrative))
+
+    def test_agent_input_contains_evidence_and_usage_is_archived(self) -> None:
+        report = RunReport(
+            overall_status="completed",
+            daily_status="completed",
+            daily_score="500/500",
+            evidence={"line_refs": ["L1"]},
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"daily":"1. 每日实训完成 500/500",'
+                            '"routine_tasks":[],"other_tasks":[],'
+                            '"current_task":"","issues":[],"training_todos":[], '
+                            '"analysis":{"root_cause":"日志正常",'
+                            '"root_cause_refs":["L1"]}}'
+                        )
+                    )
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=120,
+                completion_tokens=30,
+                total_tokens=150,
+            ),
+        )
+
+        with patch("starrail_auto.reporting.summarizer.get_secret") as secret, patch(
+            "starrail_auto.reporting.summarizer.OpenAI"
+        ) as client_class:
+            secret.side_effect = lambda name: {
+                "DEEPSEEK_API_KEY": "test",
+                "DEEPSEEK_MODEL": "test-model",
+            }.get(name, "")
+            client_class.return_value.chat.completions.create.return_value = response
+            narrative = summarize_with_ai(report)
+
+        self.assertEqual(narrative.token_usage["input_tokens"], 120)
+        self.assertEqual(narrative.token_usage["output_tokens"], 30)
+        self.assertEqual(narrative.token_usage["output_input_ratio"], 0.25)
+        self.assertEqual(narrative.analysis["root_cause_refs"], ["L1"])
+
+    def test_ai_daily_wording_cannot_reverse_failed_status(self) -> None:
+        report = RunReport(
+            overall_status="failed",
+            daily_status="failed",
+            daily_score="0/500",
+        )
+        with self.assertRaises(AISummaryError):
+            _validate_daily_wording(
+                report,
+                type(build_fallback_narrative(report))(
+                    daily="1. 每日实训完成 0/500"
+                ),
+            )
+
+        completed = RunReport(
+            overall_status="completed",
+            daily_status="completed",
+            daily_score="500/500",
+        )
+        with self.assertRaises(AISummaryError):
+            _validate_daily_wording(
+                completed,
+                type(build_fallback_narrative(completed))(
+                    daily="1. 每日实训完成 500/500，但奖励未领取"
+                ),
+            )
+
+        for status, text in (
+            ("unknown", "每日实训未确认，但本轮已完成 0/500"),
+            ("in_progress", "每日实训仍在进行，但奖励已领取 0/500"),
+            ("failed", "每日实训未达成，但奖励领取成功 0/500"),
+        ):
+            report = RunReport(
+                overall_status=status,
+                daily_status=status,
+                daily_score="0/500",
+            )
+            with self.assertRaises(AISummaryError):
+                _validate_daily_wording(
+                    report,
+                    type(build_fallback_narrative(report))(daily=text),
+                )
+
+    def test_invalid_starrail_ai_response_still_keeps_billed_usage(self) -> None:
+        report = RunReport(
+            overall_status="completed",
+            daily_status="completed",
+            daily_score="500/500",
+            evidence={"line_refs": ["L1"]},
+        )
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))],
+            usage=SimpleNamespace(
+                prompt_tokens=110,
+                completion_tokens=15,
+                total_tokens=125,
+            ),
+        )
+
+        with patch("starrail_auto.reporting.summarizer.get_secret") as secret, patch(
+            "starrail_auto.reporting.summarizer.OpenAI"
+        ) as client_class:
+            secret.side_effect = lambda name: {
+                "DEEPSEEK_API_KEY": "test",
+                "DEEPSEEK_MODEL": "test-model",
+            }.get(name, "")
+            client_class.return_value.chat.completions.create.return_value = response
+            narrative, ai_used = summarize_report(report)
+
+        self.assertFalse(ai_used)
+        self.assertEqual(narrative.token_usage["input_tokens"], 110)
+        self.assertEqual(narrative.token_usage["output_tokens"], 15)
+
+    def test_ai_daily_wording_cannot_drop_an_ordered_daily_action(self) -> None:
+        report = RunReport(
+            daily_events=[
+                RunEvent(kind="daily_task", label="派遣委托"),
+                RunEvent(kind="daily_task", label="使用1次「万能合成机」"),
+                RunEvent(kind="daily_result", label="每日实训完成"),
+            ],
+            daily_status="completed",
+            daily_score="500/500",
+        )
+        narrative_type = type(build_fallback_narrative(report))
+        with self.assertRaises(AISummaryError):
+            _validate_daily_event_wording(
+                report,
+                narrative_type(daily="1. 每日实训完成 500/500"),
+            )
+
+    def test_ai_daily_wording_cannot_reorder_stamina_and_daily_actions(self) -> None:
+        report = RunReport(
+            daily_events=[
+                RunEvent(kind="stamina", stamina_index=0),
+                RunEvent(kind="daily_task", label="派遣委托"),
+                RunEvent(kind="daily_result", label="每日实训完成"),
+            ],
+            stamina_runs=[
+                StaminaRun(
+                    name="饰品提取 - 鎏金追忆",
+                    completed_instances=6,
+                    remaining_plan_count=25,
+                    status="completed",
+                )
+            ],
+            daily_status="completed",
+            daily_score="500/500",
+        )
+        with self.assertRaises(AISummaryError):
+            _validate_daily_event_wording(
+                report,
+                type(build_fallback_narrative(report))(
+                    daily="1. 派遣委托\n2. 饰品提取·鎏金追忆 6次，剩余计划25次\n3. 每日实训完成 500/500"
+                ),
+            )
+
+    def test_ai_current_task_must_preserve_failure_location(self) -> None:
+        report = RunReport(
+            overall_status="failed",
+            daily_status="failed",
+            daily_score="0/500",
+            current_task="每日实训界面",
+            current_reason="截图失败",
+        )
+        with self.assertRaises(AISummaryError):
+            _validate_current_task_wording(
+                report,
+                type(build_fallback_narrative(report))(
+                    daily="每日实训未达成 0/500",
+                    current_task="",
+                ),
+            )
+
+    def test_ai_list_wording_cannot_add_or_drop_other_facts(self) -> None:
+        report = RunReport(other_tasks=["差分宇宙积分 18000/18000"])
+        narrative_type = type(build_fallback_narrative(report))
+        with self.assertRaises(AISummaryError):
+            _validate_other_task_wording(
+                report,
+                narrative_type(daily="", other_tasks=[]),
+            )
+        with self.assertRaises(AISummaryError):
+            _validate_other_task_wording(
+                report,
+                narrative_type(
+                    daily="",
+                    other_tasks=[
+                        "差分宇宙积分 18000/18000",
+                        "虚构任务已完成",
+                    ]
+                ),
+            )
 
     def test_daily_contains_short_numbered_actions_and_stamina(self) -> None:
         report = parse_m7a_run(
