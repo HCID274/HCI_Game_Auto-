@@ -16,10 +16,11 @@ import threading
 import time
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
-from typing import Iterator
+from typing import Self
 
 from wuwa_auto.input.driver import USBIP_EXE, driver_status, healthy_mouse_devices
 from wuwa_auto.settings import LOGS_DIR, VIIPER_DIR, VIIPER_EXE
@@ -35,6 +36,13 @@ VIIPER_ZIP_SHA256 = "a02b06751d64e43e7700aba8ee1f7e3e4f5f4e7f370a11722ff922ab075
 VIIPER_EXE_SHA256 = "1868d682f4cc6d62349bbccbf0727b05d3eb6e22027ac34f0f1d9b1de56f2ddc"
 MOUSE_PACKET = struct.Struct("<Bhhhh")
 LEFT_BUTTON = 0x01
+RIGHT_BUTTON = 0x02
+MIDDLE_BUTTON = 0x04
+BUTTON_MASKS = {
+    "left": LEFT_BUTTON,
+    "right": RIGHT_BUTTON,
+    "middle": MIDDLE_BUTTON,
+}
 CONTROL_PORT_ENV = "WUWA_VIRTUAL_HID_CONTROL_PORT"
 CONTROL_TOKEN_ENV = "WUWA_VIRTUAL_HID_CONTROL_TOKEN"
 
@@ -108,7 +116,7 @@ def _api_request(port: int, request: str, timeout: float = 8) -> dict[str, objec
         while True:
             try:
                 chunk = connection.recv(65536)
-            except socket.timeout as exc:
+            except TimeoutError as exc:
                 raise VirtualHidError(f"VIIPER API timed out for {request!r}") from exc
             if not chunk:
                 break
@@ -216,8 +224,10 @@ class VirtualHidMouse:
         self.stream: socket.socket | None = None
         self.bus_id: int | None = None
         self.device_id: str | None = None
+        self._buttons = 0
+        self._state_lock = threading.RLock()
 
-    def __enter__(self) -> "VirtualHidMouse":
+    def __enter__(self) -> Self:
         self.start()
         return self
 
@@ -260,7 +270,10 @@ class VirtualHidMouse:
     def close(self) -> None:
         if self.stream is not None:
             try:
-                self.send()
+                # A worker can disappear while holding a combat button.  Emit a
+                # final all-up packet before tearing down the virtual device so
+                # the next task never inherits a stuck attack or dodge key.
+                self.release_buttons()
             except OSError:
                 pass
             self.stream.close()
@@ -290,23 +303,45 @@ class VirtualHidMouse:
     def send(
         self,
         *,
-        buttons: int = 0,
+        buttons: int | None = None,
         dx: int = 0,
         dy: int = 0,
         wheel: int = 0,
         pan: int = 0,
     ) -> None:
-        if self.stream is None:
-            raise VirtualHidError("virtual mouse is not connected")
-        self.stream.sendall(
-            encode_mouse_packet(
-                buttons=buttons,
-                dx=dx,
-                dy=dy,
-                wheel=wheel,
-                pan=pan,
+        with self._state_lock:
+            if self.stream is None:
+                raise VirtualHidError("virtual mouse is not connected")
+            if buttons is not None:
+                self._buttons = buttons & 0x1F
+            self.stream.sendall(
+                encode_mouse_packet(
+                    buttons=self._buttons,
+                    dx=dx,
+                    dy=dy,
+                    wheel=wheel,
+                    pan=pan,
+                )
             )
-        )
+
+    def set_button(self, button: str, pressed: bool) -> None:
+        """Change one button while preserving any other held buttons."""
+        try:
+            mask = BUTTON_MASKS[button]
+        except KeyError as exc:
+            raise ValueError(f"unsupported mouse button: {button}") from exc
+        with self._state_lock:
+            if pressed:
+                self._buttons |= mask
+            else:
+                self._buttons &= ~mask
+            self.send()
+
+    def release_buttons(self) -> None:
+        """Release every button and keep the state safe for later movement."""
+        with self._state_lock:
+            self._buttons = 0
+            self.send()
 
     @staticmethod
     def cursor_position() -> tuple[int, int]:
@@ -345,10 +380,10 @@ class VirtualHidMouse:
             # pixels.  A stagnant cursor gets progressively larger nudges.
             gain = min(4, 1 + stagnant)
 
-            def command(error: int) -> int:
+            def command(error: int, *, multiplier: int = gain) -> int:
                 if not error:
                     return 0
-                magnitude = max(1, min(80, abs(error) // 4 or 1)) * gain
+                magnitude = max(1, min(80, abs(error) // 4 or 1)) * multiplier
                 return max(-120, min(120, magnitude if error > 0 else -magnitude))
 
             dx = command(error_x)
@@ -366,15 +401,28 @@ class VirtualHidMouse:
         x: int,
         y: int,
         *,
+        button: str = "left",
         hold: float = 0.08,
         log_action: bool = True,
     ) -> None:
+        try:
+            button_mask = BUTTON_MASKS[button]
+        except KeyError as exc:
+            raise ValueError(f"unsupported mouse button: {button}") from exc
         reached = self.move_to(x, y)
-        self.send(buttons=LEFT_BUTTON)
-        time.sleep(hold)
-        self.send()
+        with self._state_lock:
+            previous_buttons = self._buttons
+            self.send(buttons=previous_buttons | button_mask)
+            time.sleep(hold)
+            self._buttons = previous_buttons
+            self.send()
         if log_action:
-            log.info("virtual HID clicked target=%s reached=%s", (x, y), reached)
+            log.info(
+                "virtual HID %s-clicked target=%s reached=%s",
+                button,
+                (x, y),
+                reached,
+            )
 
 
 class _VirtualHidControlServer:
@@ -384,6 +432,9 @@ class _VirtualHidControlServer:
         self.mouse = mouse
         self.token = secrets.token_urlsafe(24)
         self._lock = threading.Lock()
+        self._admission = threading.Condition()
+        self._accepting = True
+        self._active_handlers = 0
         owner = self
 
         class Handler(socketserver.StreamRequestHandler):
@@ -392,17 +443,41 @@ class _VirtualHidControlServer:
                     payload = json.loads(self.rfile.readline(4096).decode("utf-8"))
                     if payload.get("token") != owner.token:
                         raise VirtualHidError("invalid virtual HID control token")
-                    if payload.get("action") != "click":
+                    action = payload.get("action")
+                    if action not in {"click", "button"}:
                         raise VirtualHidError("unsupported virtual HID control action")
-                    with owner._lock:
-                        owner.mouse.click_at(
-                            int(payload["x"]),
-                            int(payload["y"]),
-                            hold=float(payload.get("hold", 0.08)),
-                            log_action=bool(payload.get("log_action", True)),
-                        )
+                    with owner._admission:
+                        if not owner._accepting:
+                            raise VirtualHidError(
+                                "virtual HID control is quiesced while the worker stops"
+                            )
+                        owner._active_handlers += 1
+                    try:
+                        with owner._lock:
+                            button = str(payload.get("button", "left"))
+                            if action == "click":
+                                owner.mouse.click_at(
+                                    int(payload["x"]),
+                                    int(payload["y"]),
+                                    button=button,
+                                    hold=float(payload.get("hold", 0.08)),
+                                    log_action=bool(payload.get("log_action", True)),
+                                )
+                            else:
+                                x, y = payload.get("x"), payload.get("y")
+                                if x is not None and y is not None:
+                                    owner.mouse.move_to(int(x), int(y))
+                                owner.mouse.set_button(
+                                    button,
+                                    bool(payload.get("pressed", False)),
+                                )
+                    finally:
+                        with owner._admission:
+                            owner._active_handlers -= 1
+                            if owner._active_handlers == 0:
+                                owner._admission.notify_all()
                     response = {"ok": True}
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - return worker-safe error
                     response = {"ok": False, "error": str(exc)}
                 self.wfile.write(
                     json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -419,6 +494,21 @@ class _VirtualHidControlServer:
             daemon=True,
         )
 
+    def quiesce_and_release(self) -> None:
+        """Stop admitting worker requests, then emit one serialized all-up."""
+        with self._admission:
+            self._accepting = False
+            while self._active_handlers:
+                self._admission.wait()
+        with self._lock:
+            self.mouse.release_buttons()
+
+    def resume(self) -> None:
+        """Allow a newly launched owned worker to use the shared HID again."""
+        with self._admission:
+            self._accepting = True
+            self._admission.notify_all()
+
     @property
     def port(self) -> int:
         return int(self.server.server_address[1])
@@ -430,6 +520,10 @@ class _VirtualHidControlServer:
         log.info("virtual HID worker control ready on localhost port %s", self.port)
 
     def close(self) -> None:
+        try:
+            self.quiesce_and_release()
+        except (OSError, VirtualHidError) as exc:
+            log.warning("could not quiesce virtual HID control server: %s", exc)
         os.environ.pop(CONTROL_PORT_ENV, None)
         os.environ.pop(CONTROL_TOKEN_ENV, None)
         self.server.shutdown()
@@ -438,6 +532,7 @@ class _VirtualHidControlServer:
 
 
 _active_mouse: VirtualHidMouse | None = None
+_active_control: _VirtualHidControlServer | None = None
 
 
 def active_virtual_mouse() -> VirtualHidMouse | None:
@@ -445,10 +540,40 @@ def active_virtual_mouse() -> VirtualHidMouse | None:
     return _active_mouse
 
 
+def release_active_mouse_buttons() -> bool:
+    """Release held buttons before an owned worker is restarted or stopped."""
+    mouse = active_virtual_mouse()
+    if mouse is None:
+        return False
+    try:
+        control = _active_control
+        if control is not None:
+            # Quiescing rejects late requests from the old worker, while the
+            # admission/handler counters ensure an in-flight request finishes
+            # before the all-up packet is emitted.
+            control.quiesce_and_release()
+        else:
+            mouse.release_buttons()
+    except (OSError, VirtualHidError) as exc:
+        log.warning("could not release active virtual HID buttons: %s", exc)
+        return False
+    log.debug("released active virtual HID buttons before worker stop")
+    return True
+
+
+def resume_active_mouse_control() -> bool:
+    """Re-open the control gate before launching the next owned worker."""
+    control = _active_control
+    if control is None:
+        return False
+    control.resume()
+    return True
+
+
 @contextmanager
 def managed_virtual_mouse() -> Iterator[VirtualHidMouse]:
     """Reuse the workflow mouse, or create a scoped one for a recovery command."""
-    global _active_mouse
+    global _active_control, _active_mouse
     if _active_mouse is not None:
         yield _active_mouse
         return
@@ -456,11 +581,15 @@ def managed_virtual_mouse() -> Iterator[VirtualHidMouse]:
         control = _VirtualHidControlServer(mouse)
         control.start()
         _active_mouse = mouse
+        _active_control = control
         try:
             yield mouse
         finally:
             _active_mouse = None
-            control.close()
+            try:
+                control.close()
+            finally:
+                _active_control = None
 
 
 def probe_virtual_mouse() -> dict[str, object]:
