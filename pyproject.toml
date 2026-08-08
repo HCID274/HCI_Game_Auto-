@@ -7,3 +7,8 @@ members = [
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
+testpaths = [
+    "packages/game-automation-core/tests",
+    "apps/starrail/tests",
+    "apps/wuwa/tests",
+]

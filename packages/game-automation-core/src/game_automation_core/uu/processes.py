@@ -52,9 +52,12 @@ class UuProcessController:
             # an executable path. Trusted sibling components are admitted only
             # by their exact executable names, never command-line substrings.
             executable = process.info.get("exe") or ""
-            if name == self.spec.executable.name.casefold() and executable:
-                if _normalized(executable) != _normalized(self.spec.executable):
-                    continue
+            if (
+                name == self.spec.executable.name.casefold()
+                and executable
+                and _normalized(executable) != _normalized(self.spec.executable)
+            ):
+                continue
             processes.append(process)
         return processes
 

@@ -236,9 +236,12 @@ def _try_foreground(hwnd: int, *, synthesize_alt: bool) -> None:
     attached: list[int] = []
 
     for thread_id in {target_thread, foreground_thread}:
-        if thread_id and thread_id != current_thread:
-            if user32.AttachThreadInput(current_thread, thread_id, True):
-                attached.append(thread_id)
+        if (
+            thread_id
+            and thread_id != current_thread
+            and user32.AttachThreadInput(current_thread, thread_id, True)
+        ):
+            attached.append(thread_id)
     try:
         user32.ShowWindowAsync(hwnd, SW_RESTORE)
         user32.BringWindowToTop(hwnd)
@@ -278,8 +281,8 @@ __all__ = [
     "WindowSnapshot",
     "activate_window",
     "classify_blocker",
-    "desktop_blockers",
     "describe_window",
+    "desktop_blockers",
     "foreground_window",
     "require_desktop_ready",
     "visible_windows",
