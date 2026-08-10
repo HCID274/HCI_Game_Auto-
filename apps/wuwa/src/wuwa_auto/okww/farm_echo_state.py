@@ -10,8 +10,14 @@ REVIVE_DIALOG_MARKER = "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED"
 IN_PLACE_REVIVAL_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_IN_PLACE_REVIVAL_COMPLETED"
 )
+REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER = (
+    "HOST_FARM_ECHO_REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED"
+)
 REALM_DEFEAT_RETRY_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_REALM_DEFEAT_RETRY_COMPLETED"
+)
+REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER = (
+    "HOST_FARM_ECHO_REALM_DEFEAT_HEAL_RECOVERY_COMPLETED"
 )
 
 _DEFEAT_TITLE = re.compile(r"(?:挑战失败|Challenge\s*Failed)", re.IGNORECASE)
@@ -127,3 +133,23 @@ def click_realm_defeat_retry(task: RealmStateTask) -> None:
     )
     if not clicked:
         raise RuntimeError("could not click Retry on realm defeat screen")
+
+
+def click_realm_defeat_exit(task: RealmStateTask) -> None:
+    """Leave a failed realm so the proven waypoint-heal flow can run."""
+
+    if not realm_defeat_visible(task, time_out=5):
+        raise RuntimeError("realm defeat screen is no longer visible")
+    clicked = task.wait_click_ocr(
+        0.20,
+        0.75,
+        0.50,
+        0.93,
+        match=_EXIT_BUTTON,
+        time_out=5,
+        settle_time=0.2,
+        raise_if_not_found=False,
+        after_sleep=2,
+    )
+    if not clicked:
+        raise RuntimeError("could not click Exit on realm defeat screen")

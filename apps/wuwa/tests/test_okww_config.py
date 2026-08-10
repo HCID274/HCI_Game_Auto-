@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from wuwa_auto.okww import config
 from wuwa_auto.okww.confirmed_retry import (
     MAX_FARM_ECHO_RUNTIME_SECONDS,
@@ -15,12 +14,10 @@ from wuwa_auto.okww.confirmed_retry import (
 from wuwa_auto.okww.runner import (
     DAILY_WORKER_ENTRYPOINT,
     _build_task_command,
-    preflight_farm_echo_task,
     preflight_weekly_garden_task,
     run_farm_echo_task,
     run_weekly_garden_task,
 )
-
 
 FARM_ECHO_CONFIG = {
     "Teleport to Boss": "Boss Challenge",
@@ -68,11 +65,13 @@ class OkConfigurationTests(unittest.TestCase):
                 "utf-8"
             )
             path.write_bytes(original)
-            with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
-                with self.assertRaisesRegex(RuntimeError, "simulated retry failure"):
-                    with config.temporary_farm_echo_repeat_count(2):
-                        raise RuntimeError("simulated retry failure")
-                self.assertEqual(path.read_bytes(), original)
+            with (
+                patch.object(config, "OK_FARM_ECHO_CONFIG", path),
+                self.assertRaisesRegex(RuntimeError, "simulated retry failure"),
+                config.temporary_farm_echo_repeat_count(2),
+            ):
+                raise RuntimeError("simulated retry failure")
+            self.assertEqual(path.read_bytes(), original)
 
     def test_temporary_repeat_count_allows_bounded_combat_passes(self) -> None:
         from tempfile import TemporaryDirectory
@@ -103,6 +102,24 @@ class OkConfigurationTests(unittest.TestCase):
 
         load_json.assert_called_once_with(config.OK_GARDEN_CONFIG)
         self.assertEqual(facts, {"garden_config": {}})
+
+    def test_resolve_onetime_task_index_follows_installed_registry(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            working = Path(folder)
+            (working / "config.py").write_text(
+                "config = {'onetime_tasks': [\n"
+                " ['src.task.DailyTask', 'DailyTask'],\n"
+                " ['src.task.GardenTask', 'GardenTask'],\n"
+                "], 'trigger_tasks': []}\n",
+                encoding="utf-8",
+            )
+            with patch.object(config, "OK_WORKING_DIR", working):
+                self.assertEqual(
+                    config.resolve_onetime_task_index("GardenTask"),
+                    2,
+                )
 
     def test_daily_preflight_requires_host_ordered_farm_echo_policy(self) -> None:
         daily = {
@@ -179,6 +196,7 @@ class OkRunnerPreflightTests(unittest.TestCase):
             run_task.call_args.kwargs["preflight"],
             preflight_weekly_garden_task,
         )
+        self.assertIsNone(run_task.call_args.kwargs["task_index"])
 
 
 if __name__ == "__main__":

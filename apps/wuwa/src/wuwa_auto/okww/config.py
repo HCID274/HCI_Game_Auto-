@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from wuwa_auto.settings import (
     OK_DAILY_CONFIG,
@@ -47,7 +49,7 @@ def _load_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid OK-WW configuration {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise RuntimeError(f"OK-WW configuration must be an object: {path}")
+        raise TypeError(f"OK-WW configuration must be an object: {path}")
     return value
 
 
@@ -126,6 +128,48 @@ def validate_weekly_garden_configuration() -> dict[str, Any]:
     _validate_common_paths()
     garden = _load_json(OK_GARDEN_CONFIG)
     return {"garden_config": garden}
+
+
+def resolve_onetime_task_index(task_name: str) -> int:
+    """Resolve an OK-WW one-time task from the installed registry.
+
+    OK-WW has changed the order and membership of ``onetime_tasks`` across
+    releases.  The CLI's numeric ``-t`` argument is therefore not a stable
+    API; read the replaceable upstream config source and resolve the current
+    one-based index without importing or modifying that installation.
+    """
+
+    config_path = OK_WORKING_DIR / "config.py"
+    try:
+        source = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect OK-WW one-time task registry: {config_path}"
+        ) from exc
+    block_match = re.search(
+        r"['\"]onetime_tasks['\"]\s*:\s*\[(?P<body>.*?)\]\s*,\s*['\"]trigger_tasks['\"]",
+        source,
+        re.DOTALL,
+    )
+    if not block_match:
+        raise RuntimeError(
+            "OK-WW config has no parseable onetime_tasks registry; "
+            "refusing to guess a numeric task index"
+        )
+    names = [
+        match.group("name")
+        for match in re.finditer(
+            r"\[\s*['\"][^'\"]+['\"]\s*,\s*['\"](?P<name>[^'\"]+)['\"]\s*\]",
+            block_match.group("body"),
+        )
+    ]
+    try:
+        return names.index(task_name) + 1
+    except ValueError as exc:
+        raise RuntimeError(
+            f"OK-WW one-time task {task_name!r} is not registered; "
+            f"available={names!r}"
+        ) from exc
 
 
 def validate_daily_configuration() -> dict[str, Any]:

@@ -192,7 +192,7 @@ def run_farm_echo_realm_defeat_recovery(
     *,
     attempt: int,
 ) -> FarmEchoRecoveryResult:
-    """Restart a confirmed failed realm and verify that combat resumes."""
+    """Exit and heal; the next worker follows the historical fresh entry."""
     return _run_farm_echo_recovery(
         run_dir,
         attempt=attempt,
@@ -218,6 +218,7 @@ def _run_farm_echo_recovery(
     )
     before = desktop.save_step_screenshot(f"{evidence_prefix}_{attempt}_before")
     result_path = run_dir / f"farm-echo-recovery-{attempt}.json"
+    worker_log_path = run_dir / f"farm-echo-recovery-{attempt}.log"
     command = [
         str(OK_PYTHON_EXE),
         str(RECOVERY_WORKER),
@@ -241,7 +242,17 @@ def _run_farm_echo_recovery(
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             check=False,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        timeout_output = exc.stdout or ""
+        if isinstance(timeout_output, bytes):
+            timeout_output = timeout_output.decode("utf-8", errors="replace")
+        try:
+            worker_log_path.write_text(timeout_output, encoding="utf-8")
+        except OSError:
+            log.exception(
+                "could not persist timed-out FarmEcho recovery stdout: %s",
+                worker_log_path,
+            )
         evidence = desktop.save_step_screenshot(
             f"{evidence_prefix}_{attempt}_timeout"
         )
@@ -252,6 +263,11 @@ def _run_farm_echo_recovery(
             worker_result_path=str(result_path),
             realm_defeat=mode == "realm_defeat",
         )
+
+    try:
+        worker_log_path.write_text(completed.stdout or "", encoding="utf-8")
+    except OSError:
+        log.exception("could not persist FarmEcho recovery stdout: %s", worker_log_path)
 
     payload: dict[str, object] = {}
     if result_path.is_file():
@@ -278,12 +294,14 @@ def _run_farm_echo_recovery(
             or f"recovery worker exited with code {completed.returncode}"
         )
     log.info(
-        "FarmEcho death recovery attempt=%s success=%s reason=%s before=%s after=%s",
+        "FarmEcho death recovery attempt=%s success=%s reason=%s "
+        "before=%s after=%s worker_log=%s",
         attempt,
         success,
         reason,
         before,
         evidence,
+        worker_log_path,
     )
     return FarmEchoRecoveryResult(
         success=success,

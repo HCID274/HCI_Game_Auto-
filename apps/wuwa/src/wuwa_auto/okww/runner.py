@@ -19,16 +19,17 @@ from wuwa_auto.input.viiper import (
 )
 from wuwa_auto.okww.config import (
     EXPECTED_REPEAT_FARM_COUNT,
+    resolve_onetime_task_index,
     validate_daily_configuration,
     validate_farm_echo_configuration,
     validate_weekly_garden_configuration,
 )
-from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
 from wuwa_auto.okww.daily_activity import (
     parse_activity_marker,
     parse_activity_panel_marker,
 )
 from wuwa_auto.okww.daily_capabilities import compare_activity_panel
+from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
 from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
     OK_ENTRYPOINT,
@@ -179,7 +180,9 @@ def preflight_farm_echo_task(
 
 
 def preflight_weekly_garden_task() -> dict[str, object]:
-    return _preflight_task(validate_weekly_garden_configuration)
+    facts = _preflight_task(validate_weekly_garden_configuration)
+    facts["garden_task_index"] = resolve_onetime_task_index("GardenTask")
+    return facts
 
 
 def write_result(result: OkRunResult, run_dir: Path) -> None:
@@ -258,7 +261,7 @@ def _build_task_command(task_index: int, task_label: str) -> list[str]:
 
 def _run_task(
     *,
-    task_index: int,
+    task_index: int | None,
     task_label: str,
     success_marker: str,
     preflight: Callable[[], dict[str, object]],
@@ -267,6 +270,13 @@ def _run_task(
     require_admin()
     facts = preflight()
     facts["workflow_task"] = task_label
+    if task_index is None:
+        resolved_index = facts.get("garden_task_index")
+        if not isinstance(resolved_index, int) or resolved_index < 1:
+            raise RuntimeError(
+                f"{task_label} preflight did not provide a valid task index"
+            )
+        task_index = resolved_index
     started = datetime.now().astimezone()
     run_id = started.strftime("%Y%m%d_%H%M%S") + run_suffix
     run_dir = RUNS_DIR / run_id
@@ -439,7 +449,7 @@ def run_farm_echo_task(
 
 def run_weekly_garden_task() -> OkRunResult:
     return _run_task(
-        task_index=12,
+        task_index=None,
         task_label="weekly_garden",
         success_marker="Successfully Executed Task, Exiting Game and App!",
         preflight=preflight_weekly_garden_task,

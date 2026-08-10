@@ -9,6 +9,7 @@ actually attempted.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -17,6 +18,35 @@ _POINT_RE = re.compile(r"\+\s*(?P<points>\d{1,3})")
 _FRACTION_RE = re.compile(
     r"(?<!\d)(?P<current>\d{1,4})\s*/\s*(?P<target>\d{1,4})(?!\d)"
 )
+_TRACE_LINE_RE = re.compile(r"HOST_OKWW_DAILY_TRACE\s+(\{.*\})")
+
+
+def _latest_stamina_observation(log_text: str) -> dict[str, object] | None:
+    """Return the latest host-captured stamina tuple, if one was logged."""
+
+    latest: dict[str, object] | None = None
+    for line in log_text.splitlines():
+        match = _TRACE_LINE_RE.search(line)
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("event") != "stamina_end":
+            continue
+        values = {
+            key: payload.get(key)
+            for key in ("current_stamina", "back_up_stamina", "total_stamina")
+        }
+        if all(isinstance(value, (int, float)) for value in values.values()):
+            values["ocr_available"] = not all(
+                value == -1 for value in values.values()
+            )
+            latest = values
+        else:
+            latest = {"raw": payload}
+    return latest
 
 # The names are intentionally based on the visible Chinese UI labels rather
 # than internal OK-WW identifiers.  This keeps the parser useful across minor
@@ -162,6 +192,13 @@ def compare_activity_panel(
     """Return a deterministic capability comparison for one OCR panel."""
 
     assessments: list[ActivityTaskAssessment] = []
+    stamina_observation = _latest_stamina_observation(log_text)
+    stamina_trace_without_value = bool(
+        re.search(r"(?:used all stamina|current stamina:)", log_text, re.IGNORECASE)
+    ) and (
+        stamina_observation is None
+        or stamina_observation.get("ocr_available") is not True
+    )
     unknown_index = 0
     for points, raw_labels in _blocks(labels):
         text = "".join(raw_labels)
@@ -206,13 +243,30 @@ def compare_activity_panel(
         elif not supported:
             state = "unsupported"
             reason = str(rule["entry_point"])
+        elif str(rule["key"]) == "waveplate" and stamina_observation:
+            total_stamina = stamina_observation.get("total_stamina")
+            if stamina_observation.get("ocr_available") is False:
+                state = "attempted_not_completed"
+                reason = "体力 OCR 未识别（上游返回-1哨兵），不能判定为0"
+            elif isinstance(total_stamina, (int, float)) and total_stamina <= 0:
+                state = "unavailable"
+                reason = "体力 OCR 原值确认当前与备用体力合计为0，不能继续消耗"
+            elif isinstance(total_stamina, (int, float)) and total_stamina < 60:
+                state = "unavailable"
+                reason = (
+                    "体力 OCR 原值确认当前与备用体力合计为 "
+                    f"{int(total_stamina)}，不足一场60体力副本"
+                )
+            else:
+                state = "attempted_not_completed"
+                reason = "上游入口已执行，但本轮面板仍未达到目标"
         elif str(rule["key"]) == "waveplate" and re.search(
             r"(?:current_stamina\s+0|current stamina:\s*0|used all stamina)",
             log_text,
             re.IGNORECASE,
         ):
-            state = "unavailable"
-            reason = "本次日志显示可用结晶波片为0，不能无授权消耗备用资源"
+            state = "attempted_not_completed"
+            reason = "上游报告 used all stamina，但本轮未记录可验证的体力 OCR 原值"
         elif action_seen:
             state = "attempted_not_completed"
             reason = "上游入口已执行，但面板仍未达到目标"
@@ -260,7 +314,7 @@ def compare_activity_panel(
     # route?” rather than claiming that a route actually succeeded.
     optimistic_points = current_points + supported_pending
     reachable_now_points = optimistic_points - unavailable_pending
-    has_unknown_pending = unknown_pending > 0
+    has_unknown_pending = unknown_pending > 0 or stamina_trace_without_value
     return {
         "tasks": [item.to_dict() for item in assessments],
         "current_points_from_tasks": current_points,
@@ -285,6 +339,8 @@ def compare_activity_panel(
             for item in assessments
             if not item.completed and item.capability == "unknown"
         ],
+        "stamina_observation": stamina_observation,
+        "stamina_observation_unverified": stamina_trace_without_value,
     }
 
 

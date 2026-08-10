@@ -12,6 +12,7 @@ from game_automation_core.reporting.agent import diagnostic_lines, redact_sensit
 from game_automation_core.reporting.archive import write_json_archive
 
 from wuwa_auto.integrations.feishu import build_report_card, send_report_card
+from wuwa_auto.reporting.day_rollup import build_daily_rollup
 from wuwa_auto.reporting.models import NarrativeReport, RunFacts
 from wuwa_auto.reporting.parser import parse_run
 from wuwa_auto.reporting.summarizer import summarize_report
@@ -54,6 +55,13 @@ def _should_show_agent_diagnostics(
     )
 
 
+def _archive_stem(result: Any, facts: RunFacts) -> str:
+    sources = str(facts.evidence.get("source", "")).split(",")
+    if len([source for source in sources if source.strip()]) > 1:
+        return f"{result.run_id}_daily_rollup"
+    return str(result.run_id)
+
+
 def report_run(
     result: Any,
     cleanup: Any | None = None,
@@ -61,6 +69,7 @@ def report_run(
     allow_send: bool = True,
 ) -> Path:
     facts = parse_run(result, cleanup)
+    facts = build_daily_rollup(result, cleanup, facts)
     narrative, ai_used = summarize_report(facts)
     narrative = _redact_narrative(narrative)
     title, template = _title(facts.overall_status, result.finished_at)
@@ -79,7 +88,7 @@ def report_run(
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     suffix = ".json" if allow_send else ".preview.json"
-    path = REPORTS_DIR / f"{result.run_id}{suffix}"
+    path = REPORTS_DIR / f"{_archive_stem(result, facts)}{suffix}"
     write_json_archive(
         path,
         {

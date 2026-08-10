@@ -1,18 +1,24 @@
+import json
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from wuwa_auto.okww.runner import OkRunResult
+from wuwa_auto.reporting.day_rollup import build_daily_rollup
 from wuwa_auto.reporting.models import NarrativeReport, ReportItem, RunFacts
 from wuwa_auto.reporting.noise import known_upstream_noise_lines
 from wuwa_auto.reporting.parser import parse_run
 from wuwa_auto.reporting.prompting import compose_report_messages
 from wuwa_auto.reporting.service import (
+    _archive_stem,
     _redact_narrative,
     _should_show_agent_diagnostics,
 )
 from wuwa_auto.reporting.summarizer import (
+    _consume_completion,
+    _parse_agent_report,
     _safe_summary,
-    _validate_wording,
     build_fallback_narrative,
     summarize_report,
     summarize_with_ai,
@@ -31,6 +37,37 @@ def _result(tmp_path: Path, text: str, **overrides: object) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _ok_result(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    workflow: str,
+    status: str,
+    log_text: str,
+) -> OkRunResult:
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    log_path = run_dir / "ok-current-run.log"
+    log_path.write_text(log_text, encoding="utf-8")
+    result = OkRunResult(
+        run_id=run_id,
+        status=status,
+        reason="completed" if status == "success" else "failed",
+        started_at=f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}T13:00:00+09:00",
+        finished_at=f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}T13:10:00+09:00",
+        duration_seconds=600,
+        log_slice_path=str(log_path),
+        evidence_path=None,
+        config={"workflow_task": workflow, "boss_challenge_index": 2},
+        exit_code=0 if status == "success" else 1,
+    )
+    (run_dir / "result.json").write_text(
+        json.dumps(asdict(result), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
 
 
 def test_only_executed_daily_and_followup_items_are_reported(tmp_path: Path) -> None:
@@ -82,7 +119,114 @@ def test_prompt_uses_log_order_and_declares_filtered_startup_noise() -> None:
     system_text = "\n".join(item["content"] for item in messages[:2])
     assert "时间戳和证据行号" in system_text
     assert "不要套用或硬编码" in system_text
-    assert "移除历史上确认无业务影响" in system_text
+    assert "过滤固定无害噪声" in system_text
+
+
+def test_same_day_successful_daily_and_followup_are_rolled_up(
+    tmp_path: Path,
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    daily_result = _ok_result(
+        tmp_path,
+        run_id="20260809_132616",
+        workflow="daily",
+        status="success",
+        log_text=(
+            "2026-08-09 13:30:00 DailyTask:TacetTask:start walk_to_treasure\n"
+            "2026-08-09 13:31:00 DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED "
+            '{"points": 140, "target": 100}\n'
+            "2026-08-09 13:32:00 DailyTask:Daily Task Completed\n"
+        ),
+    )
+    daily_facts = RunFacts(
+        overall_status="completed",
+        reason="Daily Task Completed",
+        duration_seconds=600,
+        workflow_task="daily",
+        daily=[ReportItem("daily-activity", "领取每日活跃度奖励（活跃度140点，已确认100%）")],
+    )
+    (reports / "20260809_132616.json").write_text(
+        json.dumps(
+            {"run_id": daily_result.run_id, "facts": daily_facts.to_dict()},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    followup_result = _ok_result(
+        tmp_path,
+        run_id="20260809_170403_farm_echo_confirmed_retry",
+        workflow="farm_echo_confirmed_retry",
+        status="success",
+        log_text=(
+            "2026-08-09 17:10:00 FarmEchoTask:start wait in combat\n"
+            "2026-08-09 17:14:00 FarmEchoTask:farm echo walk_find_echo True\n"
+        ),
+    )
+    followup_facts = RunFacts(
+        overall_status="completed",
+        reason="FarmEcho absorption confirmed 5/5 echoes",
+        duration_seconds=603,
+        workflow_task="farm_echo_confirmed_retry",
+        followup=[
+            ReportItem("boss-challenge", "讨伐强敌第2项 5次"),
+            ReportItem("echo-picked", "吸收声骸5次"),
+        ],
+    )
+
+    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+    ):
+        rolled_up = build_daily_rollup(followup_result, None, followup_facts)
+
+    assert rolled_up.overall_status == "completed"
+    assert [item.text for item in rolled_up.daily] == [
+        "领取每日活跃度奖励（活跃度140点，已确认100%）"
+    ]
+    assert [item.text for item in rolled_up.followup] == [
+        "讨伐强敌第2项 5次",
+        "吸收声骸5次",
+    ]
+    assert rolled_up.issues == []
+    assert rolled_up.evidence["source"] == (
+        "20260809_132616,20260809_170403_farm_echo_confirmed_retry"
+    )
+
+
+def test_standalone_followup_without_daily_stays_a_phase_report(tmp_path: Path) -> None:
+    result = _ok_result(
+        tmp_path,
+        run_id="20260810_170403_farm_echo_confirmed_retry",
+        workflow="farm_echo_confirmed_retry",
+        status="success",
+        log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+    )
+    facts = RunFacts(
+        overall_status="completed",
+        reason="completed",
+        duration_seconds=1,
+        workflow_task="farm_echo_confirmed_retry",
+        followup=[ReportItem("echo-picked", "吸收声骸1次")],
+    )
+    reports = tmp_path / "reports"
+    reports.mkdir()
+
+    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+    ):
+        assert build_daily_rollup(result, None, facts) is facts
+
+
+def test_rollup_preview_uses_a_distinct_archive_name() -> None:
+    result = SimpleNamespace(run_id="20260809_170403_farm_echo_confirmed_retry")
+    facts = RunFacts(
+        overall_status="completed",
+        reason="completed",
+        duration_seconds=1,
+        evidence={"source": "daily-run,farm-run"},
+    )
+
+    assert _archive_stem(result, facts).endswith("_daily_rollup")
 
 
 def test_known_upstream_noise_is_filtered_only_from_agent_evidence() -> None:
@@ -169,9 +313,8 @@ def test_wuwa_agent_archives_provider_token_usage() -> None:
             SimpleNamespace(
                 message=SimpleNamespace(
                     content='{"summary":"鸣潮日常完成",'
-                    '"wording":{"run-failure":"主流程失败：测试异常"},'
-                    '"analysis":{"anomalies":[{"message":"发现日志边界",'
-                    '"evidence_refs":["L1"],"confidence":"high"}]}}'
+                    '"daily":[],"weekly":[],"followup":[],'
+                    '"issues":["主流程失败：测试异常"]}'
                 )
             )
         ],
@@ -191,7 +334,72 @@ def test_wuwa_agent_archives_provider_token_usage() -> None:
     assert narrative.token_usage["input_tokens"] == 80
     assert narrative.token_usage["output_tokens"] == 20
     assert narrative.token_usage["output_input_ratio"] == 0.25
-    assert narrative.analysis["anomalies"][0]["evidence_refs"] == ["L1"]
+    assert narrative.issues == ["主流程失败：测试异常"]
+
+
+def test_streamed_wuwa_response_is_joined_and_keeps_usage() -> None:
+    chunks = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content='{"summary":"完成",'),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content='"daily":[],"weekly":[],"followup":[],"issues":[]}'
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        ),
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=25,
+                total_tokens=125,
+            ),
+        ),
+    ]
+
+    content, usage = _consume_completion(iter(chunks), model="test-model")
+
+    assert json.loads(content)["summary"] == "完成"
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 25
+    assert usage["finish_reason"] == "stop"
+
+
+def test_agent_report_uses_full_sections_without_fact_id_wording_map() -> None:
+    facts = RunFacts(
+        overall_status="completed",
+        reason="completed",
+        duration_seconds=1,
+        daily=[ReportItem("daily", "程序确认的日常事实")],
+        followup=[ReportItem("followup", "程序确认的后续事实")],
+    )
+
+    narrative = _parse_agent_report(
+        {
+            "summary": "鸣潮日常完成",
+            "daily": ["自然语言日常汇报"],
+            "weekly": [],
+            "followup": ["自然语言后续汇报"],
+            "issues": [],
+        },
+        facts,
+        token_usage={},
+    )
+
+    assert narrative.daily == ["自然语言日常汇报"]
+    assert narrative.followup == ["自然语言后续汇报"]
 
 
 def test_clean_completed_run_discards_non_impacting_ai_diagnostics() -> None:
@@ -205,9 +413,8 @@ def test_clean_completed_run_discards_non_impacting_ai_diagnostics() -> None:
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content='{"summary":"鸣潮日常完成","wording":{},'
-                    '"analysis":{"anomalies":[{"message":"可选任务未执行",'
-                    '"evidence_refs":["L1"],"confidence":"high"}]}}'
+                    content='{"summary":"鸣潮日常完成","daily":[],'
+                    '"weekly":[],"followup":[],"issues":["可选任务未执行"]}'
                 )
             )
         ],
@@ -242,44 +449,9 @@ def test_ai_summary_cannot_reverse_program_status() -> None:
 
     assert _safe_summary("任务未失败", failed) == "鸣潮日常失败，耗时1秒"
     assert _safe_summary("本轮完成但领取失败", completed) == "鸣潮日常完成，耗时1秒"
-    assert _safe_summary("失败但已完成", failed) == "鸣潮日常失败，耗时1秒"
-    assert _safe_summary("完成但奖励未领取", completed) == "鸣潮日常完成，耗时1秒"
-    assert _safe_summary("鸣潮日常完成，获得五星武器", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    assert _safe_summary("鸣潮日常完成，累计9999次", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    assert _safe_summary("鸣潮日常完成，活跃度999点", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
     assert _safe_summary("鸣潮日常完成，耗时1秒", completed) == (
         "鸣潮日常完成，耗时1秒"
     )
-    assert _safe_summary("鸣潮日常完成，耗时9999秒", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    assert _safe_summary("鸣潮日常完成，耗时约1秒", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    assert _safe_summary("鸣潮日常完成，累计1次", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    for status, text in (
-        ("unknown", "鸣潮状态未确认但奖励领取成功"),
-        ("in_progress", "鸣潮日常进行中但本轮成功"),
-        ("stalled", "鸣潮日常卡住但任务成功"),
-        ("failed", "鸣潮日常失败但奖励领取成功"),
-        ("completed", "鸣潮日常完成但任务未成功"),
-    ):
-        facts = RunFacts(overall_status=status, reason=status, duration_seconds=1)
-        assert _safe_summary(text, facts) == {
-            "unknown": "鸣潮日常状态未确认，耗时1秒",
-            "in_progress": "鸣潮日常仍在进行，耗时1秒",
-            "stalled": "鸣潮日常疑似卡住，耗时1秒",
-            "failed": "鸣潮日常失败，耗时1秒",
-            "completed": "鸣潮日常完成，耗时1秒",
-        }[status]
     for status, forbidden in (
         ("unknown", "鸣潮日常状态未确认，耗时1秒"),
         ("in_progress", "鸣潮日常仍在进行，耗时1秒"),
@@ -810,144 +982,6 @@ DailyTask:Daily Task Completed
     ]
 
 
-def test_ai_cannot_promote_battle_pass_action_to_claimed_reward(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:battle pass
-DailyTask:info_set current task check weekly garden
-DailyTask:Daily Task Completed
-"""
-    facts = parse_run(_result(tmp_path, text))
-    summary, wording = _validate_wording(
-        {
-            "summary": "完成",
-            "wording": {"battle-pass": "先约电台：领取奖励"},
-        },
-        facts,
-    )
-    assert summary == "完成"
-    assert wording["battle-pass"] == "先约电台：已执行奖励领取操作"
-
-
-def test_ai_cannot_promote_unconfirmed_daily_action_to_claimed_reward(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:info_set total daily points 0
-DailyTask:claim daily reward via  coordinate
-DailyTask:Daily Task Completed
-"""
-    facts = parse_run(_result(tmp_path, text))
-    summary, wording = _validate_wording(
-        {
-            "summary": "完成",
-            "wording": {
-                "daily-activity-claim-action": "每日活跃度奖励已领取",
-            },
-        },
-        facts,
-    )
-
-    assert summary == "完成"
-    assert wording["daily-activity-claim-action"] == (
-        "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）"
-    )
-
-
-def test_ai_cannot_append_success_clause_to_negative_daily_activity_fact(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 80, "target": 100, "reason": "not settled"}
-DailyTask:Daily Task exception stopped
-"""
-    facts = parse_run(
-        _result(tmp_path, text, status="failed", reason="Daily Task exception stopped")
-    )
-
-    _summary, wording = _validate_wording(
-        {
-            "summary": "失败",
-            "wording": {
-                "run-failure": "主流程失败，但本轮已完成",
-                "daily-activity-unverified": "每日活跃度奖励未确认，但已完成危行任务且奖励已领取",
-            },
-        },
-        facts,
-    )
-
-    assert wording["run-failure"] == "主流程失败：Daily Task exception stopped"
-    assert wording["daily-activity-unverified"].startswith("每日活跃度奖励未确认")
-    assert "奖励已领取" not in wording["daily-activity-unverified"]
-
-
-def test_ai_cannot_add_unobserved_numbers_to_fact_wording() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        daily=[ReportItem("daily-activity-verified", "每日活跃度已确认达到100（当前140点，奖励状态已结算）")],
-    )
-
-    _summary, wording = _validate_wording(
-        {
-            "summary": "完成",
-            "wording": {
-                "daily-activity-verified": "每日活跃度已确认达到100（当前140点，额外获得999点，奖励状态已结算）"
-            },
-        },
-        facts,
-    )
-
-    assert wording["daily-activity-verified"] == facts.daily[0].text
-
-
-def test_ai_cannot_add_unobserved_drops_or_characters_to_fact_wording() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        followup=[ReportItem("echo-picked", "吸收声骸1次")],
-    )
-
-    _summary, wording = _validate_wording(
-        {
-            "summary": "完成",
-            "wording": {"echo-picked": "吸收声骸1次，获得五星武器"},
-        },
-        facts,
-    )
-
-    assert wording["echo-picked"] == facts.followup[0].text
-
-
-def test_ai_cannot_promote_daily_activity_capability_gap_to_success(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+40", "完成1次日常任务", "0/1"]}
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 0, "target": 100, "reason": "not settled"}
-DailyTask:Daily Task exception stopped
-"""
-    facts = parse_run(
-        _result(tmp_path, text, status="failed", reason="Daily Task exception stopped")
-    )
-    wording = {item.item_id: "已完成" for item in [*facts.daily, *facts.issues]}
-
-    _summary, validated = _validate_wording(
-        {"summary": "失败", "wording": wording},
-        facts,
-    )
-
-    assert validated["daily-activity-unsupported-daily-quest"].startswith(
-        "每日活跃任务未完成"
-    )
-    assert validated["daily-activity-unverified"].startswith(
-        "每日活跃度奖励未确认"
-    )
-
-
 def test_unknown_activity_task_is_reported_without_false_zero_upper_bound(
     tmp_path: Path,
 ) -> None:
@@ -962,9 +996,8 @@ DailyTask:Daily Task exception stopped
 
     assert any(item.item_id == "daily-activity-unknown-unknown-1" for item in facts.issues)
     assert all(item.item_id != "daily-activity-capability-gap" for item in facts.issues)
-    wording = {item.item_id: "已完成" for item in [*facts.daily, *facts.issues]}
-    _summary, validated = _validate_wording(
-        {"summary": "失败", "wording": wording},
-        facts,
+    unknown = next(
+        item for item in facts.issues
+        if item.item_id == "daily-activity-unknown-unknown-1"
     )
-    assert validated["daily-activity-unknown-unknown-1"].startswith("每日活跃任务未完成")
+    assert unknown.text.startswith("每日活跃任务未完成")

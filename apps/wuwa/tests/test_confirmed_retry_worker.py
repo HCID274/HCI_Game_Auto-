@@ -1,218 +1,104 @@
-import json
-from unittest.mock import Mock, patch
+import ast
+import inspect
+import textwrap
+from types import SimpleNamespace
 
-from wuwa_auto.okww.confirmed_retry_worker import (
-    ACTIVE_REALM_RESUMED_MARKER,
-    BOSS_PAGE_CONFIRMED_MARKER,
-    BOSS_PAGE_RESELECTED_MARKER,
-    HID_BUTTON_MARKER,
-    _consume_active_realm_resume,
-    _initialize_active_realm_resume,
-    _open_verified_boss_book,
-    _virtual_hid_button,
-    _virtual_hid_click,
-)
+import pytest
+from wuwa_auto.okww import confirmed_retry_worker
 
 
-def test_active_realm_resume_contract_is_stable() -> None:
-    assert ACTIVE_REALM_RESUMED_MARKER == "HOST_FARM_ECHO_ACTIVE_REALM_RESUMED"
-
-
-def test_active_realm_resume_is_consumed_once() -> None:
-    task = Mock(_host_resume_active_realm=True)
-
-    assert _consume_active_realm_resume(task) is True
-    assert task._host_resume_active_realm is False
-    assert _consume_active_realm_resume(task) is False
-    task.log_info.assert_called_once_with(ACTIVE_REALM_RESUMED_MARKER)
-
-
-def test_active_realm_resume_preserves_upstream_first_poll_guard() -> None:
-    task = Mock(_just_entered_boss_realm=False)
-
-    _initialize_active_realm_resume(task, True)
-
-    assert task._host_resume_active_realm is True
-    assert task._just_entered_boss_realm is True
-
-
-def test_disabled_active_realm_resume_does_not_change_first_poll_guard() -> None:
-    task = Mock(_just_entered_boss_realm=False)
-
-    _initialize_active_realm_resume(task, False)
-
-    assert task._host_resume_active_realm is False
-    assert task._just_entered_boss_realm is False
-
-
-class FakeTask:
-    def __init__(self) -> None:
-        self.visible_checks = iter([False, True])
-        self.logs: list[str] = []
-        self.category = object()
-        self.category_clicks = 0
-
-    def wait_ocr(self, **_: object) -> object:
-        return object() if next(self.visible_checks) else None
-
-    def find_one(self, *_: object, **__: object) -> object:
-        return self.category
-
-    def click_box(self, category: object, **_: object) -> None:
-        assert category is self.category
-        self.category_clicks += 1
-
-    def log_info(self, message: str) -> None:
-        self.logs.append(message)
-
-
-def test_boss_page_is_reselected_and_verified_before_target_click() -> None:
-    task = FakeTask()
-    opens: list[tuple[str, float]] = []
-
-    def upstream_open(name: str, *, after_sleep: float) -> None:
-        opens.append((name, after_sleep))
-
-    _open_verified_boss_book(
-        task,
-        upstream_open,
-        "qiangdi",
-        after_sleep=2,
+def _farm_echo_method_names() -> set[str]:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(confirmed_retry_worker.main)))
+    task_class = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "FarmEchoTask"
     )
-
-    assert opens == [("qiangdi", 2), ("qiangdi", 2)]
-    assert task.category_clicks == 1
-    assert task.logs == [
-        BOSS_PAGE_RESELECTED_MARKER,
-        BOSS_PAGE_CONFIRMED_MARKER,
-    ]
-
-
-def test_other_book_sections_keep_upstream_behavior() -> None:
-    task = FakeTask()
-    opens: list[tuple[str, float]] = []
-
-    def upstream_open(name: str, *, after_sleep: float) -> None:
-        opens.append((name, after_sleep))
-
-    _open_verified_boss_book(
-        task,
-        upstream_open,
-        "wuyin",
-        after_sleep=1.5,
-    )
-
-    assert opens == [("wuyin", 1.5)]
-    assert task.category_clicks == 0
-
-
-def test_virtual_hid_click_uses_parent_control(monkeypatch) -> None:
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
-    client = Mock()
-    client.__enter__ = Mock(return_value=client)
-    client.__exit__ = Mock(return_value=None)
-    client.recv.side_effect = [b'{"ok": true}\n']
-    with patch(
-        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
-        return_value=client,
-    ) as connect:
-        _virtual_hid_click(101, 428, hold=0.2)
-
-    connect.assert_called_once_with(("127.0.0.1", 43123), timeout=8)
-    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
-    assert sent == {
-        "token": "secret",
-        "action": "click",
-        "x": 101,
-        "y": 428,
-        "button": "left",
-        "hold": 0.2,
-        "log_action": True,
+    return {
+        node.name
+        for node in task_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
 
-def test_virtual_hid_click_accepts_small_accelerated_cursor_miss(monkeypatch) -> None:
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+def test_confirmed_worker_never_overrides_upstream_combat_or_input() -> None:
+    methods = _farm_echo_method_names()
 
-    def client_with(response: bytes) -> Mock:
-        client = Mock()
-        client.__enter__ = Mock(return_value=client)
-        client.__exit__ = Mock(return_value=None)
-        client.recv.side_effect = [response]
-        return client
-
-    first = client_with(
-        b'{"ok": false, "error": "virtual mouse could not reach '
-        b'(614, 705); cursor=(611, 706)"}\n'
+    assert methods.isdisjoint(
+        {
+            "click",
+            "mouse_down",
+            "mouse_up",
+            "combat_once",
+            "in_realm",
+            "teleport_to_boss_enabled",
+            "open_boss_book",
+        }
     )
-    second = client_with(b'{"ok": true}\n')
-    with patch(
-        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
-        side_effect=[first, second],
-    ):
-        _virtual_hid_click(614, 705)
-
-    retry = json.loads(second.sendall.call_args.args[0].decode("utf-8"))
-    assert (retry["x"], retry["y"]) == (611, 706)
 
 
-def test_virtual_hid_click_forwards_middle_button(monkeypatch) -> None:
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
-    client = Mock()
-    client.__enter__ = Mock(return_value=client)
-    client.__exit__ = Mock(return_value=None)
-    client.recv.side_effect = [b'{"ok": true}\n']
-    with patch(
-        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
-        return_value=client,
-    ):
-        _virtual_hid_click(1280, 720, button="middle")
+def test_confirmed_worker_keeps_only_host_accounting_and_death_boundary() -> None:
+    methods = _farm_echo_method_names()
 
-    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
-    assert sent["button"] == "middle"
-
-
-def test_virtual_hid_button_forwards_press_and_release(monkeypatch) -> None:
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
-    client = Mock()
-    client.__enter__ = Mock(return_value=client)
-    client.__exit__ = Mock(return_value=None)
-    client.recv.side_effect = [b'{"ok": true}\n']
-    with patch(
-        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
-        return_value=client,
-    ):
-        _virtual_hid_button(1280, 720, button="right", pressed=True)
-
-    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
-    assert sent == {
-        "token": "secret",
-        "action": "button",
-        "button": "right",
-        "pressed": True,
-        "x": 1280,
-        "y": 720,
+    assert methods == {
+        "__init__",
+        "manage_boss_interactions",
+        "teleport_to_configured_boss_and_prepare",
+        "host_record_absorption",
+        "incr_drop",
+        "run",
     }
-    assert HID_BUTTON_MARKER.startswith("HOST_FARM_ECHO_VIRTUAL_HID_BUTTON")
 
 
-def test_virtual_hid_button_without_coordinates_keeps_current_cursor(monkeypatch) -> None:
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
-    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
-    client = Mock()
-    client.__enter__ = Mock(return_value=client)
-    client.__exit__ = Mock(return_value=None)
-    client.recv.side_effect = [b'{"ok": true}\n']
-    with patch(
-        "wuwa_auto.okww.confirmed_retry_worker.socket.create_connection",
-        return_value=client,
-    ):
-        _virtual_hid_button(-1, -1, button="left", pressed=True)
+def test_virtual_hid_is_scoped_to_entry_and_restores_upstream_methods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clicks: list[tuple[int, int]] = []
+    upstream: list[str] = []
 
-    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
-    assert "x" not in sent
-    assert "y" not in sent
+    class Task:
+        width = 2560
+        height = 1440
+
+        def __init__(self) -> None:
+            self.executor = SimpleNamespace(
+                interaction=SimpleNamespace(
+                    capture=SimpleNamespace(
+                        get_abs_cords=lambda x, y: (x, y),
+                    )
+                ),
+                reset_scene=lambda: None,
+            )
+
+        def check_interval(self, _interval: float) -> bool:
+            return True
+
+        def click(self, *_args: object, **_kwargs: object) -> str:
+            upstream.append("click")
+            return "upstream"
+
+        def open_boss_book(self, *_args: object, **_kwargs: object) -> None:
+            upstream.append("open")
+
+        def log_info(self, _message: str) -> None:
+            pass
+
+        def sleep(self, _seconds: float) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "wuwa_auto.okww.virtual_hid.virtual_hid_click",
+        lambda x, y, **_kwargs: clicks.append((x, y)),
+    )
+    task = Task()
+    original_click = task.click
+    original_open = task.open_boss_book
+
+    with confirmed_retry_worker._scoped_entry_navigation_hid(task):
+        assert task.click(101, 428, name="gray_book_boss") is True
+        assert task.click(1280, 720, name=None) == "upstream"
+
+    assert clicks == [(101, 428)]
+    assert task.click.__func__ is original_click.__func__
+    assert task.open_boss_book.__func__ is original_open.__func__
+    assert task.click(2431, 771, name="boss_proceed") == "upstream"

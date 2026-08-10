@@ -37,8 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, str(working_dir))
 
     from ok import run_task
-    from src.task.DomainTask import DomainTask
     from src.task.DailyTask import DailyTask
+    from src.task.DomainTask import DomainTask
     from src.task.FarmEchoTask import FarmEchoTask
     from src.task.NightmareNestTask import NightmareNestTask
     from src.task.WWOneTimeTask import WWOneTimeTask
@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         "revive_action",
         "ensure_main",
         "in_team_and_world",
+        "wait_in_team_and_world",
+        "revive_at_tower_and_heal",
         "wait_click_feature",
     )
     _require(

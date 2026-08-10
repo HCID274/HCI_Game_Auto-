@@ -2,50 +2,162 @@ from unittest.mock import Mock, patch
 
 import pytest
 from wuwa_auto.okww.recovery_worker import (
-    IN_PLACE_REVIVAL_COMPLETED_MARKER,
-    REALM_DEFEAT_RETRY_COMPLETED_MARKER,
+    REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
     RECOVERY_COMPLETED_MARKER,
+    REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER,
+    VirtualHidRecoveryMixin,
     _active_challenge_visible,
+    _heal_after_realm_defeat,
     _recover_detected_death_state,
+    _recovery_result_payload,
     _require_recovery_completion,
-    _retry_realm_defeat,
 )
+
+
+class _OcrBox:
+    def __init__(self, x: int, y: int, width: int, height: int) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+    def center(self) -> tuple[int, int]:
+        return self.x + self.width // 2, self.y + self.height // 2
+
+
+def test_relative_recovery_click_is_converted_then_sent_through_hid() -> None:
+    class Capture:
+        @staticmethod
+        def get_abs_cords(x: int, y: int) -> tuple[int, int]:
+            return x + 10, y + 20
+
+    class BaseTask:
+        width = 2560
+        height = 1440
+
+        def __init__(self) -> None:
+            self.executor = Mock()
+            self.executor.interaction.capture = Capture()
+            self.post_message_calls: list[tuple[object, object]] = []
+
+        def check_interval(self, _interval: float) -> bool:
+            return True
+
+        def click_relative(self, x: float, y: float, **kwargs: object) -> object:
+            return self.click(int(self.width * x), int(self.height * y), **kwargs)
+
+        def click(self, x: object, y: object, **_kwargs: object) -> object:
+            self.post_message_calls.append((x, y))
+            return False
+
+        def log_info(self, _message: str) -> None:
+            return None
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+    class Task(VirtualHidRecoveryMixin, BaseTask):
+        pass
+
+    task = Task()
+    with patch(
+        "wuwa_auto.okww.recovery_worker._virtual_hid_click"
+    ) as hid_click:
+        result = task.click(0.50, 0.50, name="relative")
+
+    assert result is True
+    hid_click.assert_called_once_with(
+        1290,
+        740,
+        button="left",
+        hold=0.08,
+        log_action=True,
+    )
+    assert task.post_message_calls == []
+
+
+def test_recovery_detect_action_uses_ocr_center_instead_of_stale_point() -> None:
+    class Capture:
+        @staticmethod
+        def get_abs_cords(x: int, y: int) -> tuple[int, int]:
+            return x + 10, y + 20
+
+    class BaseTask:
+        width = 2560
+        height = 1440
+
+        def __init__(self) -> None:
+            self.executor = Mock()
+            self.executor.interaction.capture = Capture()
+            self.messages: list[str] = []
+
+        def wait_ocr(self, *_args: object, **_kwargs: object) -> list[_OcrBox]:
+            return [_OcrBox(2000, 1230, 300, 80)]
+
+        def check_interval(self, _interval: float) -> bool:
+            return True
+
+        def click_relative(self, x: float, y: float, **kwargs: object) -> object:
+            return self.click(int(self.width * x), int(self.height * y), **kwargs)
+
+        def click(self, _x: object, _y: object, **_kwargs: object) -> object:
+            raise AssertionError("recovery click must not use PostMessage")
+
+        def log_info(self, message: str) -> None:
+            self.messages.append(message)
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+    class Task(VirtualHidRecoveryMixin, BaseTask):
+        pass
+
+    task = Task()
+    with patch(
+        "wuwa_auto.okww.recovery_worker._virtual_hid_click"
+    ) as hid_click:
+        result = task.click(0.89, 0.92, after_sleep=1)
+
+    assert result is True
+    hid_click.assert_called_once_with(
+        2160,
+        1290,
+        button="left",
+        hold=0.08,
+        log_action=True,
+    )
+    assert any("DETECT_ACTION_OCR 2150,1270" in message for message in task.messages)
 
 
 def test_visible_realm_defeat_overrides_normal_death_log_classification() -> None:
     task = Mock()
-    task.wait_until.return_value = True
-    task.wait_click_feature.return_value = True
+    task.wait_in_team_and_world.return_value = True
     with patch(
         "wuwa_auto.okww.recovery_worker.realm_defeat_visible",
         return_value=True,
     ), patch(
-        "wuwa_auto.okww.recovery_worker.click_realm_defeat_retry"
-    ) as click_retry:
+        "wuwa_auto.okww.recovery_worker.click_realm_defeat_exit"
+    ) as click_exit:
         marker = _recover_detected_death_state(task)
 
-    assert marker == REALM_DEFEAT_RETRY_COMPLETED_MARKER
-    click_retry.assert_called_once_with(task)
-    task.wait_click_skip_dialog_confirm.assert_called_once_with()
-    task.revive_at_tower_and_heal.assert_not_called()
-    task.log_info.assert_called_once_with(REALM_DEFEAT_RETRY_COMPLETED_MARKER)
+    assert marker == REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+    click_exit.assert_called_once_with(task)
+    task.revive_at_tower_and_heal.assert_called_once_with()
+    task.log_info.assert_called_once_with(REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER)
 
 
-def test_visible_character_revive_dialog_resumes_the_same_fight() -> None:
+def test_visible_character_revive_dialog_uses_waypoint_healing() -> None:
     task = Mock()
     task.wait_feature.return_value = object()
-    task.wait_until.return_value = True
+    task.revive_action.return_value = True
     with patch(
         "wuwa_auto.okww.recovery_worker.realm_defeat_visible",
         return_value=False,
-    ), patch(
-        "wuwa_auto.okww.recovery_worker.click_revive_confirm"
-    ) as click_confirm:
+    ):
         marker = _recover_detected_death_state(task)
 
-    assert marker == IN_PLACE_REVIVAL_COMPLETED_MARKER
-    click_confirm.assert_called_once_with(task)
-    task.revive_action.assert_not_called()
+    assert marker == REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER
+    task.revive_action.assert_called_once_with()
 
 
 def test_realm_ui_without_combat_is_not_an_active_challenge() -> None:
@@ -71,15 +183,33 @@ def test_recovery_requires_host_completion_latch() -> None:
         _require_recovery_completion(None)
 
 
-def test_explicit_realm_defeat_mode_uses_same_retry_state_machine() -> None:
-    task = Mock()
-    task.wait_click_feature.return_value = False
-    task.wait_until.return_value = True
-    with patch(
-        "wuwa_auto.okww.recovery_worker.click_realm_defeat_retry"
-    ) as click_retry:
-        marker = _retry_realm_defeat(task)
+def test_success_result_always_reenters_from_configured_entry() -> None:
+    payload = _recovery_result_payload(
+        REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
+        started_at="start",
+        finished_at="finish",
+    )
 
-    assert marker == REALM_DEFEAT_RETRY_COMPLETED_MARKER
-    click_retry.assert_called_once_with(task)
-    task.revive_at_tower_and_heal.assert_not_called()
+    assert payload["success"] is True
+    assert payload["resume_active_realm"] is False
+    assert payload["reason"] == REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+
+
+def test_realm_defeat_exits_and_heals_before_next_entry() -> None:
+    task = Mock()
+    task.wait_in_team_and_world.return_value = True
+    sequence: list[str] = []
+    task.wait_in_team_and_world.side_effect = lambda **_kwargs: sequence.append(
+        "wait"
+    ) or True
+    task.revive_at_tower_and_heal.side_effect = lambda: sequence.append("heal")
+    with patch(
+        "wuwa_auto.okww.recovery_worker.click_realm_defeat_exit",
+        side_effect=lambda _task: sequence.append("exit"),
+    ) as click_exit:
+        marker = _heal_after_realm_defeat(task)
+
+    assert marker == REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+    click_exit.assert_called_once_with(task)
+    task.revive_at_tower_and_heal.assert_called_once_with()
+    assert sequence == ["exit", "wait", "heal", "wait"]

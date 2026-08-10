@@ -1,20 +1,22 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 import cv2
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
-
 from wuwa_auto.client.launcher import (
-    _ClientRestartRequired,
     WindowInfo,
+    _ClientRestartRequired,
     _ensure_game_world,
+    _locate_network_retry,
     _search_region,
     _world_hud_visible,
     ensure_client_ready,
 )
 from wuwa_auto.settings import (
+    WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
+    WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE,
     WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
     WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
 )
@@ -167,8 +169,11 @@ def test_monthly_reward_is_claimed_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._client_update_restart_target",
         return_value=None,
     ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry",
+        return_value=None,
+    ), patch(
         "wuwa_auto.client.launcher._locate",
-        side_effect=[None, None, (1200, 700)],
+        side_effect=[None, (1200, 700)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
         "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
     ), patch(
@@ -202,8 +207,11 @@ def test_reward_result_is_closed_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._client_update_restart_target",
         return_value=None,
     ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry",
+        return_value=None,
+    ), patch(
         "wuwa_auto.client.launcher._locate",
-        side_effect=[None, (900, 700)],
+        side_effect=[(900, 700)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
         "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
     ), patch(
@@ -236,7 +244,7 @@ def test_network_error_is_retried_before_world_is_accepted() -> None:
         "wuwa_auto.client.launcher._client_update_restart_target",
         return_value=None,
     ), patch(
-        "wuwa_auto.client.launcher._locate",
+        "wuwa_auto.client.launcher._locate_network_retry",
         side_effect=[(1000, 600)],
     ), patch("wuwa_auto.client.launcher._restore_game"), patch(
         "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
@@ -255,6 +263,17 @@ def test_network_error_is_retried_before_world_is_accepted() -> None:
 
     assert mouse.clicks == [(1000, 600)]
     assert actions == ["retry_game_network"]
+
+
+def test_network_retry_recognizes_new_dialog_then_keeps_legacy_fallback() -> None:
+    with patch(
+        "wuwa_auto.client.launcher._locate",
+        side_effect=[None, (1607, 905)],
+    ) as locate:
+        assert _locate_network_retry(region=(0, 0, 2560, 1440)) == (1607, 905)
+
+    assert locate.call_args_list[0].args[0] == WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE
+    assert locate.call_args_list[1].args[0] == WUWA_CLIENT_NETWORK_RETRY_TEMPLATE
 
 
 def test_client_update_complete_is_confirmed_and_requests_restart() -> None:

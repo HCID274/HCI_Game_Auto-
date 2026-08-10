@@ -22,9 +22,9 @@ except (AttributeError, OSError):  # pragma: no cover - non-Windows import safet
     pass
 
 import pyautogui
+from game_automation_core.windows.desktop_guard import activate_window
 from PIL import Image
 
-from game_automation_core.windows.desktop_guard import activate_window
 from wuwa_auto.input.viiper import VirtualHidMouse
 from wuwa_auto.settings import (
     EVIDENCE_DIR,
@@ -32,6 +32,7 @@ from wuwa_auto.settings import (
     WUWA_CLIENT_LOGIN_TEMPLATE,
     WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
     WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
+    WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE,
     WUWA_CLIENT_REWARD_RESULT_TEMPLATE,
     WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
     WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
@@ -285,6 +286,7 @@ def _require_templates() -> None:
             WUWA_CLIENT_LOGIN_TEMPLATE,
             WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
             WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
+            WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE,
             WUWA_CLIENT_REWARD_RESULT_TEMPLATE,
             WUWA_CLIENT_UPDATE_RESTART_NOTICE_TEMPLATE,
             WUWA_CLIENT_UPDATE_RESTART_CONFIRM_TEMPLATE,
@@ -313,6 +315,30 @@ def _locate(
         return None
     center = pyautogui.center(match)
     return int(center.x), int(center.y)
+
+
+def _locate_network_retry(
+    *,
+    region: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int] | None:
+    """Recognize both network-error button layouts shipped by the client.
+
+    The 2.6.3 client enlarged the remote-configuration failure dialog and
+    changed the button border.  Keep the old asset as a fallback so a client
+    rollback does not reintroduce the startup deadlock.
+    """
+    current = _locate(
+        WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE,
+        confidence=0.88,
+        region=region,
+    )
+    if current is not None:
+        return current
+    return _locate(
+        WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
+        confidence=0.84,
+        region=region,
+    )
 
 
 def _point_in_window(point: tuple[int, int], window: WindowInfo) -> bool:
@@ -490,11 +516,7 @@ def _ensure_game_world(
             actions.append("confirm_client_update_restart")
             raise _ClientRestartRequired(game.pid)
 
-        network_retry = _locate(
-            WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
-            confidence=0.86,
-            region=region,
-        )
+        network_retry = _locate_network_retry(region=region)
         network_retry_due = clock() - last_network_retry >= READY_RETRY_SECONDS
         if (
             network_retry is not None

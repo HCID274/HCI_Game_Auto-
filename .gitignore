@@ -11,3 +11,9 @@ __pycache__/
 **/.pytest_cache/
 *.local.psd1
 *.local.json
+logs/
+**/logs/
+screenshots/
+**/screenshots/
+.review-pytest-temp/
+.review-pytest-temp-full/

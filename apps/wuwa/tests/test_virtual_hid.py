@@ -1,108 +1,58 @@
+import json
 from unittest.mock import Mock, patch
 
-import pytest
-from wuwa_auto.input.viiper import (
-    LEFT_BUTTON,
-    MIDDLE_BUTTON,
-    VirtualHidMouse,
-    _VirtualHidControlServer,
-    encode_mouse_packet,
-)
+from wuwa_auto.okww.virtual_hid import virtual_hid_click
 
 
-def test_mouse_packet_matches_viiper_wire_format() -> None:
-    assert encode_mouse_packet(buttons=1, dx=2, dy=-3, wheel=4, pan=-5) == (
-        b"\x01\x02\x00\xfd\xff\x04\x00\xfb\xff"
+def test_virtual_hid_click_uses_parent_control(monkeypatch) -> None:
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.recv.side_effect = [b'{"ok": true}\n']
+    with patch(
+        "wuwa_auto.okww.virtual_hid.socket.create_connection",
+        return_value=client,
+    ) as connect:
+        virtual_hid_click(101, 428, hold=0.2)
+
+    connect.assert_called_once_with(("127.0.0.1", 43123), timeout=8)
+    sent = json.loads(client.sendall.call_args.args[0].decode("utf-8"))
+    assert sent == {
+        "token": "secret",
+        "action": "click",
+        "x": 101,
+        "y": 428,
+        "button": "left",
+        "hold": 0.2,
+        "log_action": True,
+    }
+
+
+def test_virtual_hid_click_accepts_small_accelerated_cursor_miss(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_PORT", "43123")
+    monkeypatch.setenv("WUWA_VIRTUAL_HID_CONTROL_TOKEN", "secret")
+
+    def client_with(response: bytes) -> Mock:
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=None)
+        client.recv.side_effect = [response]
+        return client
+
+    first = client_with(
+        b'{"ok": false, "error": "virtual mouse could not reach '
+        b'(614, 705); cursor=(611, 706)"}\n'
     )
-
-
-def test_mouse_packet_rejects_out_of_range_delta() -> None:
-    with pytest.raises(ValueError):
-        encode_mouse_packet(dx=32768)
-
-
-def test_virtual_mouse_emits_requested_button() -> None:
-    mouse = VirtualHidMouse()
-    mouse.move_to = Mock(return_value=(100, 200))
-    mouse.send = Mock()
-    with patch("wuwa_auto.input.viiper.time.sleep"):
-        mouse.click_at(100, 200, button="middle", log_action=False)
-
-    assert mouse.send.call_args_list[0].kwargs == {"buttons": MIDDLE_BUTTON}
-    assert mouse.send.call_args_list[1].kwargs == {}
-
-
-def test_virtual_mouse_rejects_unknown_button() -> None:
-    mouse = VirtualHidMouse()
-    with pytest.raises(ValueError, match="unsupported mouse button"):
-        mouse.click_at(100, 200, button="side")
-
-
-def test_virtual_mouse_preserves_other_held_buttons() -> None:
-    mouse = VirtualHidMouse()
-    mouse.send = Mock()
-
-    mouse.set_button("right", True)
-    mouse.set_button("left", True)
-    mouse.set_button("right", False)
-
-    assert mouse._buttons == LEFT_BUTTON
-    assert mouse.send.call_count == 3
-
-
-def test_virtual_mouse_release_clears_all_buttons() -> None:
-    mouse = VirtualHidMouse()
-    mouse.send = Mock()
-    mouse.set_button("middle", True)
-    mouse.release_buttons()
-
-    assert mouse._buttons == 0
-    assert mouse.send.call_count == 2
-
-
-def test_release_active_mouse_buttons_clears_workflow_state() -> None:
-    from wuwa_auto.input import viiper
-
-    mouse = Mock()
-    control = Mock()
-    with patch.object(viiper, "_active_mouse", mouse), patch.object(
-        viiper, "_active_control", control
+    second = client_with(b'{"ok": true}\n')
+    with patch(
+        "wuwa_auto.okww.virtual_hid.socket.create_connection",
+        side_effect=[first, second],
     ):
-        assert viiper.release_active_mouse_buttons()
+        virtual_hid_click(614, 705)
 
-    control.quiesce_and_release.assert_called_once_with()
-
-
-def test_release_active_mouse_buttons_falls_back_without_control_server() -> None:
-    from wuwa_auto.input import viiper
-
-    mouse = Mock()
-    with patch.object(viiper, "_active_mouse", mouse), patch.object(
-        viiper, "_active_control", None
-    ):
-        assert viiper.release_active_mouse_buttons()
-
-    mouse.release_buttons.assert_called_once_with()
-
-
-def test_release_active_mouse_buttons_is_noop_without_workflow_mouse() -> None:
-    from wuwa_auto.input import viiper
-
-    with patch.object(viiper, "_active_mouse", None), patch.object(
-        viiper, "_active_control", None
-    ):
-        assert not viiper.release_active_mouse_buttons()
-
-
-def test_control_server_quiesces_and_resumes_admission() -> None:
-    mouse = Mock()
-    control = _VirtualHidControlServer(mouse)
-    try:
-        control.quiesce_and_release()
-        assert control._accepting is False
-        mouse.release_buttons.assert_called_once_with()
-
-        control.resume()
-        assert control._accepting is True
-    finally:
-        control.server.server_close()
+    retry = json.loads(second.sendall.call_args.args[0].decode("utf-8"))
+    assert (retry["x"], retry["y"]) == (611, 706)

@@ -1,4 +1,5 @@
 from wuwa_auto.okww.farm_echo_state import (
+    click_realm_defeat_exit,
     realm_defeat_visible,
     revive_dialog_visible,
 )
@@ -26,3 +27,11 @@ def test_realm_defeat_requires_title_and_both_actions() -> None:
 def test_revive_dialog_requires_title_and_confirm_action() -> None:
     assert revive_dialog_visible(FakeRealmTask([True, True]))
     assert not revive_dialog_visible(FakeRealmTask([True, False]))
+
+
+def test_realm_defeat_exit_clicks_the_left_action() -> None:
+    task = FakeRealmTask([True, True, True])
+
+    click_realm_defeat_exit(task)
+
+    assert task.clicked is True

@@ -27,7 +27,7 @@ try:
     # The workflow-owned control server is shared by all bundled OK-WW
     # workers.  Reuse its already-tested protocol instead of emitting another
     # PostMessage click which the game may ignore on this page.
-    from wuwa_auto.okww.confirmed_retry_worker import _virtual_hid_click
+    from wuwa_auto.okww.virtual_hid import _virtual_hid_click
 except ImportError:  # pragma: no cover - direct bundled-worker execution
     _virtual_hid_click = None  # type: ignore[assignment]
 
@@ -45,27 +45,20 @@ DAILY_ACTIVITY_COMPLETION_THRESHOLD = 100
 _FRACTION_RE = re.compile(r"(?<!\d)(?P<current>\d{1,4})\s*/\s*(?P<target>\d{1,4})(?!\d)")
 _NUMBER_RE = re.compile(r"(?<!\d)(?P<value>\d{1,4})(?!\d)")
 
-# The first region is the one used by OK-WW's DailyTask.get_total_daily_points.
-# The second one tolerates a small UI/layout shift without scanning unrelated
-# parts of the game HUD.  Coordinates are normalized to the captured game
-# frame, not absolute desktop pixels.
-_OCR_REGIONS: tuple[tuple[float, float, float, float], ...] = (
-    (0.19, 0.80, 0.30, 0.93),
-    (0.10, 0.70, 0.42, 0.98),
-)
 _PANEL_OCR_REGION = (0.04, 0.04, 0.78, 0.98)
-# This region is intentionally much narrower than the task-list OCR.  The
-# total is read only after the claim click, so fractions such as ``15/15`` in
-# individual rows cannot be mistaken for the account total.
+# This is the exact bounded region used by OK-WW's ``get_total_daily_points``
+# implementation.  Do not broaden it to the activity list or the bottom
+# milestone strip: both contain unrelated fractions/point labels (20, 40,
+# 60, 80, 100) which previously turned a real ``30`` into a false ``20``.
+# Coordinates are normalized to the captured 2560x1440 game frame.
 _TOTAL_OCR_REGIONS: tuple[tuple[float, float, float, float], ...] = (
-    # OK-WW's own region, tightened to the yellow total number.
-    (0.19, 0.80, 0.30, 0.94),
-    (0.12, 0.74, 0.22, 0.95),
+    (0.19, 0.80, 0.30, 0.93),
 )
-# The game can display more than the 100-point reward threshold (for example
-# 140 after all five completed rows are settled).  Keep the lower milestone
-# values as well because OCR may return the whole bottom strip.
-_TOTAL_VALUE_RE = re.compile(r"(?<!\d)(?:0|20|40|60|80|100|[1-9]\d{2,3})(?!\d)")
+# The bounded region contains the account total, which can be any small
+# integer before completion (for example 30), or a value above 100 after
+# completion (for example 140).  The region—not a whitelist of milestone
+# values—is what prevents unrelated numbers from being accepted.
+_TOTAL_VALUE_RE = re.compile(r"(?<!\d)\d{1,4}(?!\d)")
 _CLAIM_TEXT_RE = re.compile(r"领取|領取|Claim", re.IGNORECASE)
 _CLAIM_REGION = (0.68, 0.04, 0.99, 0.86)
 _ACTIVITY_TITLE_RE = re.compile(r"活跃行迹|Activity\s*Trail", re.IGNORECASE)
@@ -76,17 +69,25 @@ _ACTIVITY_METRIC_RE = re.compile(
 _CLAIM_HID_MARKER = "HOST_DAILY_ACTIVITY_VIRTUAL_HID_CLICK"
 _MILESTONE_HID_MARKER = "HOST_DAILY_ACTIVITY_MILESTONE_VIRTUAL_HID_CLICK"
 _MILESTONE_STATE_MARKER = "HOST_DAILY_ACTIVITY_MILESTONE_STATE"
-# OK-WW's upstream DailyTask uses this normalized point for the bottom
-# 100-point milestone.  It is a real reward control, not the row-level
-# ``领取`` buttons.  Keep the value host-owned so an upstream replacement can
-# be adopted without editing its installed files.
-_MILESTONE_REWARD_POINT = (0.930, 0.882)
+_REWARD_POPUP_HID_MARKER = "HOST_DAILY_ACTIVITY_REWARD_POPUP_VIRTUAL_HID_CLICK"
+_REWARD_POPUP_RE = re.compile(
+    r"点击空白区域关闭|點擊空白區域關閉|获得|獲得|Tap\s+blank.*close",
+    re.IGNORECASE,
+)
 # In the 2560x1440 game frame the five red pending diamonds are centred near
 # these normalized x positions and y=1216/1440.  A red diamond becomes a gray
 # checkmark after the reward is actually settled.
 _MILESTONE_X = (0.406, 0.539, 0.672, 0.806, 0.939)
 _MILESTONE_Y = 0.845
+# The clickable chest centres sit slightly left and below the red diamonds.
+# The last point is OK-WW's original 100-point coordinate (0.930, 0.882);
+# retaining the same spacing lets the host click the actual pending tier
+# instead of always opening the 100-point tooltip when only 20 is claimable.
+_MILESTONE_REWARD_X = (0.397, 0.530, 0.663, 0.797, 0.930)
+_MILESTONE_REWARD_Y = 0.882
+_MILESTONE_THRESHOLDS = (20, 40, 60, 80, 100)
 _MILESTONE_RED_PIXEL_THRESHOLD = 20
+_MILESTONE_MAX_CLAIM_CLICKS = len(_MILESTONE_THRESHOLDS)
 _SCREENSHOT_TIMEOUT_SECONDS = 3.0
 _OBSERVATION_TIMEOUT_SECONDS = 12.0
 _OBSERVATION_POLL_SECONDS = 0.25
@@ -224,6 +225,8 @@ class DailyActivityVerifier:
         self._last_panel_labels: list[str] = []
         self._last_panel_comparison: dict[str, Any] = {}
         self._activity_panel_confirmed: bool | None = None
+        self._pre_claim_points: int | None = None
+        self._last_milestone_red_counts: list[int] | None = None
 
     @property
     def screenshot_dir(self) -> Path:
@@ -289,22 +292,18 @@ class DailyActivityVerifier:
             source = Path(source_path)
             with Image.open(source) as image:
                 width, height = image.size
-                # Pillow fallback captures the complete multi-monitor desktop;
-                # OK's own screenshot normally contains only the game frame.
-                if width >= 3000:
-                    box = (
-                        int(width * 0.02),
-                        int(height * 0.40),
-                        int(width * 0.70),
-                        int(height * 0.62),
-                    )
-                else:
-                    box = (
-                        int(width * 0.02),
-                        int(height * 0.72),
-                        int(width * 0.70),
-                        int(height * 0.995),
-                    )
+                # Keep the proof crop aligned with the same bounded OCR
+                # range.  A desktop fallback may be 4000x2560 while the game
+                # itself remains the 2560x1440 frame in its top-left corner.
+                frame_width, frame_height = self._frame_dimensions()
+                if width < 3000:
+                    frame_width, frame_height = width, height
+                box = (
+                    int(frame_width * 0.16),
+                    int(frame_height * 0.75),
+                    int(frame_width * 0.34),
+                    int(frame_height * 0.97),
+                )
                 cropped = image.crop(box)
                 evidence_dir = Path(__file__).resolve().parents[3] / "runtime" / "evidence"
                 evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -316,19 +315,29 @@ class DailyActivityVerifier:
             self._log(f"daily activity total crop failed: {exc}")
             return None
 
-    def _read_ocr(self, *, match: re.Pattern[str]) -> list[str]:
-        names: list[str] = []
+    def _read_total_region_values(self) -> list[int]:
+        """Read only OK-WW's bounded activity-total region."""
+
+        values: list[int] = []
         ocr = getattr(self.task, "ocr", None)
         if not callable(ocr):
-            return names
-        for region in _OCR_REGIONS:
+            return values
+        for region in _TOTAL_OCR_REGIONS:
             try:
-                names.extend(_box_names(ocr(*region, match=match)))
+                names = _box_names(ocr(*region, match=_TOTAL_VALUE_RE, log=False))
+                for name in names:
+                    match = _TOTAL_VALUE_RE.search(name)
+                    if match:
+                        values.append(int(match.group(0)))
             except Exception as exc:
-                self._log(f"daily activity OCR region failed {region}: {exc}")
-        return names
+                self._log(f"daily activity total OCR region failed {region}: {exc}")
+        return values
 
-    def capture_activity_panel(self) -> tuple[list[str], str | None]:
+    def capture_activity_panel(
+        self,
+        *,
+        phase: str = "observe",
+    ) -> tuple[list[str], str | None]:
         """Capture the visible daily panel and retain its OCR task labels."""
 
         names: list[str] = []
@@ -347,9 +356,24 @@ class DailyActivityVerifier:
             _ACTIVITY_TITLE_RE.search(joined_labels)
             and _ACTIVITY_METRIC_RE.search(joined_labels)
         )
+        pre_claim_total_values: list[int] = []
+        if phase == "before_claim" and self._activity_panel_confirmed:
+            # Task rows can disappear after a claim click.  Capture the
+            # account total itself before clicking, using the same narrow
+            # region as OK-WW, instead of relying only on row-point sums.
+            pre_claim_total_values = self._read_total_region_values()
+            points = comparison.get("current_points_from_tasks")
+            candidates = [
+                value
+                for value in pre_claim_total_values
+                if value >= 0
+            ]
+            if isinstance(points, int):
+                candidates.append(points)
+            self._pre_claim_points = max(candidates) if candidates else None
         self._log(
             f"{DAILY_ACTIVITY_PANEL_MARKER} "
-            f"{json.dumps({'labels': names, 'evidence_path': evidence_path, 'comparison': comparison, 'active_panel_confirmed': self._activity_panel_confirmed}, ensure_ascii=False)}"
+            f"{json.dumps({'labels': names, 'evidence_path': evidence_path, 'comparison': comparison, 'active_panel_confirmed': self._activity_panel_confirmed, 'phase': phase, 'pre_claim_points': self._pre_claim_points, 'pre_claim_total_ocr_values': pre_claim_total_values}, ensure_ascii=False)}"
         )
         return names, evidence_path
 
@@ -369,17 +393,8 @@ class DailyActivityVerifier:
         source = self._capture("TOTAL_AFTER_CLAIM")
         evidence = self._crop_total_evidence(source)
         values: list[int] = []
-        ocr = getattr(self.task, "ocr", None)
-        if callable(ocr) and self._activity_panel_confirmed is True:
-            for region in _TOTAL_OCR_REGIONS:
-                try:
-                    names = _box_names(ocr(*region, match=_TOTAL_VALUE_RE, log=False))
-                    for name in names:
-                        match = _TOTAL_VALUE_RE.search(name)
-                        if match:
-                            values.append(int(match.group(0)))
-                except Exception as exc:
-                    self._log(f"daily activity total OCR region failed {region}: {exc}")
+        if self._activity_panel_confirmed is True:
+            values.extend(self._read_total_region_values())
 
         total: int | None
         totals = [value for value in values if value >= DAILY_ACTIVITY_COMPLETION_THRESHOLD]
@@ -388,25 +403,35 @@ class DailyActivityVerifier:
             # the panel OCR has already captured it as a standalone label
             # (e.g. ``140``).  Ignore ``+100`` point labels and fractions so
             # this fallback cannot promote an unclaimed row to completion.
-            panel_values = [
-                int(label)
-                for label in self._last_panel_labels
-                if re.fullmatch(r"\d{3,4}", label)
-            ]
+            panel_values: list[int] = []
+            for index, label in enumerate(self._last_panel_labels):
+                if not re.fullmatch(r"\d{3,4}", label):
+                    continue
+                # The fallback is still panel OCR, not a screen-wide scan:
+                # accept a standalone 3–4 digit value only when the same
+                # local OCR neighborhood contains the activity metric label.
+                neighborhood = " ".join(
+                    self._last_panel_labels[max(0, index - 1) : index + 3]
+                )
+                if _ACTIVITY_METRIC_RE.search(neighborhood):
+                    panel_values.append(int(label))
             if panel_values:
                 values.extend(panel_values)
                 totals = panel_values
         if totals:
             total = max(totals)
-        elif values and 0 in values:
-            total = 0
+        elif values:
+            # A sub-threshold value is still useful evidence (for example
+            # the real pre-completion ``30``).  Completion is decided later
+            # by the 100-point threshold and settlement probes.
+            total = max(values)
         else:
             total = None
         if self._activity_panel_confirmed is not True:
             total = None
         self._log(
             "HOST_DAILY_ACTIVITY_TOTAL_REGION "
-            f"{json.dumps({'points': total, 'ocr_values': values, 'evidence_path': evidence, 'active_panel_confirmed': self._activity_panel_confirmed}, ensure_ascii=False)}"
+            f"{json.dumps({'points': total, 'ocr_values': values, 'ocr_regions': _TOTAL_OCR_REGIONS, 'pre_claim_points': self._pre_claim_points, 'evidence_path': evidence, 'active_panel_confirmed': self._activity_panel_confirmed}, ensure_ascii=False)}"
         )
         return total, evidence, source
 
@@ -543,13 +568,20 @@ class DailyActivityVerifier:
                             if red > 150 and red > green * 1.5 and red > blue * 1.15:
                                 count += 1
                     red_counts.append(count)
-                pending = any(count >= _MILESTONE_RED_PIXEL_THRESHOLD for count in red_counts)
+                self._last_milestone_red_counts = red_counts
+                pending_indexes = [
+                    index
+                    for index, count in enumerate(red_counts)
+                    if count >= _MILESTONE_RED_PIXEL_THRESHOLD
+                ]
+                pending = bool(pending_indexes)
                 self._log(
                     f"{_MILESTONE_STATE_MARKER} "
-                    f"{json.dumps({'pending': pending, 'red_counts': red_counts, 'evidence_path': str(Path(source_path).resolve())}, ensure_ascii=False)}"
+                    f"{json.dumps({'pending': pending, 'pending_indexes': pending_indexes, 'pending_thresholds': [_MILESTONE_THRESHOLDS[index] for index in pending_indexes], 'red_counts': red_counts, 'evidence_path': str(Path(source_path).resolve())}, ensure_ascii=False)}"
                 )
                 return pending
         except Exception as exc:
+            self._last_milestone_red_counts = None
             self._log(
                 f"{_MILESTONE_STATE_MARKER} "
                 f"{json.dumps({'pending': None, 'reason': str(exc), 'evidence_path': source_path}, ensure_ascii=False)}"
@@ -561,19 +593,65 @@ class DailyActivityVerifier:
 
         return self._milestone_pending_from_evidence(source_path)
 
-    def click_milestone_reward(self, *, after_sleep: float = 1.0) -> None:
-        """Click OK-WW's actual bottom milestone reward through local HID."""
+    def pending_milestone_indexes(
+        self,
+        source_path: str | None,
+    ) -> tuple[int, ...] | None:
+        """Return the pending reward tiers proven by the bounded red probe."""
+
+        pending = self._milestone_pending_from_evidence(source_path)
+        if pending is None or self._last_milestone_red_counts is None:
+            return None
+        return tuple(
+            index
+            for index, count in enumerate(self._last_milestone_red_counts)
+            if count >= _MILESTONE_RED_PIXEL_THRESHOLD
+        )
+
+    def click_milestone_reward(
+        self,
+        milestone_index: int,
+        *,
+        after_sleep: float = 1.0,
+    ) -> None:
+        """Click one visually proven pending milestone through local HID."""
+
+        if not 0 <= milestone_index < len(_MILESTONE_REWARD_X):
+            raise ValueError(f"invalid daily milestone index: {milestone_index}")
 
         width, height = self._frame_dimensions()
-        frame_x = round(width * _MILESTONE_REWARD_POINT[0])
-        frame_y = round(height * _MILESTONE_REWARD_POINT[1])
+        frame_x = round(width * _MILESTONE_REWARD_X[milestone_index])
+        frame_y = round(height * _MILESTONE_REWARD_Y)
+        threshold = _MILESTONE_THRESHOLDS[milestone_index]
         self._hid_click_frame_point(
             frame_x,
             frame_y,
             marker=_MILESTONE_HID_MARKER,
-            kind="daily_activity_milestone_reward",
+            kind=f"daily_activity_milestone_reward_{threshold}",
             after_sleep=after_sleep,
         )
+
+    def dismiss_reward_popup_if_visible(self, *, after_sleep: float = 1.0) -> bool:
+        """Close only the proven reward popup before reading the activity panel.
+
+        Claiming a bottom milestone opens a modal whose OCR contains ``获得``
+        and ``点击空白区域关闭``.  Reading totals while that modal is present
+        previously turned a successful click into an unconfirmed report.  The
+        click stays inside a known blank part of that modal and is sent through
+        the workflow HID, never as a blind full-screen action.
+        """
+
+        if not any(_REWARD_POPUP_RE.search(label) for label in self._last_panel_labels):
+            return False
+        width, height = self._frame_dimensions()
+        self._hid_click_frame_point(
+            round(width * 0.50),
+            round(height * 0.70),
+            marker=_REWARD_POPUP_HID_MARKER,
+            kind="daily_activity_reward_popup_blank",
+            after_sleep=after_sleep,
+        )
+        return True
 
     def _click_claim_button(self, button: Any, *, after_sleep: float = 1.0) -> None:
         """Click a detected reward button through the real workflow HID.
@@ -648,21 +726,20 @@ class DailyActivityVerifier:
         return clicks, remaining
 
     def observe(self, *, points_hint: int | None = None) -> DailyActivityObservation:
-        fraction_names = self._read_ocr(match=_FRACTION_RE)
-        points, target, source = parse_activity_values(fraction_names)
-        if points is None:
-            number_names = self._read_ocr(match=_NUMBER_RE)
-            points, target, source = parse_activity_values(number_names)
-
-        if points_hint is not None and points_hint > 0 and (
-            points is None or points_hint > points
-        ):
+        points: int | None = None
+        source = "unknown"
+        # ``points_hint`` comes from OK-WW's get_total_daily_points, which
+        # already uses the exact bounded region.  Prefer it even while the
+        # panel title is settling; never substitute a full-screen OCR scan.
+        if points_hint is not None and points_hint > 0:
             points = points_hint
             source = "upstream_points"
-        effective_target = max(
-            DAILY_ACTIVITY_COMPLETION_THRESHOLD,
-            int(target or DAILY_ACTIVITY_COMPLETION_THRESHOLD),
-        )
+        elif self._activity_panel_confirmed is True:
+            values = self._read_total_region_values()
+            if values:
+                points = max(values)
+                source = "bounded_total_region"
+        effective_target = DAILY_ACTIVITY_COMPLETION_THRESHOLD
         return DailyActivityObservation(
             points=points,
             target=effective_target,
@@ -682,9 +759,18 @@ class DailyActivityVerifier:
     ) -> DailyActivityObservation:
         """Use post-click total evidence, then the completed task panel as fallback."""
 
+        # A row claim can make completed rows disappear while the page title
+        # is still settling.  Preserve the pre-click total for diagnostics
+        # even when the post-click panel identity is temporarily unconfirmed.
+        effective_points = total_points
+        if self._pre_claim_points is not None and (
+            effective_points is None or self._pre_claim_points > effective_points
+        ):
+            effective_points = self._pre_claim_points
+
         if self._activity_panel_confirmed is not True:
             return DailyActivityObservation(
-                points=total_points,
+                points=effective_points,
                 target=DAILY_ACTIVITY_COMPLETION_THRESHOLD,
                 complete=False,
                 evidence_path=evidence_path,
@@ -692,10 +778,10 @@ class DailyActivityVerifier:
                 reason="活跃行迹/活跃度面板未确认，拒绝把其他页面数字当作总分",
             )
 
-        if total_points is not None:
+        if effective_points is not None:
             if remaining_claim_buttons is True:
                 return DailyActivityObservation(
-                    points=total_points,
+                    points=effective_points,
                     target=DAILY_ACTIVITY_COMPLETION_THRESHOLD,
                     complete=False,
                     evidence_path=evidence_path,
@@ -704,7 +790,7 @@ class DailyActivityVerifier:
                 )
             if milestones_pending is not False:
                 return DailyActivityObservation(
-                    points=total_points,
+                    points=effective_points,
                     target=DAILY_ACTIVITY_COMPLETION_THRESHOLD,
                     complete=False,
                     evidence_path=evidence_path,
@@ -720,17 +806,22 @@ class DailyActivityVerifier:
                     ),
                 )
             return DailyActivityObservation(
-                points=total_points,
+                points=effective_points,
                 target=DAILY_ACTIVITY_COMPLETION_THRESHOLD,
-                complete=is_activity_complete(total_points),
+                complete=is_activity_complete(effective_points),
                 evidence_path=evidence_path,
                 source="post_claim_total_region",
-                reason=("activity threshold reached" if is_activity_complete(total_points)
+                reason=("activity threshold reached" if is_activity_complete(effective_points)
                         else "post-claim total below threshold"),
             )
 
         comparison = self._last_panel_comparison
         task_points = comparison.get("current_points_from_tasks")
+        if self._pre_claim_points is not None:
+            task_points = max(
+                self._pre_claim_points,
+                task_points if isinstance(task_points, int) else 0,
+            )
         if isinstance(task_points, int) and remaining_claim_buttons is False:
             capped = min(DAILY_ACTIVITY_COMPLETION_THRESHOLD, task_points)
             return DailyActivityObservation(
@@ -862,7 +953,9 @@ def install_daily_activity_override(task_class: type[Any]) -> None:
         self.info_set("current task", "claim daily")
         open_book(self, "gray_book_quest")
         self.click(0.17, 0.12, after_sleep=1)
-        _panel_labels, panel_evidence = verifier.capture_activity_panel()
+        _panel_labels, panel_evidence = verifier.capture_activity_panel(
+            phase="before_claim"
+        )
         evidence_before = verifier._capture("BEFORE_CLAIM")
         pending_before = bool(
             verifier.activity_panel_confirmed is True
@@ -886,7 +979,9 @@ def install_daily_activity_override(task_class: type[Any]) -> None:
                     # Re-read after the row claim.  The total often changes to
                     # 140 at this point and the red milestone diamonds become
                     # available only in the new frame.
-                    _, refreshed_evidence = verifier.capture_activity_panel()
+                    _, refreshed_evidence = verifier.capture_activity_panel(
+                        phase="after_claim"
+                    )
                     if refreshed_evidence:
                         milestone_evidence = refreshed_evidence
             else:
@@ -898,15 +993,45 @@ def install_daily_activity_override(task_class: type[Any]) -> None:
                     "HOST_DAILY_ACTIVITY_ALREADY_SETTLED "
                     f"{json.dumps({'source': 'pre_claim_panel_labels'}, ensure_ascii=False)}"
                 )
-            milestones_pending = verifier.inspect_milestone_state(milestone_evidence)
-            if milestones_pending is True:
-                verifier.click_milestone_reward(after_sleep=1)
-                milestone_clicks = 1
-            elif milestones_pending is None:
-                verifier._log(
-                    "HOST_DAILY_ACTIVITY_MILESTONE_CLICK_SKIPPED "
-                    f"{json.dumps({'reason': 'milestone state unconfirmed'}, ensure_ascii=False)}"
+            previous_pending: tuple[int, ...] | None = None
+            for _claim_attempt in range(_MILESTONE_MAX_CLAIM_CLICKS):
+                pending_indexes = verifier.pending_milestone_indexes(
+                    milestone_evidence
                 )
+                if pending_indexes is None:
+                    verifier._log(
+                        "HOST_DAILY_ACTIVITY_MILESTONE_CLICK_SKIPPED "
+                        f"{json.dumps({'reason': 'milestone state unconfirmed'}, ensure_ascii=False)}"
+                    )
+                    break
+                if not pending_indexes:
+                    break
+                if pending_indexes == previous_pending:
+                    verifier._log(
+                        "HOST_DAILY_ACTIVITY_MILESTONE_CLAIM_STALLED "
+                        f"{json.dumps({'pending_indexes': pending_indexes, 'pending_thresholds': [_MILESTONE_THRESHOLDS[index] for index in pending_indexes]}, ensure_ascii=False)}"
+                    )
+                    break
+
+                # The highest visible pending chest claims all lower unlocked
+                # tiers in the current UI.  If a future version settles only
+                # one tier, the bounded loop re-captures and clicks the next
+                # proven red chest without relying on a fixed coordinate.
+                previous_pending = pending_indexes
+                verifier.click_milestone_reward(
+                    max(pending_indexes),
+                    after_sleep=1,
+                )
+                milestone_clicks += 1
+                _, refreshed_evidence = verifier.capture_activity_panel(
+                    phase="after_claim"
+                )
+                if verifier.dismiss_reward_popup_if_visible():
+                    _, refreshed_evidence = verifier.capture_activity_panel(
+                        phase="after_claim_popup_closed"
+                    )
+                if refreshed_evidence:
+                    milestone_evidence = refreshed_evidence
         except Exception as exc:
             observation = DailyActivityObservation(
                 points=None,
@@ -930,7 +1055,11 @@ def install_daily_activity_override(task_class: type[Any]) -> None:
             "HOST_DAILY_ACTIVITY_CLAIM_ACTION "
             f"{json.dumps({'upstream_click': False, 'host_clicks': row_clicks + milestone_clicks, 'row_clicks': row_clicks, 'milestone_clicks': milestone_clicks}, ensure_ascii=False)}"
         )
-        _, post_panel_evidence = verifier.capture_activity_panel()
+        _, post_panel_evidence = verifier.capture_activity_panel(phase="after_claim")
+        if verifier.dismiss_reward_popup_if_visible():
+            _, post_panel_evidence = verifier.capture_activity_panel(
+                phase="after_claim_popup_closed"
+            )
         if post_panel_evidence:
             milestone_evidence = post_panel_evidence
         remaining_claim_buttons = verifier._panel_has_pending_claim_buttons()
