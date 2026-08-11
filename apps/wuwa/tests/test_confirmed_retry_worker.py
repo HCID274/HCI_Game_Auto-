@@ -2,6 +2,7 @@ import ast
 import inspect
 import textwrap
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from wuwa_auto.okww import confirmed_retry_worker
@@ -43,6 +44,7 @@ def test_confirmed_worker_keeps_only_host_accounting_and_death_boundary() -> Non
     assert methods == {
         "__init__",
         "manage_boss_interactions",
+        "raise_not_in_combat",
         "teleport_to_configured_boss_and_prepare",
         "host_record_absorption",
         "incr_drop",
@@ -102,3 +104,23 @@ def test_virtual_hid_is_scoped_to_entry_and_restores_upstream_methods(
     assert task.click.__func__ is original_click.__func__
     assert task.open_boss_book.__func__ is original_open.__func__
     assert task.click(2431, 771, name="boss_proceed") == "upstream"
+
+
+def test_active_realm_resume_only_initializes_host_state() -> None:
+    task = Mock()
+
+    confirmed_retry_worker._prepare_active_realm_resume(task)
+
+    task.ensure_main.assert_called_once_with(time_out=30)
+    task.init_parameters.assert_called_once_with()
+    task.log_info.assert_called_once_with(
+        confirmed_retry_worker.ACTIVE_REALM_RESUME_MARKER
+    )
+    assert task._teleport_walk_result == "realm"
+    assert task._in_realm is True
+    assert task.treat_as_not_in_realm is False
+    assert task._has_treasure is False
+    assert task._just_entered_boss_realm is True
+    called_methods = {item[0] for item in task.method_calls}
+    for forbidden in ("click", "send_key", "mouse_down", "mouse_up", "combat_once"):
+        assert forbidden not in called_methods

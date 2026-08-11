@@ -200,12 +200,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             from wuwa_auto.client.launcher import stop_client_launchers
 
             return 0 if stop_client_launchers() >= 0 else 1
-        from wuwa_auto.client.launcher import ensure_client_ready
+        from wuwa_auto.client.launcher import (
+            ensure_client_ready,
+            stop_client_launchers,
+        )
         from wuwa_auto.input.viiper import managed_virtual_mouse
+        from wuwa_auto.okww.runner import stop_wuthering_game
 
         with managed_virtual_mouse() as mouse:
             result = ensure_client_ready(mouse)
-        logging.getLogger(__name__).info("client preparation result: %s", result)
+        stop_wuthering_game()
+        stop_client_launchers()
+        logging.getLogger(__name__).info(
+            "client update preparation completed and client closed; "
+            "the next game launch belongs to OK-WW: %s",
+            result,
+        )
         return 0
     if args.command == "report":
         from wuwa_auto.reporting.service import report_run

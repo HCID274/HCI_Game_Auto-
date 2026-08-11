@@ -26,6 +26,9 @@ FARM_ECHO_DEATH_MARKERS = (
 )
 FARM_ECHO_REALM_DEFEAT_MARKER = "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED"
 FARM_ECHO_REVIVE_DIALOG_MARKER = "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED"
+FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_MARKER = (
+    "HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED"
+)
 FARM_ECHO_ENTRY_FAILURE_MARKERS = (
     "FarmEchoTask:info_set app Teleport to boss failed",
     "RuntimeError: Teleport to boss failed",
@@ -38,10 +41,16 @@ HOST_FARM_ECHO_CONFIRMATION = "HOST_FARM_ECHO_KILL_CONFIRMED"
 HOST_FARM_ECHO_ABSORPTION_CONFIRMATION = (
     "HOST_FARM_ECHO_ABSORPTION_CONFIRMED"
 )
-FARM_ECHO_COMBAT_DEGRADATION_MARKERS = (
-    "clicked liberation but no effect",
-    "Target enemy failed, please disable Nvidia/AMD Filter or Sharpening!",
+FARM_ECHO_LIBERATION_FAILURE_MARKER = "clicked liberation but no effect"
+FARM_ECHO_TARGET_FAILURE_MARKER = (
+    "Target enemy failed, please disable Nvidia/AMD Filter or Sharpening!"
 )
+FARM_ECHO_LUCILLA_LIBERATION_START_MARKER = "Lucilla:Lucilla perform lib"
+FARM_ECHO_LUCILLA_TRANSFORM_END_MARKER = (
+    "Lucilla:Lucilla transform ended, stop pulse heavy early"
+)
+FARM_ECHO_LUCILLA_LIBERATION_END_MARKER = "Lucilla:Lucilla perform lib end"
+FARM_ECHO_CURRENT_CHAR_BIND_FAILURE_MARKER = "FarmEchoTask:could not find char"
 FARM_ECHO_PICKUP_CONFIRMATION_MARKERS = (
     "FarmEchoTask:farm echo on the face",
     "FarmEchoTask:farm echo yolo find True",
@@ -159,24 +168,72 @@ def count_farm_echo_absorptions(text: str) -> int:
     )
 
 
+def has_farm_echo_lucilla_liberation_stall(text: str) -> bool:
+    """Detect an upstream Lucilla liberation that ran to its blind timeout.
+
+    A normal transformation logs its explicit early-end marker before the
+    generic ``perform lib end`` line.  If the generic end arrives without that
+    marker, upstream spent the full fallback window attacking without ever
+    observing an active-and-ended transformation.  This is a deterministic
+    host-side degradation fact; it does not infer or alter combat decisions.
+    """
+    in_liberation = False
+    observed_transform_end = False
+    for line in text.splitlines():
+        if (
+            FARM_ECHO_LUCILLA_LIBERATION_START_MARKER in line
+            and FARM_ECHO_LUCILLA_LIBERATION_END_MARKER not in line
+        ):
+            in_liberation = True
+            observed_transform_end = False
+            continue
+        if not in_liberation:
+            continue
+        if FARM_ECHO_LUCILLA_TRANSFORM_END_MARKER in line:
+            observed_transform_end = True
+        elif FARM_ECHO_LUCILLA_LIBERATION_END_MARKER in line:
+            if not observed_transform_end:
+                return True
+            in_liberation = False
+            observed_transform_end = False
+    return False
+
+
 def has_farm_echo_combat_degradation(text: str) -> bool:
-    """Recognize OK-WW combat input/detection degradation in a failed run."""
-    return any(marker in text for marker in FARM_ECHO_COMBAT_DEGRADATION_MARKERS)
+    """Require a same-run deterministic upstream degradation chain."""
+    return (
+        has_farm_echo_current_char_bind_failure(text)
+        or (
+        FARM_ECHO_LIBERATION_FAILURE_MARKER in text
+        and FARM_ECHO_TARGET_FAILURE_MARKER in text
+        )
+    )
+
+
+def has_farm_echo_current_char_bind_failure(text: str) -> bool:
+    """Detect a fresh upstream Worker that cannot bind the active character."""
+    return FARM_ECHO_CURRENT_CHAR_BIND_FAILURE_MARKER in text
 
 
 def is_recoverable_farm_echo_death(text: str) -> bool:
-    """Require both current-run death facts before touching the game UI."""
+    """Require current-run death facts before invoking waypoint healing."""
     normal_death = all(marker in text for marker in FARM_ECHO_DEATH_MARKERS)
     return (
         normal_death
         or FARM_ECHO_REALM_DEFEAT_MARKER in text
         or FARM_ECHO_REVIVE_DIALOG_MARKER in text
+        or FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_MARKER in text
     )
 
 
 def is_recoverable_farm_echo_realm_defeat(text: str) -> bool:
     """Recognize the separately confirmed full-realm defeat state."""
     return FARM_ECHO_REALM_DEFEAT_MARKER in text
+
+
+def is_recoverable_farm_echo_party_member_unavailable(text: str) -> bool:
+    """Recognize a blocked party-member switch with a visible party HUD."""
+    return FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_MARKER in text
 
 
 def is_recoverable_farm_echo_entry_failure(text: str) -> bool:

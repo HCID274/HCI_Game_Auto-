@@ -25,20 +25,16 @@ from wuwa_auto.settings import (
 TELEPORT_AND_FARM_4C = "Teleport and Farm 4C Echo"
 AUTO_FARM_NIGHTMARE = "Auto Farm all Nightmare Nest"
 EXPECTED_REPEAT_FARM_COUNT = 5
-COMBAT_PASSES_PER_CONFIRMED_KILL = 12
-MAX_RECOVERY_COMBAT_ATTEMPTS = (
-    EXPECTED_REPEAT_FARM_COUNT * COMBAT_PASSES_PER_CONFIRMED_KILL
-)
 
 
 def confirmed_retry_attempt_limit(target_count: int) -> int:
-    """Allow detector re-entry without relaxing the exact kill target."""
+    """Keep every upstream worker on the user's persistent five-pass policy."""
     if not 1 <= target_count <= EXPECTED_REPEAT_FARM_COUNT:
         raise ValueError(
             "confirmed retry target must be between 1 and "
             f"{EXPECTED_REPEAT_FARM_COUNT}; actual={target_count}"
         )
-    return target_count * COMBAT_PASSES_PER_CONFIRMED_KILL
+    return EXPECTED_REPEAT_FARM_COUNT
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -105,23 +101,36 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 @contextmanager
 def temporary_farm_echo_repeat_count(repeat_count: int) -> Iterator[None]:
-    """Override only the user config for one bounded retry, then restore bytes."""
-    if not 1 <= repeat_count <= MAX_RECOVERY_COMBAT_ATTEMPTS:
+    """Guard the fixed five-pass policy without rewriting persistent config."""
+    if repeat_count != EXPECTED_REPEAT_FARM_COUNT:
         raise ValueError(
-            "recovery repeat count must be between 1 and "
-            f"{MAX_RECOVERY_COMBAT_ATTEMPTS}; actual={repeat_count}"
+            "FarmEcho repeat count must remain fixed at "
+            f"{EXPECTED_REPEAT_FARM_COUNT}; actual={repeat_count}"
+        )
+    config = _load_json(OK_FARM_ECHO_CONFIG)
+    baseline = config.get("Repeat Farm Count")
+    if baseline != EXPECTED_REPEAT_FARM_COUNT:
+        raise RuntimeError(
+            "refusing temporary FarmEcho override because the persistent "
+            "Repeat Farm Count invariant is broken: expected="
+            f"{EXPECTED_REPEAT_FARM_COUNT}; actual={baseline!r}"
         )
     original = OK_FARM_ECHO_CONFIG.read_bytes()
-    config = _load_json(OK_FARM_ECHO_CONFIG)
-    config["Repeat Farm Count"] = repeat_count
-    modified = (json.dumps(config, ensure_ascii=False, indent=4) + "\n").encode(
-        "utf-8"
-    )
-    _atomic_write(OK_FARM_ECHO_CONFIG, modified)
     try:
         yield
     finally:
-        _atomic_write(OK_FARM_ECHO_CONFIG, original)
+        if OK_FARM_ECHO_CONFIG.read_bytes() != original:
+            _atomic_write(OK_FARM_ECHO_CONFIG, original)
+            if OK_FARM_ECHO_CONFIG.read_bytes() != original:
+                raise RuntimeError(
+                    "FarmEcho configuration changed during a run and exact "
+                    "restoration failed"
+                )
+            raise RuntimeError(
+                "FarmEcho configuration changed during a run; restored the "
+                "original bytes and refused to continue"
+            )
+        _load_farm_echo_facts(EXPECTED_REPEAT_FARM_COUNT)
 
 
 def validate_weekly_garden_configuration() -> dict[str, Any]:

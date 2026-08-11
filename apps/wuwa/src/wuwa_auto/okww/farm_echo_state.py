@@ -7,6 +7,9 @@ from typing import Protocol
 
 REALM_DEFEAT_MARKER = "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED"
 REVIVE_DIALOG_MARKER = "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED"
+PARTY_MEMBER_UNAVAILABLE_MARKER = (
+    "HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED"
+)
 IN_PLACE_REVIVAL_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_IN_PLACE_REVIVAL_COMPLETED"
 )
@@ -18,6 +21,9 @@ REALM_DEFEAT_RETRY_COMPLETED_MARKER = (
 )
 REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_REALM_DEFEAT_HEAL_RECOVERY_COMPLETED"
+)
+PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER = (
+    "HOST_FARM_ECHO_PARTY_MEMBER_HEAL_RECOVERY_COMPLETED"
 )
 
 _DEFEAT_TITLE = re.compile(r"(?:挑战失败|Challenge\s*Failed)", re.IGNORECASE)
@@ -31,6 +37,36 @@ class RealmStateTask(Protocol):
     def wait_ocr(self, *args: object, **kwargs: object) -> object: ...
 
     def wait_click_ocr(self, *args: object, **kwargs: object) -> object: ...
+
+    def in_team(self) -> object: ...
+
+
+def party_member_unavailable(
+    task: RealmStateTask,
+    message: object,
+) -> bool:
+    """Confirm a blocked switch while the party HUD is still visible.
+
+    Upstream raises ``failed switch chars`` only after ten seconds of trying
+    to switch to the selected party member.  In the affected non-revivable
+    realm, the dead portrait remains in the party HUD, so the normal revive
+    dialog is absent.  Requiring both facts avoids treating a normal combat
+    exit or target loss as a character death.
+    """
+    if str(message).strip() != "failed switch chars":
+        return False
+    try:
+        state = task.in_team()
+    except Exception:
+        return False
+    if not isinstance(state, (tuple, list)) or len(state) < 3:
+        return False
+    in_team, _, party_size = state[:3]
+    return bool(
+        in_team
+        and isinstance(party_size, int)
+        and party_size >= 2
+    )
 
 
 def realm_defeat_visible(task: RealmStateTask, *, time_out: float = 1.5) -> bool:

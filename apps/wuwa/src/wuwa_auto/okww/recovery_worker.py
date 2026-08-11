@@ -12,6 +12,7 @@ from pathlib import Path
 
 try:
     from .farm_echo_state import (
+        PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER,
         REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
         REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER,
         click_realm_defeat_exit,
@@ -20,6 +21,7 @@ try:
     from .virtual_hid import _virtual_hid_click
 except ImportError:  # executed directly by OK-WW's bundled Python
     from farm_echo_state import (
+        PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER,
         REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
         REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER,
         click_realm_defeat_exit,
@@ -34,6 +36,8 @@ WORLD_RECOVERY_STARTED_MARKER = "HOST_WORLD_STATE_RECOVERY_STARTED"
 WORLD_RECOVERY_COMPLETED_MARKER = "HOST_WORLD_STATE_RECOVERY_COMPLETED"
 RECOVERY_HID_CLICK_MARKER = "HOST_FARM_ECHO_RECOVERY_VIRTUAL_HID_CLICK"
 DETECT_ACTION_OCR_MARKER = "HOST_FARM_ECHO_RECOVERY_DETECT_ACTION_OCR"
+EXTENDED_WORLD_WAIT_MARKER = "HOST_FARM_ECHO_RECOVERY_EXTENDED_WORLD_WAIT"
+MIN_WAYPOINT_WORLD_WAIT_SECONDS = 120.0
 _DETECT_ACTION_RE = re.compile(r"探测|探測|Detect", re.IGNORECASE)
 _DETECT_ACTION_REGION = (0.70, 0.78, 0.99, 0.98)
 
@@ -225,10 +229,7 @@ def _heal_after_realm_defeat(task: object) -> str:
         raise_if_not_found=False,
     ):
         raise RuntimeError("realm defeat exit did not return to the team/world state")
-    heal = getattr(task, "revive_at_tower_and_heal", None)
-    if not callable(heal):
-        raise TypeError("OK-WW DomainTask has no waypoint healing method")
-    heal()
+    _heal_at_waypoint_with_extended_world_wait(task)
     if not task.wait_in_team_and_world(
         time_out=120,
         raise_if_not_found=False,
@@ -236,6 +237,90 @@ def _heal_after_realm_defeat(task: object) -> str:
         raise RuntimeError("waypoint healing did not return to the team/world state")
     task.log_info(REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER)
     return REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+
+
+def _heal_after_party_member_unavailable(task: object) -> str:
+    """Stop the active challenge, exit it, and heal the whole party."""
+
+    task.send_key("esc", after_sleep=1)  # type: ignore[attr-defined]
+    exited = task.wait_click_feature(  # type: ignore[attr-defined]
+        "gray_confirm_exit_button",
+        relative_x=-1,
+        raise_if_not_found=False,
+        time_out=5,
+        click_after_delay=0.5,
+        threshold=0.7,
+        after_sleep=1,
+    )
+    if not exited:
+        raise RuntimeError(
+            "party member became unavailable but the active realm exit "
+            "control was not visible"
+        )
+    if not task.wait_in_team_and_world(  # type: ignore[attr-defined]
+        time_out=120,
+        raise_if_not_found=False,
+    ):
+        raise RuntimeError(
+            "party-member recovery did not return to the team/world state"
+        )
+    _heal_at_waypoint_with_extended_world_wait(task)
+    if not task.wait_in_team_and_world(  # type: ignore[attr-defined]
+        time_out=120,
+        raise_if_not_found=False,
+    ):
+        raise RuntimeError(
+            "party-member waypoint healing did not return to the world state"
+        )
+    task.log_info(PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER)  # type: ignore[attr-defined]
+    return PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+
+
+def _heal_at_waypoint_with_extended_world_wait(task: object) -> None:
+    """Keep upstream waypoint healing but extend its too-short loading wait.
+
+    OK-WW currently waits only 20 seconds after clicking the waypoint teleport.
+    A real 2560x1440 run was still on the 80% loading screen at that boundary.
+    The host changes only this recovery-local timeout and restores the original
+    method immediately; navigation, waypoint choice, and healing remain upstream.
+    """
+
+    heal = getattr(task, "revive_at_tower_and_heal", None)
+    original_wait = getattr(task, "wait_in_team_and_world", None)
+    if not callable(heal):
+        raise TypeError("OK-WW DomainTask has no waypoint healing method")
+    if not callable(original_wait):
+        raise TypeError("OK-WW DomainTask has no team/world wait method")
+
+    def extended_wait(*args: object, **kwargs: object) -> object:
+        requested: object
+        if args:
+            requested = args[0]
+            try:
+                applied = max(float(requested), MIN_WAYPOINT_WORLD_WAIT_SECONDS)
+            except (TypeError, ValueError):
+                applied = MIN_WAYPOINT_WORLD_WAIT_SECONDS
+            args = (applied, *args[1:])
+        else:
+            requested = kwargs.get("time_out")
+            try:
+                applied = max(
+                    float(requested), MIN_WAYPOINT_WORLD_WAIT_SECONDS
+                )
+            except (TypeError, ValueError):
+                applied = MIN_WAYPOINT_WORLD_WAIT_SECONDS
+            kwargs["time_out"] = applied
+        task.log_info(  # type: ignore[attr-defined]
+            f"{EXTENDED_WORLD_WAIT_MARKER} "
+            f"requested={requested} applied={applied:g}"
+        )
+        return original_wait(*args, **kwargs)
+
+    setattr(task, "wait_in_team_and_world", extended_wait)
+    try:
+        heal()
+    finally:
+        setattr(task, "wait_in_team_and_world", original_wait)
 
 
 def _require_recovery_completion(marker: str | None) -> str:
@@ -271,12 +356,17 @@ def main(argv: list[str] | None = None) -> int:
     if len(arguments) not in {2, 3}:
         raise SystemExit(
             "usage: recovery_worker.py OK_WORKING_DIR RESULT_PATH "
-            "[death|realm_defeat|world]"
+            "[death|realm_defeat|party_member_unavailable|world]"
         )
     working_dir = Path(arguments[0]).resolve()
     result_path = Path(arguments[1]).resolve()
     mode = arguments[2] if len(arguments) == 3 else "death"
-    if mode not in {"death", "realm_defeat", "world"}:
+    if mode not in {
+        "death",
+        "realm_defeat",
+        "party_member_unavailable",
+        "world",
+    }:
         raise SystemExit(f"unsupported recovery mode: {mode}")
     started = datetime.now().astimezone()
     try:
@@ -345,9 +435,18 @@ def main(argv: list[str] | None = None) -> int:
                 WWOneTimeTask.run(self)
                 recovery_completion = _heal_after_realm_defeat(self)
 
+        class PartyMemberRecoveryTask(VirtualHidRecoveryMixin, DomainTask):
+            name = "Farm Echo Party Member Recovery"
+
+            def run(self) -> None:
+                nonlocal recovery_completion
+                WWOneTimeTask.run(self)
+                recovery_completion = _heal_after_party_member_unavailable(self)
+
         task_by_mode = {
             "death": FarmEchoDeathRecoveryTask,
             "realm_defeat": RealmDefeatRecoveryTask,
+            "party_member_unavailable": PartyMemberRecoveryTask,
             "world": WorldStateRecoveryTask,
         }
         run_task(

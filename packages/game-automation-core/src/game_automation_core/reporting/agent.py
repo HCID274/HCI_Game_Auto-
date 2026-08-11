@@ -168,6 +168,7 @@ def redact_sensitive_data(value: Any) -> Any:
 def _select_evidence_lines(
     lines: list[str],
     *,
+    max_lines: int = _MAX_EVIDENCE_LINES,
     ignored_line_numbers: Collection[int] = (),
 ) -> list[tuple[int, str]]:
     ignored = set(ignored_line_numbers)
@@ -176,7 +177,7 @@ def _select_evidence_lines(
         for number, line in enumerate(lines, 1)
         if number not in ignored
     ]
-    if len(all_items) <= _MAX_EVIDENCE_LINES:
+    if len(all_items) <= max_lines:
         return all_items
     interesting = [item for item in all_items if _INTERESTING_LINE.search(item[1])]
     # Keep the run boundary and latest state first; then fill with relevant
@@ -186,7 +187,7 @@ def _select_evidence_lines(
     for item in all_items[:12] + all_items[-24:] + interesting:
         if item not in selected:
             selected.append(item)
-        if len(selected) >= _MAX_EVIDENCE_LINES:
+        if len(selected) >= max_lines:
             break
     return sorted(selected, key=lambda item: item[0])
 
@@ -197,6 +198,7 @@ def build_evidence_bundle(
     log_text: str,
     source: str = "",
     max_chars: int = _MAX_EVIDENCE_CHARS,
+    max_lines: int = _MAX_EVIDENCE_LINES,
     ignored_line_numbers: Collection[int] = (),
 ) -> dict[str, Any]:
     """Create a bounded, line-addressable evidence bundle for the Agent.
@@ -210,6 +212,7 @@ def build_evidence_bundle(
     lines = log_text.splitlines()
     selected = _select_evidence_lines(
         lines,
+        max_lines=max_lines,
         ignored_line_numbers=ignored_line_numbers,
     )
     line_count = len(lines)

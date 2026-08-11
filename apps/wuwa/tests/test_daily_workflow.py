@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 import pytest
 from wuwa_auto.cleanup import CleanupResult
-from wuwa_auto.daily import _run_boss_then_daily_task, _run_workflow
+from wuwa_auto.daily import (
+    _prepare_okww_cold_start,
+    _run_boss_then_daily_task,
+    _run_workflow,
+)
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.runner import OkRunResult
 
@@ -22,11 +26,11 @@ Daily Task exception stopped
 
 
 @pytest.fixture(autouse=True)
-def _prepare_official_client():
+def _validate_compatibility():
     with patch("wuwa_auto.daily.validate_okww_compatibility"), patch(
-        "wuwa_auto.daily.ensure_client_ready"
-    ) as prepare:
-        yield prepare
+        "wuwa_auto.daily._prepare_okww_cold_start"
+    ):
+        yield
 
 
 def _result(
@@ -73,6 +77,19 @@ def _cleanup() -> CleanupResult:
         acceleration_disconnected=True,
         uu_exited=True,
     )
+
+
+def test_okww_cold_start_closes_every_preopened_client_owner() -> None:
+    with patch("wuwa_auto.daily.stop_daily_workers") as stop_workers, patch(
+        "wuwa_auto.daily.stop_wuthering_game"
+    ) as stop_game, patch(
+        "wuwa_auto.daily.stop_client_launchers"
+    ) as stop_launchers:
+        _prepare_okww_cold_start()
+
+    stop_workers.assert_called_once_with()
+    stop_game.assert_called_once_with()
+    stop_launchers.assert_called_once_with()
 
 
 def test_multiple_recovery_attempts_produce_one_final_report(
@@ -170,7 +187,9 @@ def test_terminal_partial_result_produces_one_final_report(tmp_path: Path) -> No
         exit_code = _run_workflow("farm_echo", lambda: initial)
 
     assert exit_code == 1
-    recover.assert_called_once_with(initial)
+    recover.assert_called_once()
+    assert recover.call_args.args == (initial,)
+    assert callable(recover.call_args.kwargs["client_restart"])
     report.assert_called_once_with(terminal, cleanup)
 
 
@@ -488,7 +507,7 @@ def test_daily_workflow_runs_boss_before_daily_and_reports_once(
     assert "Daily Task Completed" in combined
 
 
-def test_daily_continues_after_boss_failure_and_reports_partial_once(
+def test_daily_waits_for_five_absorptions_and_reports_skip_once(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
@@ -534,8 +553,9 @@ def test_daily_continues_after_boss_failure_and_reports_partial_once(
         exit_code = _run_workflow("daily", _run_boss_then_daily_task)
 
     assert exit_code == 1
-    run_daily.assert_called_once()
+    run_daily.assert_not_called()
     report.assert_called_once()
     final_result = report.call_args.args[0]
     assert final_result.config["daily_sequence"]["boss_status"] == "failed"
-    assert final_result.config["daily_sequence"]["daily_status"] == "success"
+    assert final_result.config["daily_sequence"]["daily_status"] == "failed"
+    assert final_result.config["skipped_after_farm_echo"] is True

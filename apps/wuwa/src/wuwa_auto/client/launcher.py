@@ -25,7 +25,7 @@ import pyautogui
 from game_automation_core.windows.desktop_guard import activate_window
 from PIL import Image
 
-from wuwa_auto.input.viiper import VirtualHidMouse
+from wuwa_auto.input.viiper import VirtualHidMouse, managed_virtual_mouse
 from wuwa_auto.settings import (
     EVIDENCE_DIR,
     WUWA_CLIENT_EXE,
@@ -339,6 +339,34 @@ def _locate_network_retry(
         confidence=0.84,
         region=region,
     )
+
+
+def startup_network_retry_visible() -> bool:
+    """Return whether the exact retry action is visible in the owned game window."""
+    game = _game_window()
+    if game is None:
+        return False
+    retry = _locate_network_retry(region=_search_region(game))
+    return retry is not None and _point_in_window(retry, game)
+
+
+def click_startup_network_retry() -> bool:
+    """Click exactly one verified startup-network retry action.
+
+    This helper deliberately does not cross login or gameplay states.  The caller
+    owns the three-click budget and may restart the OK-owned client afterward.
+    """
+    game = _game_window()
+    if game is None:
+        return False
+    retry = _locate_network_retry(region=_search_region(game))
+    if retry is None or not _point_in_window(retry, game):
+        return False
+    _restore_game(game)
+    with managed_virtual_mouse() as mouse:
+        evidence: list[str] = []
+        _click_state(mouse, game, retry, "ok_startup_network_retry", evidence)
+    return True
 
 
 def _point_in_window(point: tuple[int, int], window: WindowInfo) -> bool:

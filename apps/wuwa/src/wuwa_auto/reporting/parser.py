@@ -23,6 +23,25 @@ from wuwa_auto.reporting.user_context import load_reporting_context
 
 DAILY_POINTS = re.compile(r"total daily points (?P<points>\d+)")
 BOSS_TELEPORT = re.compile(r"Teleport to Boss Boss Challenge (?P<index>\d+)")
+WUWA_AGENT_EVIDENCE_MAX_CHARS = 64_000
+WUWA_AGENT_EVIDENCE_MAX_LINES = 720
+
+
+def build_wuwa_agent_evidence(
+    log_text: str,
+    *,
+    source: str = "",
+    ignored_line_numbers: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, Any]:
+    """Use a large but still redacted and bounded DeepSeek evidence window."""
+    return build_evidence_bundle(
+        game="wuwa",
+        log_text=log_text,
+        source=source,
+        max_chars=WUWA_AGENT_EVIDENCE_MAX_CHARS,
+        max_lines=WUWA_AGENT_EVIDENCE_MAX_LINES,
+        ignored_line_numbers=ignored_line_numbers,
+    )
 
 
 def _battle_pass_claim_branch_completed(text: str) -> bool:
@@ -51,16 +70,52 @@ def _format_duration(seconds: int) -> str:
     return f"{remainder}秒"
 
 
+def _normalized_result_reason(result: Any) -> str:
+    """Keep legacy composite reasons aligned with structured recovery facts."""
+    reason = str(result.reason)
+    recovery = result.config.get("farm_echo_recovery") or {}
+    history = recovery.get("recoveries") or []
+    if history and "recoveries=" in reason:
+        game_recoveries = sum(
+            1
+            for item in history
+            if isinstance(item, dict)
+            and not (
+                item.get("kind") == "client_restart"
+                or "client restart" in str(item.get("reason", "")).casefold()
+            )
+        )
+        reason = re.sub(
+            r"recoveries=\d+",
+            f"recoveries={game_recoveries}",
+            reason,
+        )
+    if recovery.get("triggered") and "worker_retries=" not in reason:
+        retry_runs = int(recovery.get("retry_runs") or 0)
+        if recovery.get("progress_driven_retries") is True:
+            retry_text = f"{retry_runs} (progress-driven)"
+        else:
+            retry_text = f"{retry_runs}/{int(recovery.get('retry_limit') or 3)}"
+        reason += (
+            f"; worker_retries={retry_text}"
+            f"; combat_rebinds={int(recovery.get('combat_rebind_attempts') or 0)}"
+            "; client_restarts="
+            f"{int(bool(recovery.get('client_restart_triggered')))}"
+        )
+    return reason
+
+
 def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     """Parse a run result without consulting logs from any earlier run."""
     path = Path(result.log_slice_path)
     text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
     cleanup_data = cleanup.to_dict() if cleanup is not None else {}
     issues: list[ReportItem] = []
+    result_reason = _normalized_result_reason(result)
 
     status = "completed" if result.status == "success" else "failed"
     if result.status != "success":
-        issues.append(ReportItem("run-failure", f"主流程失败：{result.reason}"))
+        issues.append(ReportItem("run-failure", f"主流程失败：{result_reason}"))
 
     daily: list[ReportItem] = []
     daily_activity = parse_activity_marker(text)
@@ -249,15 +304,51 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     if recovery.get("triggered"):
         retry_completed = int(recovery.get("retry_completed") or 0)
         recovery_attempts = int(recovery.get("recovery_attempts") or 0)
+        combat_rebind_attempts = int(
+            recovery.get("combat_rebind_attempts") or 0
+        )
+        retry_runs = int(recovery.get("retry_runs") or 0)
+        progress_driven_retries = recovery.get("progress_driven_retries") is True
+        retry_limit = int(recovery.get("retry_limit") or 3)
         total_completed = int(recovery.get("total_completed") or boss_runs)
         target = int(recovery.get("target_count") or total_completed)
         recovery_history = recovery.get("recoveries") or []
-        realm_defeat_attempts = sum(
+        client_restart_attempts = sum(
             1
             for item in recovery_history
-            if isinstance(item, dict) and item.get("realm_defeat") is True
+            if isinstance(item, dict)
+            and (
+                item.get("kind") == "client_restart"
+                or "client restart" in str(item.get("reason", "")).casefold()
+            )
         )
-        death_attempts = max(0, recovery_attempts - realm_defeat_attempts)
+        client_restart_attempts = max(
+            client_restart_attempts,
+            int(bool(recovery.get("client_restart_triggered"))),
+        )
+        game_recovery_history = [
+            item
+            for item in recovery_history
+            if isinstance(item, dict)
+            and not (
+                item.get("kind") == "client_restart"
+                or "client restart" in str(item.get("reason", "")).casefold()
+            )
+        ]
+        if recovery_history:
+            recovery_attempts = len(game_recovery_history)
+        realm_defeat_attempts = sum(
+            1
+            for item in game_recovery_history
+            if item.get("realm_defeat") is True
+        )
+        death_attempts = sum(
+            1
+            for item in game_recovery_history
+            if item.get("realm_defeat") is not True
+        )
+        if not recovery_history:
+            death_attempts = max(0, recovery_attempts - realm_defeat_attempts)
 
         def recovery_summary(action: str) -> str:
             events: list[str] = []
@@ -265,8 +356,57 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                 events.append(f"讨伐副本团灭{realm_defeat_attempts}次")
             if death_attempts:
                 events.append(f"讨伐中途倒地{death_attempts}次")
+            if client_restart_attempts:
+                events.append(f"客户端重启{client_restart_attempts}次")
             events.append(action)
             return "，".join(events)
+
+        if combat_rebind_attempts or client_restart_attempts:
+            actions: list[str] = []
+            if combat_rebind_attempts:
+                actions.append(f"Worker重绑定{combat_rebind_attempts}次")
+            if client_restart_attempts:
+                actions.append(f"客户端重启{client_restart_attempts}次")
+            action_text = "、".join(actions)
+            if progress_driven_retries:
+                retry_text = (
+                    f"已执行{retry_runs}次Worker重试（有吸收进度不设总上限）"
+                )
+            else:
+                retry_text = f"已执行{retry_runs}/{retry_limit}次Worker重试"
+            item = ReportItem(
+                "upstream-combat-recovery",
+                f"上游战斗劣化后{action_text}，{retry_text}"
+                + ("，任务已恢复" if result.status == "success" else "，仍未恢复"),
+            )
+            if result.status == "success":
+                followup.append(item)
+            else:
+                issues.append(item)
+
+        if retry_runs and not (combat_rebind_attempts or client_restart_attempts):
+            initial_completed = int(recovery.get("initial_completed") or 0)
+            boundary = (
+                "首个Worker达到尝试上限"
+                if "bounded combat attempts" in text
+                else "首个Worker结束"
+            )
+            retry_policy = (
+                "（有吸收进度不设总上限）"
+                if progress_driven_retries
+                else f"（最多{retry_limit}次）"
+            )
+            item = ReportItem(
+                "worker-progress-recovery",
+                f"{boundary}时确认{initial_completed}/{target}，"
+                f"后续Worker续跑{retry_runs}次并补吸收{retry_completed}次，"
+                f"累计{total_completed}/{target}{retry_policy}，"
+                + ("任务已恢复" if result.status == "success" else "仍未恢复"),
+            )
+            if result.status == "success":
+                followup.append(item)
+            else:
+                issues.append(item)
 
         if recovery_attempts and result.status == "success":
             if retry_completed:
@@ -368,7 +508,7 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
 
     return RunFacts(
         overall_status=status,
-        reason=result.reason,
+        reason=result_reason,
         duration_seconds=result.duration_seconds,
         workflow_task=str(result.config.get("workflow_task", "daily")),
         daily=daily,
@@ -378,9 +518,8 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         daily_activity=daily_activity,
         cleanup=cleanup_data,
         user_context=load_reporting_context(),
-        evidence=build_evidence_bundle(
-            game="wuwa",
-            log_text=text,
+        evidence=build_wuwa_agent_evidence(
+            text,
             source=str(path),
             ignored_line_numbers=known_upstream_noise_lines(text),
         ),

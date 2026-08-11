@@ -4,6 +4,7 @@ from unittest.mock import ANY, patch
 
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.recovery_flow import (
+    MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
     _recover_safely,
     maybe_recover_farm_echo_death,
 )
@@ -20,6 +21,12 @@ RESTART_CONFIRMATION = (
     "(769, 900) after_sleep 0\n"
 )
 REALM_DEFEAT = "FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n"
+PARTY_MEMBER_UNAVAILABLE = (
+    "FarmEchoTask:HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED\n"
+)
+CURRENT_CHAR_BIND_FAILURE = (
+    "FarmEchoTask:could not find char 0 please check current char\n"
+)
 
 
 def _result(
@@ -69,6 +76,109 @@ def _safe_in_place() -> FarmEchoRecoveryResult:
     )
 
 
+def test_live_degradation_rebinds_fresh_worker_in_active_realm(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        CURRENT_CHAR_BIND_FAILURE,
+        status="failed",
+    )
+    initial.config["farm_echo_live_combat_degradation"] = True
+    retry = _result(
+        runs,
+        "retry",
+        ABSORPTION,
+        status="success",
+        absorbed=1,
+    )
+    initial.config["target_count"] = 1
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely"
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    recover.assert_not_called()
+    assert run_retry.call_args.kwargs["resume_active_realm"] is True
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["combat_rebind_attempts"] == 1
+    assert recovery["recovery_attempts"] == 0
+
+
+def test_failed_active_realm_bind_restarts_client_then_retries_normally(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        CURRENT_CHAR_BIND_FAILURE,
+        status="failed",
+    )
+    initial.config.update(
+        target_count=1,
+        farm_echo_live_combat_degradation=True,
+    )
+    bind_failure = _result(
+        runs,
+        "bind-failure",
+        CURRENT_CHAR_BIND_FAILURE,
+        status="failed",
+    )
+    bind_failure.config["farm_echo_live_combat_degradation"] = True
+    success = _result(
+        runs,
+        "success",
+        ABSORPTION,
+        status="success",
+        absorbed=1,
+    )
+    restarts: list[str] = []
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely"
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=[bind_failure, success],
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            client_restart=lambda: not restarts.append("restart"),
+        )
+
+    assert result.status == "success"
+    assert restarts == ["restart"]
+    assert recover.call_count == 0
+    assert run_retry.call_count == 2
+    assert run_retry.call_args_list[0].kwargs["resume_active_realm"] is True
+    assert "resume_active_realm" not in run_retry.call_args_list[1].kwargs
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["combat_rebind_attempts"] == 1
+    assert recovery["client_restart_triggered"] is True
+    assert recovery["retry_runs"] == 2
+
+
 def test_death_recovers_and_retries_only_remaining_count(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     initial = _result(runs, "initial", ABSORPTION * 3 + DEATH, status="failed")
@@ -103,12 +213,52 @@ def test_death_recovers_and_retries_only_remaining_count(tmp_path: Path) -> None
     assert recovery["retry_completed"] == 2
     assert recovery["total_completed"] == 5
     recover.assert_called_once()
-    override.assert_called_once_with(24)
+    override.assert_called_once_with(5)
     run_retry.assert_called_once_with(
         target_count=2,
-        attempt_limit=24,
+        attempt_limit=5,
         runtime_limit_seconds=ANY,
     )
+
+
+def test_party_member_unavailable_exits_and_heals_before_retry(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        PARTY_MEMBER_UNAVAILABLE,
+        status="failed",
+    )
+    initial.config["target_count"] = 1
+    retry = _result(
+        runs,
+        "retry",
+        ABSORPTION,
+        status="success",
+        absorbed=1,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        return_value=_safe("party healed"),
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    assert result.status == "success"
+    assert recover.call_args.kwargs["party_member_unavailable"] is True
+    assert recover.call_args.kwargs["realm_defeat"] is False
 
 
 def test_death_before_first_completion_retries_full_target(tmp_path: Path) -> None:
@@ -143,10 +293,10 @@ def test_death_before_first_completion_retries_full_target(tmp_path: Path) -> No
     assert recovery["retry_requested"] == 5
     assert recovery["retry_completed"] == 5
     assert recovery["total_completed"] == 5
-    override.assert_called_once_with(60)
+    override.assert_called_once_with(5)
     run_retry.assert_called_once_with(
         target_count=5,
-        attempt_limit=60,
+        attempt_limit=5,
         runtime_limit_seconds=ANY,
     )
 
@@ -284,10 +434,10 @@ def test_structured_zero_does_not_count_stale_restart_click(
     assert recovery["initial_completed"] == 0
     assert recovery["retry_requested"] == 1
     assert recovery["total_completed"] == 1
-    override.assert_called_once_with(12)
+    override.assert_called_once_with(5)
     run_retry.assert_called_once_with(
         target_count=1,
-        attempt_limit=12,
+        attempt_limit=5,
         runtime_limit_seconds=ANY,
     )
 
@@ -339,7 +489,7 @@ def test_second_death_retries_again_within_the_shared_deadline(
     assert run_retry.call_args_list[1].kwargs["target_count"] == 1
 
 
-def test_recovery_retry_shares_the_one_hour_absorption_budget(
+def test_recovery_retry_uses_a_full_no_progress_window(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
@@ -386,8 +536,8 @@ def test_recovery_retry_shares_the_one_hour_absorption_budget(
     assert result.status == "success"
     run_retry.assert_called_once_with(
         target_count=1,
-        attempt_limit=12,
-        runtime_limit_seconds=2900.0,
+        attempt_limit=5,
+        runtime_limit_seconds=3600.0,
     )
 
 
@@ -414,7 +564,7 @@ def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
         "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
     ), patch(
         "wuwa_auto.okww.recovery_flow.time.monotonic",
-        side_effect=[0.0, 100.0, 100.0],
+        side_effect=[0.0, 3601.0],
     ), patch(
         "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
     ), patch(
@@ -425,7 +575,7 @@ def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
         result = maybe_recover_farm_echo_death(initial)
 
     assert result.status == "failed"
-    assert "budget exhausted" in result.config["farm_echo_recovery"]["retry_error"]
+    assert "no-progress window exhausted" in result.config["farm_echo_recovery"]["retry_error"]
     assert result.config["farm_echo_recovery"]["first_safe_recovery"] is True
     run_retry.assert_not_called()
 
@@ -479,7 +629,7 @@ DEGRADATION = (
 )
 
 
-def test_combat_degradation_restarts_client_once_before_retry(
+def test_combat_degradation_retriggers_upstream_before_client_restart(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
@@ -524,12 +674,12 @@ def test_combat_degradation_restarts_client_once_before_retry(
 
     assert result.status == "success"
     recovery = result.config["farm_echo_recovery"]
-    assert recovery["client_restart_triggered"] is True
-    assert calls == ["restart"]
-    recover.assert_not_called()
+    assert recovery["client_restart_triggered"] is False
+    assert calls == []
+    recover.assert_called_once()
     run_retry.assert_called_once_with(
         target_count=5,
-        attempt_limit=60,
+        attempt_limit=5,
         runtime_limit_seconds=ANY,
     )
 
@@ -638,4 +788,134 @@ def test_client_restart_only_once_across_degraded_retries(
     recovery = result.config["farm_echo_recovery"]
     assert recovery["client_restart_triggered"] is True
     assert calls == ["restart"]
-    assert recover.call_count == 1
+    assert recover.call_count == 2
+    assert recovery["retry_runs"] == 2
+    assert recovery["retry_limit"] is None
+    assert recovery["progress_driven_retries"] is True
+
+
+def test_no_progress_budget_stops_after_three_new_workers(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        DEGRADATION + DEATH,
+        status="failed",
+        absorbed=0,
+    )
+    retries = [
+        _result(
+            runs,
+            f"retry-{index}",
+            DEGRADATION + DEATH,
+            status="failed",
+            absorbed=0,
+        )
+        for index in range(1, MAX_CONSECUTIVE_NO_PROGRESS_RETRIES + 1)
+    ]
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        return_value=_safe(),
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=retries,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            client_restart=lambda: True,
+        )
+
+    recovery = result.config["farm_echo_recovery"]
+    assert result.status == "failed"
+    assert recovery["retry_runs"] == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+    assert "maximum consecutive FarmEcho no-progress" in recovery["retry_error"]
+    assert run_retry.call_count == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+    # The final confirmed death is still returned to a safe world state.
+    assert recover.call_count == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES + 1
+
+
+def test_progress_allows_more_than_three_worker_retries_until_five(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(runs, "initial", DEATH, status="failed", absorbed=0)
+    retries = [
+        _result(
+            runs,
+            f"retry-{index}",
+            ABSORPTION + (DEATH if index < 5 else ""),
+            status="failed" if index < 5 else "success",
+            absorbed=1,
+        )
+        for index in range(1, 6)
+    ]
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        return_value=_safe(),
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=retries,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(initial)
+
+    recovery = result.config["farm_echo_recovery"]
+    assert result.status == "success"
+    assert recovery["total_completed"] == 5
+    assert recovery["retry_runs"] == 5
+    assert recovery["retry_limit"] is None
+    assert recovery["consecutive_no_progress_retries"] == 0
+    assert run_retry.call_count == 5
+    assert recover.call_count == 5
+
+
+def test_startup_network_exhaustion_restarts_ok_owned_client_once(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(runs, "initial", "startup network error\n", status="failed")
+    initial.config.update(
+        {
+            "target_count": 1,
+            "farm_echo_startup_network_retry_exhausted": True,
+        }
+    )
+    retry = _result(runs, "retry", ABSORPTION, status="success", absorbed=1)
+    restarts: list[bool] = []
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            client_restart=lambda: restarts.append(True) or True,
+        )
+
+    assert result.status == "success"
+    assert restarts == [True]
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["client_restart_triggered"] is True
+    assert recovery["recoveries"][0]["kind"] == "client_restart"

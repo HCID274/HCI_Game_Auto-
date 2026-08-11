@@ -80,6 +80,7 @@ class FarmEchoRecoveryResult:
     worker_result_path: str
     resume_active_realm: bool = False
     realm_defeat: bool = False
+    kind: str = "death_recovery"
 
 
 @contextmanager
@@ -160,6 +161,19 @@ def _focus_game_window(timeout: float = 8) -> int:
     raise RuntimeError("Wuthering Waves window did not become foreground")
 
 
+def focus_game_window_for_ok_startup() -> int:
+    """Wake OK-WW's first capture without taking over login or combat input."""
+    desktop.require_admin()
+    hwnd = _focus_game_window()
+    _validate_game_window(hwnd)
+    try:
+        desktop.save_step_screenshot("ok_cold_start_window_focused")
+    except Exception as exc:  # evidence failure must not undo a valid focus
+        log.warning("could not save OK-WW cold-start focus evidence: %s", exc)
+    log.info("focused OK-WW-owned Wuthering Waves startup window hwnd=%s", hwnd)
+    return hwnd
+
+
 def _validate_game_window(hwnd: int) -> None:
     if not ctypes.windll.user32.IsWindow(hwnd):
         raise RuntimeError(f"Wuthering Waves window is no longer valid: {hwnd}")
@@ -200,6 +214,19 @@ def run_farm_echo_realm_defeat_recovery(
     )
 
 
+def run_farm_echo_party_member_recovery(
+    run_dir: Path,
+    *,
+    attempt: int,
+) -> FarmEchoRecoveryResult:
+    """Exit an active realm after one party member becomes unavailable."""
+    return _run_farm_echo_recovery(
+        run_dir,
+        attempt=attempt,
+        mode="party_member_unavailable",
+    )
+
+
 def _run_farm_echo_recovery(
     run_dir: Path,
     *,
@@ -211,11 +238,15 @@ def _run_farm_echo_recovery(
     desktop.require_supported_display()
     hwnd = _focus_game_window()
     _validate_game_window(hwnd)
-    evidence_prefix = (
-        "ok_farm_echo_realm_defeat_recovery"
-        if mode == "realm_defeat"
-        else "ok_farm_echo_recovery"
-    )
+    evidence_prefixes = {
+        "death": "ok_farm_echo_recovery",
+        "realm_defeat": "ok_farm_echo_realm_defeat_recovery",
+        "party_member_unavailable": "ok_farm_echo_party_member_recovery",
+    }
+    try:
+        evidence_prefix = evidence_prefixes[mode]
+    except KeyError as exc:
+        raise ValueError(f"unsupported FarmEcho recovery mode: {mode}") from exc
     before = desktop.save_step_screenshot(f"{evidence_prefix}_{attempt}_before")
     result_path = run_dir / f"farm-echo-recovery-{attempt}.json"
     worker_log_path = run_dir / f"farm-echo-recovery-{attempt}.log"
@@ -262,6 +293,7 @@ def _run_farm_echo_recovery(
             evidence_path=str(evidence),
             worker_result_path=str(result_path),
             realm_defeat=mode == "realm_defeat",
+            kind=f"{mode}_recovery",
         )
 
     try:
@@ -310,6 +342,7 @@ def _run_farm_echo_recovery(
         worker_result_path=str(result_path),
         resume_active_realm=resume_active_realm,
         realm_defeat=mode == "realm_defeat",
+        kind=f"{mode}_recovery",
     )
 
 

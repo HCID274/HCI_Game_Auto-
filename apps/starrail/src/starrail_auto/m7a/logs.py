@@ -16,6 +16,7 @@ from starrail_auto.m7a.config import (
     EXIT_WATCHDOG_LOG_STALLED,
     M7A_COMPLETION_VALIDATION_INTERVAL,
     M7A_COMPLETION_VALIDATION_TIMEOUT,
+    M7A_DAILY_ALREADY_SETTLED_MARKER,
     M7A_DAILY_BLOCKER_LABELS,
     M7A_DAILY_BLOCKER_PATTERN,
     M7A_DAILY_COMPLETION_MARKER,
@@ -27,6 +28,13 @@ from starrail_auto.m7a.config import (
 from starrail_auto.m7a.models import M7ALogCheckpoint
 
 log = logging.getLogger(__name__)
+
+
+def _daily_is_satisfied(content: str) -> bool:
+    return any(
+        marker in content
+        for marker in (M7A_DAILY_COMPLETION_MARKER, M7A_DAILY_ALREADY_SETTLED_MARKER)
+    )
 
 
 def get_latest_m7a_log() -> Path | None:
@@ -55,13 +63,13 @@ def read_log_since(checkpoint: M7ALogCheckpoint) -> str:
 def wait_for_daily_completion(checkpoint: M7ALogCheckpoint) -> bool:
     deadline = time.monotonic() + M7A_COMPLETION_VALIDATION_TIMEOUT
     while time.monotonic() < deadline:
-        if M7A_DAILY_COMPLETION_MARKER in read_log_since(checkpoint):
+        if _daily_is_satisfied(read_log_since(checkpoint)):
             log.info("daily completion validated from current M7A log")
             return True
         time.sleep(M7A_COMPLETION_VALIDATION_INTERVAL)
     log.error(
-        "daily completion validation failed: marker=%s path=%s offset=%d",
-        M7A_DAILY_COMPLETION_MARKER,
+        "daily completion validation failed: markers=%s path=%s offset=%d",
+        (M7A_DAILY_COMPLETION_MARKER, M7A_DAILY_ALREADY_SETTLED_MARKER),
         checkpoint.path,
         checkpoint.offset,
     )
@@ -70,7 +78,7 @@ def wait_for_daily_completion(checkpoint: M7ALogCheckpoint) -> bool:
 
 def daily_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
     content = read_log_since(checkpoint)
-    if M7A_DAILY_COMPLETION_MARKER in content:
+    if _daily_is_satisfied(content):
         return "completed"
     if M7A_DAILY_INCOMPLETE_MARKER in content:
         return "incomplete"
@@ -80,7 +88,7 @@ def daily_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
 def main_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
     """Resolve main only after failure or M7A's own final stop boundary."""
     content = read_log_since(checkpoint)
-    if M7A_DAILY_COMPLETION_MARKER in content:
+    if _daily_is_satisfied(content):
         return "completed" if M7A_RUN_STOP_MARKER in content else None
     if M7A_DAILY_INCOMPLETE_MARKER in content:
         return "incomplete"

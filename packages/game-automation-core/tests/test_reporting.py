@@ -97,6 +97,20 @@ def test_long_evidence_keeps_final_error_marker() -> None:
     assert "L300" in bundle["line_refs"]
 
 
+def test_evidence_bundle_accepts_a_larger_caller_line_budget() -> None:
+    lines = [f"DailyTask: progress {index}" for index in range(1, 501)]
+    bundle = build_evidence_bundle(
+        game="wuwa",
+        log_text="\n".join(lines),
+        max_chars=100_000,
+        max_lines=400,
+    )
+
+    assert len(bundle["line_refs"]) == 400
+    assert "L1" in bundle["line_refs"]
+    assert "L500" in bundle["line_refs"]
+
+
 def test_evidence_budget_prioritizes_final_error_over_long_prefix() -> None:
     lines = [f"DailyTask: {'x' * 1000} {index}" for index in range(1, 300)]
     lines.append("ERROR: final failure marker")

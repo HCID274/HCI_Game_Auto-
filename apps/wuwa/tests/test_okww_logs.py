@@ -8,8 +8,11 @@ from wuwa_auto.okww.logs import (
     count_farm_echo_kill_confirmations,
     find_failure,
     has_farm_echo_combat_degradation,
+    has_farm_echo_current_char_bind_failure,
+    has_farm_echo_lucilla_liberation_stall,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
+    is_recoverable_farm_echo_party_member_unavailable,
     is_recoverable_farm_echo_realm_defeat,
 )
 
@@ -76,6 +79,13 @@ def test_host_confirmed_revive_dialog_is_recoverable() -> None:
     )
 
 
+def test_host_confirmed_unavailable_party_member_is_recoverable() -> None:
+    text = "FarmEchoTask:HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED\n"
+
+    assert is_recoverable_farm_echo_party_member_unavailable(text)
+    assert is_recoverable_farm_echo_death(text)
+
+
 def test_farm_echo_entry_failure_is_recoverable() -> None:
     assert is_recoverable_farm_echo_entry_failure(
         "FarmEchoTask:info_set app Teleport to boss failed\n"
@@ -130,12 +140,51 @@ FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 2/5
     assert count_farm_echo_absorptions(text) == 2
 
 def test_farm_echo_combat_degradation_markers() -> None:
-    assert has_farm_echo_combat_degradation(
-        "clicked liberation but no effect"
-    )
-    assert has_farm_echo_combat_degradation(
+    liberation = "clicked liberation but no effect"
+    target = (
         "Target enemy failed, please disable Nvidia/AMD Filter or Sharpening!"
     )
+    assert has_farm_echo_combat_degradation(f"{liberation}\n{target}")
+    assert not has_farm_echo_combat_degradation(liberation)
+    assert not has_farm_echo_combat_degradation(target)
     assert not has_farm_echo_combat_degradation(
         "FarmEchoTask:farm echo walk_find_echo True"
     )
+
+
+def test_lucilla_blind_fallback_is_deterministic_combat_degradation() -> None:
+    stalled = """
+Lucilla:Lucilla perform lib
+Lucilla:Lucilla perform lib end
+"""
+    normal = """
+Lucilla:Lucilla perform lib
+Lucilla:Lucilla transform ended, stop pulse heavy early
+Lucilla:Lucilla perform lib end
+"""
+
+    assert has_farm_echo_lucilla_liberation_stall(stalled)
+    # Historical successful runs can contain a blind fallback before a later
+    # normal rotation succeeds, so this is diagnostic evidence only.
+    assert not has_farm_echo_combat_degradation(stalled)
+    assert not has_farm_echo_lucilla_liberation_stall(normal)
+    assert not has_farm_echo_combat_degradation(normal)
+
+
+def test_lucilla_stall_detection_handles_multiple_liberations() -> None:
+    text = """
+Lucilla:Lucilla perform lib
+Lucilla:Lucilla transform ended, stop pulse heavy early
+Lucilla:Lucilla perform lib end
+Lucilla:Lucilla perform lib
+Lucilla:Lucilla perform lib end
+"""
+
+    assert has_farm_echo_lucilla_liberation_stall(text)
+
+
+def test_current_character_bind_failure_is_combat_degradation() -> None:
+    text = "FarmEchoTask:could not find char 0 please check current char\n"
+
+    assert has_farm_echo_current_char_bind_failure(text)
+    assert has_farm_echo_combat_degradation(text)

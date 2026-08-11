@@ -9,7 +9,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from wuwa_auto.okww.logs import LogCursor
+from wuwa_auto.client.launcher import (
+    click_startup_network_retry,
+    startup_network_retry_visible,
+)
+from wuwa_auto.okww.logs import (
+    LogCursor,
+    count_farm_echo_absorptions,
+    has_farm_echo_current_char_bind_failure,
+)
+from wuwa_auto.okww.recovery import focus_game_window_for_ok_startup
 from wuwa_auto.okww.runner import (
     LOG_STALL_TIMEOUT,
     POLL_INTERVAL,
@@ -32,6 +41,80 @@ log = logging.getLogger(__name__)
 
 CONFIRMED_RETRY_WORKER = Path(__file__).with_name("confirmed_retry_worker.py")
 MAX_FARM_ECHO_RUNTIME_SECONDS = 3600.0
+ACTIVE_REALM_BIND_FAILURE_REASON = (
+    "fresh upstream worker could not bind the current active character"
+)
+OK_STARTUP_WINDOW_STABLE_MARKER = "StartController:started window size stable"
+UPSTREAM_INTERACTION_MARKER = "HOST_FARM_ECHO_UPSTREAM_INTERACTION"
+GAMEPLAY_HANDOFF_MARKER = "HOST_FARM_ECHO_GAMEPLAY_HANDOFF"
+MAX_STARTUP_NETWORK_RETRIES = 3
+STARTUP_NETWORK_RETRY_COOLDOWN_SECONDS = 15.0
+
+
+def _live_combat_degradation_reason(
+    text: str,
+    *,
+    resume_active_realm: bool,
+) -> str | None:
+    if resume_active_realm and has_farm_echo_current_char_bind_failure(text):
+        return ACTIVE_REALM_BIND_FAILURE_REASON
+    return None
+
+
+def _focus_ok_startup_window_if_needed(
+    text: str,
+    *,
+    already_focused: bool,
+) -> bool:
+    """Focus once after OK owns and binds a cold-started game window."""
+    if already_focused:
+        return True
+    if OK_STARTUP_WINDOW_STABLE_MARKER not in text:
+        return False
+    if UPSTREAM_INTERACTION_MARKER in text:
+        return False
+    focus_game_window_for_ok_startup()
+    log.info("OK-WW cold-start window focused before task execution")
+    return True
+
+
+def _handle_startup_network_retry(
+    text: str,
+    *,
+    retry_clicks: int,
+    last_retry_at: float,
+    now: float,
+) -> tuple[int, float, str | None]:
+    """Handle only the exact pre-gameplay network dialog with a three-click cap."""
+    if OK_STARTUP_WINDOW_STABLE_MARKER not in text:
+        return retry_clicks, last_retry_at, None
+    if GAMEPLAY_HANDOFF_MARKER in text:
+        return retry_clicks, last_retry_at, None
+    if not startup_network_retry_visible():
+        return retry_clicks, last_retry_at, None
+    if (
+        retry_clicks > 0
+        and now - last_retry_at < STARTUP_NETWORK_RETRY_COOLDOWN_SECONDS
+    ):
+        return retry_clicks, last_retry_at, None
+    if retry_clicks >= MAX_STARTUP_NETWORK_RETRIES:
+        return (
+            retry_clicks,
+            last_retry_at,
+            (
+                "FarmEcho startup network retry exhausted after "
+                f"{MAX_STARTUP_NETWORK_RETRIES} attempts"
+            ),
+        )
+    if not click_startup_network_retry():
+        return retry_clicks, last_retry_at, None
+    retry_clicks += 1
+    log.warning(
+        "clicked exact OK-owned startup network retry %s/%s",
+        retry_clicks,
+        MAX_STARTUP_NETWORK_RETRIES,
+    )
+    return retry_clicks, now, None
 
 
 def _stop_process(process: subprocess.Popen[object]) -> None:
@@ -57,7 +140,7 @@ def run_confirmed_farm_echo_retry(
     runtime_limit_seconds: float = MAX_FARM_ECHO_RUNTIME_SECONDS,
     resume_active_realm: bool = False,
 ) -> OkRunResult:
-    """Retry until N echoes are absorbed, within one bounded wall-clock window."""
+    """Retry until N echoes are absorbed, bounding only time without progress."""
     if (
         runtime_limit_seconds <= 0
         or runtime_limit_seconds > MAX_FARM_ECHO_RUNTIME_SECONDS
@@ -105,8 +188,15 @@ def run_confirmed_farm_echo_retry(
     collected: list[str] = []
     started_monotonic = time.monotonic()
     last_log_activity = started_monotonic
+    no_progress_deadline = started_monotonic + runtime_limit_seconds
+    last_confirmed_absorptions = 0
     saw_log_activity = False
     timeout_reason = ""
+    live_combat_degradation = False
+    startup_window_focused = False
+    startup_network_retry_clicks = 0
+    last_startup_network_retry_at = 0.0
+    startup_network_retry_exhausted = False
     with console_path.open("w", encoding="utf-8") as console:
         resume_active_mouse_control()
         process: subprocess.Popen[object] = subprocess.Popen(
@@ -128,9 +218,62 @@ def run_confirmed_farm_echo_retry(
                 for line in chunk.splitlines():
                     if "HOST_FARM_ECHO_" in line or "Revive Failed" in line:
                         log.info("confirmed retry progress: %s", line)
-            if now - started_monotonic >= runtime_limit_seconds:
+                try:
+                    startup_window_focused = _focus_ok_startup_window_if_needed(
+                        "".join(collected),
+                        already_focused=startup_window_focused,
+                    )
+                except Exception as exc:
+                    timeout_reason = (
+                        "OK-WW cold-start window could not be focused: "
+                        f"{exc}"
+                    )
+                    log.exception(timeout_reason)
+                    break
+                degradation_reason = _live_combat_degradation_reason(
+                    "".join(collected),
+                    resume_active_realm=resume_active_realm,
+                )
+                if degradation_reason:
+                    live_combat_degradation = True
+                    timeout_reason = degradation_reason
+                    log.warning(
+                        "confirmed FarmEcho retry detected live combat "
+                        "degradation; stopping only the upstream worker"
+                    )
+                    break
+            text = "".join(collected)
+            confirmed_absorptions = count_farm_echo_absorptions(text)
+            if confirmed_absorptions > last_confirmed_absorptions:
+                last_confirmed_absorptions = confirmed_absorptions
+                no_progress_deadline = now + runtime_limit_seconds
+                log.info(
+                    "FarmEcho absorption progress advanced to %s; reset the "
+                    "no-progress deadline",
+                    confirmed_absorptions,
+                )
+            try:
+                (
+                    startup_network_retry_clicks,
+                    last_startup_network_retry_at,
+                    network_retry_reason,
+                ) = _handle_startup_network_retry(
+                    text,
+                    retry_clicks=startup_network_retry_clicks,
+                    last_retry_at=last_startup_network_retry_at,
+                    now=now,
+                )
+            except Exception as exc:
+                timeout_reason = f"FarmEcho startup network retry handler failed: {exc}"
+                log.exception(timeout_reason)
+                break
+            if network_retry_reason:
+                timeout_reason = network_retry_reason
+                startup_network_retry_exhausted = True
+                break
+            if now >= no_progress_deadline:
                 timeout_reason = (
-                    "FarmEcho absorption target timed out after "
+                    "FarmEcho made no new absorption progress for "
                     f"{runtime_limit_seconds:.0f} seconds"
                 )
                 break
@@ -162,10 +305,18 @@ def run_confirmed_farm_echo_retry(
             log.exception("invalid confirmed retry result: %s", worker_result_path)
     absorbed_count = int(payload.get("absorbed_count") or 0)
     if not absorbed_count:
-        from wuwa_auto.okww.logs import count_farm_echo_absorptions
-
         absorbed_count = count_farm_echo_absorptions("".join(collected))
     facts["confirmed_farm_echo_absorption_count"] = absorbed_count
+    facts["ok_cold_start_window_focused"] = startup_window_focused
+    facts["farm_echo_startup_network_retry_clicks"] = startup_network_retry_clicks
+    facts["farm_echo_startup_network_retry_exhausted"] = (
+        startup_network_retry_exhausted
+    )
+    facts["farm_echo_no_progress_timeout_seconds"] = runtime_limit_seconds
+    facts["farm_echo_live_combat_degradation"] = live_combat_degradation
+    facts["farm_echo_live_combat_degradation_reason"] = (
+        timeout_reason if live_combat_degradation else ""
+    )
     success = (
         not timeout_reason
         and exit_code == 0

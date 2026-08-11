@@ -24,12 +24,18 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 AI_READ_TIMEOUT_SECONDS = 180
 AI_SUCCESS_MAX_TOKENS = 2048
-AI_DIAGNOSTIC_MAX_TOKENS = 4096
+AI_DIAGNOSTIC_MAX_TOKENS = 8192
+AI_LENGTH_RETRY_MAX_TOKENS = 16384
 log = logging.getLogger(__name__)
 def _safe_summary(summary: str, facts: RunFacts) -> str:
     """Keep one minimal guard: the headline cannot reverse the run status."""
 
     summary = summary.strip()
+    if facts.overall_status != "completed":
+        # Failure causes and phase boundaries are immutable program facts.  A
+        # generic deterministic headline prevents the wording model from
+        # assigning an older daily failure to the current follow-up attempt.
+        return deterministic_summary(facts)
     if not summary or len(summary) > 160 or "邮件" in summary:
         return deterministic_summary(facts)
     if facts.overall_status == "completed":
@@ -97,14 +103,22 @@ def _parse_agent_report(
     summary = data.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise TypeError("AI report has no summary")
-    daily = _string_list(data.get("daily"))
-    weekly = _string_list(data.get("weekly"))
-    followup = _string_list(data.get("followup"))
-    issues = _string_list(data.get("issues"))
+    ai_daily = _string_list(data.get("daily"))
+    ai_weekly = _string_list(data.get("weekly"))
+    ai_followup = _string_list(data.get("followup"))
+    _string_list(data.get("issues"))
     if facts.overall_status == "completed" and not facts.issues:
+        daily = ai_daily
+        weekly = ai_weekly
+        followup = ai_followup
         issues = []
-    elif facts.issues and not issues:
-        # The model may write naturally, but it may not erase a failed step.
+    else:
+        # For impacted runs the model may summarize, but it may neither erase
+        # nor reinterpret deterministic sections.  This is the card's factual
+        # boundary and prevents invented HUD/retry diagnoses.
+        daily = [item.text for item in facts.daily]
+        weekly = [item.text for item in facts.weekly]
+        followup = [item.text for item in facts.followup]
         issues = [item.text for item in facts.issues]
     return NarrativeReport(
         summary=_safe_summary(summary, facts),
@@ -121,8 +135,10 @@ def _consume_completion(response: Any, *, model: str) -> tuple[str, dict[str, An
     """Read either a real streamed response or a compact test response."""
 
     if hasattr(response, "choices"):
-        content = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        content = choice.message.content or ""
         usage = token_usage_from_response(response, model=model).to_dict()
+        usage["finish_reason"] = str(getattr(choice, "finish_reason", "") or "")
         return str(content), usage
 
     parts: list[str] = []
@@ -147,6 +163,31 @@ def _consume_completion(response: Any, *, model: str) -> tuple[str, dict[str, An
     ).to_dict()
     usage["finish_reason"] = finish_reason
     return "".join(parts), usage
+
+
+def _combined_attempt_usage(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any]:
+    combined = dict(second)
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens",
+    ):
+        values = [value for value in (first.get(key), second.get(key)) if value is not None]
+        combined[key] = sum(int(value) for value in values) if values else None
+    input_tokens = int(combined.get("input_tokens") or 0)
+    output_tokens = int(combined.get("output_tokens") or 0)
+    combined["output_input_ratio"] = (
+        round(output_tokens / input_tokens, 4) if input_tokens else None
+    )
+    combined["available"] = bool(first.get("available") or second.get("available"))
+    combined["attempts"] = 2
+    combined["attempt_usage"] = [first, second]
+    return combined
 
 
 def summarize_with_ai(facts: RunFacts) -> NarrativeReport:
@@ -176,21 +217,45 @@ def summarize_with_ai(facts: RunFacts) -> NarrativeReport:
         "ordered_log": facts.evidence,
     }
     payload = redact_sensitive_data(payload)
-    response = client.chat.completions.create(
-        model=model,
-        messages=compose_report_messages(payload),
-        stream=True,
-        stream_options={"include_usage": True},
-        reasoning_effort=("low" if facts.overall_status == "completed" else "high"),
-        extra_body={"thinking": {"type": "enabled"}},
-        response_format={"type": "json_object"},
-        max_tokens=(
-            AI_SUCCESS_MAX_TOKENS
-            if facts.overall_status == "completed"
-            else AI_DIAGNOSTIC_MAX_TOKENS
-        ),
+    messages = compose_report_messages(payload)
+
+    def request(max_tokens: int) -> Any:
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            stream_options={"include_usage": True},
+            reasoning_effort="low",
+            extra_body={"thinking": {"type": "disabled"}},
+            response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+        )
+
+    response = request(
+        AI_SUCCESS_MAX_TOKENS
+        if facts.overall_status == "completed"
+        else AI_DIAGNOSTIC_MAX_TOKENS
     )
     content, usage = _consume_completion(response, model=model)
+    if not content or usage.get("finish_reason") == "length":
+        log.warning(
+            "DeepSeek response exhausted output budget or returned empty content; "
+            "retrying once with max_tokens=%s",
+            AI_LENGTH_RETRY_MAX_TOKENS,
+        )
+        try:
+            retry_response = request(AI_LENGTH_RETRY_MAX_TOKENS)
+            retry_content, retry_usage = _consume_completion(
+                retry_response,
+                model=model,
+            )
+        except Exception as exc:
+            raise AgentResponseError(
+                f"DeepSeek length retry failed: {exc}",
+                token_usage=usage,
+            ) from exc
+        content = retry_content
+        usage = _combined_attempt_usage(usage, retry_usage)
     try:
         if not content:
             raise ValueError("DeepSeek returned empty content")

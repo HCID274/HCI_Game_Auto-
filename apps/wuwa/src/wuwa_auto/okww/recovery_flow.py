@@ -22,11 +22,13 @@ from wuwa_auto.okww.logs import (
     has_farm_echo_combat_degradation,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
+    is_recoverable_farm_echo_party_member_unavailable,
     is_recoverable_farm_echo_realm_defeat,
 )
 from wuwa_auto.okww.recovery import (
     FarmEchoRecoveryResult,
     run_farm_echo_death_recovery,
+    run_farm_echo_party_member_recovery,
     run_farm_echo_realm_defeat_recovery,
 )
 from wuwa_auto.okww.runner import (
@@ -38,6 +40,9 @@ from wuwa_auto.settings import RUNS_DIR
 
 log = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_NO_PROGRESS_RETRIES = 3
+DEGRADED_RUNS_BEFORE_CLIENT_RESTART = 2
+
 
 def _read_log(result: OkRunResult) -> str:
     path = Path(result.log_slice_path)
@@ -48,6 +53,7 @@ def _failed_recovery(
     reason: str,
     *,
     realm_defeat: bool = False,
+    kind: str = "death_recovery",
 ) -> FarmEchoRecoveryResult:
     return FarmEchoRecoveryResult(
         success=False,
@@ -55,6 +61,7 @@ def _failed_recovery(
         evidence_path=None,
         worker_result_path="",
         realm_defeat=realm_defeat,
+        kind=kind,
     )
 
 
@@ -63,18 +70,30 @@ def _recover_safely(
     *,
     attempt: int,
     realm_defeat: bool = False,
+    party_member_unavailable: bool = False,
 ) -> FarmEchoRecoveryResult:
     try:
         stop_daily_workers()
-        recovery = (
-            run_farm_echo_realm_defeat_recovery
-            if realm_defeat
-            else run_farm_echo_death_recovery
-        )
+        if party_member_unavailable:
+            recovery = run_farm_echo_party_member_recovery
+        elif realm_defeat:
+            recovery = run_farm_echo_realm_defeat_recovery
+        else:
+            recovery = run_farm_echo_death_recovery
         return recovery(run_dir, attempt=attempt)
     except Exception as exc:
         log.exception("FarmEcho safety recovery attempt=%s failed", attempt)
-        return _failed_recovery(str(exc), realm_defeat=realm_defeat)
+        return _failed_recovery(
+            str(exc),
+            realm_defeat=realm_defeat,
+            kind=(
+                "party_member_unavailable_recovery"
+                if party_member_unavailable
+                else "realm_defeat_recovery"
+                if realm_defeat
+                else "death_recovery"
+            ),
+        )
 
 
 def _unique_composite_dir(base_run_id: str) -> tuple[str, Path]:
@@ -100,7 +119,13 @@ def _write_composite(
     retry_error: str = "",
     entry_retry_attempts: int = 0,
     client_restart_triggered: bool = False,
+    combat_rebind_attempts: int = 0,
+    consecutive_no_progress_retries: int = 0,
 ) -> OkRunResult:
+    game_recoveries = [
+        recovery for recovery in recoveries
+        if recovery.kind != "client_restart"
+    ]
     initial_completed = attempt_counts[0]
     retry_completed = sum(attempt_counts[1:])
     total_completed = min(target, sum(attempt_counts))
@@ -113,11 +138,21 @@ def _write_composite(
         "triggered": len(attempts) > 1 or bool(recoveries),
         "target_count": target,
         "initial_completed": initial_completed,
-        "first_safe_recovery": recoveries[0].success if recoveries else False,
-        "first_recovery_reason": recoveries[0].reason if recoveries else "",
-        "recovery_attempts": len(recoveries),
+        "first_safe_recovery": (
+            game_recoveries[0].success if game_recoveries else False
+        ),
+        "first_recovery_reason": (
+            game_recoveries[0].reason if game_recoveries else ""
+        ),
+        "recovery_attempts": len(game_recoveries),
         "entry_retry_attempts": entry_retry_attempts,
+        "combat_rebind_attempts": combat_rebind_attempts,
         "client_restart_triggered": client_restart_triggered,
+        "retry_limit": None,
+        "progress_driven_retries": True,
+        "no_progress_retry_limit": MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+        "consecutive_no_progress_retries": consecutive_no_progress_retries,
+        "retry_runs": max(0, len(attempts) - 1),
         "recoveries": [
             {
                 "success": recovery.success,
@@ -125,6 +160,7 @@ def _write_composite(
                 "evidence_path": recovery.evidence_path,
                 "resume_active_realm": recovery.resume_active_realm,
                 "realm_defeat": recovery.realm_defeat,
+                "kind": recovery.kind,
             }
             for recovery in recoveries
         ],
@@ -133,8 +169,12 @@ def _write_composite(
         "retry_completed": retry_completed,
         "retry_status": attempts[-1].status if len(attempts) > 1 else "not_run",
         "retry_error": retry_error,
-        "final_safe_recovery": recoveries[-1].success if recoveries else None,
-        "final_recovery_reason": recoveries[-1].reason if recoveries else "",
+        "final_safe_recovery": (
+            game_recoveries[-1].success if game_recoveries else None
+        ),
+        "final_recovery_reason": (
+            game_recoveries[-1].reason if game_recoveries else ""
+        ),
         "total_completed": total_completed,
         "attempt_run_ids": [attempt.run_id for attempt in attempts],
     }
@@ -152,12 +192,21 @@ def _write_composite(
 
     started = datetime.fromisoformat(initial.started_at)
     finished = datetime.now().astimezone()
+    retry_runs = max(0, len(attempts) - 1)
     if completed:
-        reason = f"FarmEcho recovered and completed {total_completed}/{target}"
+        reason = (
+            f"FarmEcho recovered and completed {total_completed}/{target}; "
+            f"worker_retries={retry_runs} (progress-driven); "
+            f"combat_rebinds={combat_rebind_attempts}; "
+            f"client_restarts={int(client_restart_triggered)}"
+        )
     else:
         reason = (
             f"FarmEcho recovery incomplete: absorbed {total_completed}/{target}; "
-            f"recoveries={len(recoveries)}"
+            f"worker_retries={retry_runs} (progress-driven); "
+            f"combat_rebinds={combat_rebind_attempts}; "
+            f"client_restarts={int(client_restart_triggered)}; "
+            f"recoveries={len(game_recoveries)}"
         )
         if retry_error:
             reason += f"; retry={retry_error}"
@@ -196,13 +245,19 @@ def maybe_recover_farm_echo_death(
     *,
     client_restart: Callable[[], bool] | None = None,
 ) -> OkRunResult:
-    """Recover known FarmEcho failures within one shared absorption deadline."""
+    """Recover until target, bounding consecutive retries that make no progress."""
     if result.status == "success":
         return result
     initial_text = _read_log(result)
+    confirmed_worker = result.config.get("workflow_task") == (
+        "farm_echo_confirmed_retry"
+    )
     if not (
         is_recoverable_farm_echo_death(initial_text)
         or is_recoverable_farm_echo_entry_failure(initial_text)
+        or has_farm_echo_combat_degradation(initial_text)
+        or bool(result.config.get("farm_echo_startup_network_retry_exhausted"))
+        or confirmed_worker
     ):
         return result
 
@@ -222,82 +277,143 @@ def maybe_recover_farm_echo_death(
     initial_completed = min(target, initial_completed)
     remaining = max(0, target - initial_completed)
     log.warning(
-        "FarmEcho death detected: completed=%s target=%s remaining=%s",
+        "FarmEcho recoverable failure detected: completed=%s target=%s remaining=%s",
         initial_completed,
         target,
         remaining,
     )
 
-    explicit_runtime_limit = result.config.get("farm_echo_runtime_limit_seconds")
-    retry_deadline = time.monotonic() + MAX_FARM_ECHO_RUNTIME_SECONDS
-    if explicit_runtime_limit is not None:
-        elapsed_runtime = float(
-            result.config.get("farm_echo_runtime_elapsed_seconds")
-            or result.duration_seconds
-        )
-        remaining_runtime = max(
-            0.0,
-            float(explicit_runtime_limit) - elapsed_runtime,
-        )
-        retry_deadline = time.monotonic() + remaining_runtime
+    no_progress_window = min(
+        MAX_FARM_ECHO_RUNTIME_SECONDS,
+        float(
+            result.config.get("farm_echo_no_progress_timeout_seconds")
+            or result.config.get("farm_echo_runtime_limit_seconds")
+            or MAX_FARM_ECHO_RUNTIME_SECONDS
+        ),
+    )
+    retry_deadline = time.monotonic() + no_progress_window
 
     attempts = [result]
     attempt_counts = [initial_completed]
     recoveries: list[FarmEchoRecoveryResult] = []
     entry_retry_attempts = 0
     client_restart_done = False
+    degraded_runs = 0
+    combat_rebind_attempts = 0
+    consecutive_no_progress_retries = 0
     retry_error = ""
     try:
         current = result
         resume_active_realm = False
-        while current.status != "success":
+        while sum(attempt_counts) < target:
             current_text = _read_log(current)
             death_failure = is_recoverable_farm_echo_death(current_text)
             realm_defeat = is_recoverable_farm_echo_realm_defeat(current_text)
+            party_member_unavailable = (
+                is_recoverable_farm_echo_party_member_unavailable(current_text)
+            )
             entry_failure = is_recoverable_farm_echo_entry_failure(current_text)
-            if not (death_failure or entry_failure):
+            degraded = has_farm_echo_combat_degradation(current_text)
+            live_degraded = bool(
+                current.config.get("farm_echo_live_combat_degradation")
+            )
+            startup_network_failure = bool(
+                current.config.get("farm_echo_startup_network_retry_exhausted")
+            )
+            confirmed_worker_failure = current.config.get("workflow_task") == (
+                "farm_echo_confirmed_retry"
+            )
+            if not (
+                death_failure
+                or entry_failure
+                or degraded
+                or startup_network_failure
+                or confirmed_worker_failure
+            ):
                 break
             if death_failure:
-                degraded = has_farm_echo_combat_degradation(current_text)
-                if (
-                    degraded
-                    and client_restart is not None
-                    and not client_restart_done
-                ):
-                    client_restart_done = True
-                    log.warning(
-                        "FarmEcho combat degradation detected; "
-                        "restarting the Wuthering Waves client once"
-                    )
-                    client_restart()
-                    recoveries.append(
-                        FarmEchoRecoveryResult(
-                            success=True,
-                            reason="client restarted once due to combat degradation",
-                            evidence_path=None,
-                            worker_result_path="",
+                recovery_kwargs: dict[str, object] = {
+                    "attempt": (
+                        sum(
+                            item.kind != "client_restart"
+                            for item in recoveries
                         )
-                    )
-                    resume_active_realm = False
-                else:
-                    recovery = _recover_safely(
-                        Path(current.log_slice_path).parent,
-                        attempt=len(recoveries) + 1,
-                        realm_defeat=realm_defeat,
-                    )
-                    recoveries.append(recovery)
-                    if not recovery.success or sum(attempt_counts) >= target:
-                        break
-                    resume_active_realm = recovery.resume_active_realm
-            else:
-                # The next worker begins with ensure_main and a verified F2
-                # boss-page selection, so no death/teleport-heal UI is needed.
-                stop_daily_workers()
+                        + 1
+                    ),
+                    "realm_defeat": realm_defeat,
+                }
+                if party_member_unavailable:
+                    recovery_kwargs["party_member_unavailable"] = True
+                recovery = _recover_safely(
+                    Path(current.log_slice_path).parent,
+                    **recovery_kwargs,
+                )
+                recoveries.append(recovery)
+                if not recovery.success or sum(attempt_counts) >= target:
+                    break
+                resume_active_realm = recovery.resume_active_realm
+
+            if (
+                consecutive_no_progress_retries
+                >= MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+            ):
+                retry_error = (
+                    "maximum consecutive FarmEcho no-progress retries exhausted: "
+                    f"{MAX_CONSECUTIVE_NO_PROGRESS_RETRIES}"
+                )
+                break
+
+            if entry_failure:
                 entry_retry_attempts += 1
-                log.warning(
-                    "FarmEcho pre-combat entry failed; restart remaining target "
-                    "within shared deadline attempt=%s",
-                    entry_retry_attempts,
+
+            if degraded:
+                degraded_runs += 1
+            if live_degraded and not death_failure:
+                resume_active_realm = True
+
+            restart_for_network = startup_network_failure and not client_restart_done
+            restart_for_degradation = (
+                degraded
+                and degraded_runs >= DEGRADED_RUNS_BEFORE_CLIENT_RESTART
+                and not client_restart_done
+            )
+            if startup_network_failure and client_restart_done:
+                retry_error = (
+                    "FarmEcho startup network retry failed again after one clean "
+                    "OK-owned client restart"
+                )
+                break
+            if restart_for_network or restart_for_degradation:
+                if client_restart is None:
+                    retry_error = (
+                        "FarmEcho requires a clean client restart but no restart "
+                        "adapter is available"
+                    )
+                    break
+                client_restart_done = True
+                restart_reason = (
+                    "startup network retry exhausted"
+                    if restart_for_network
+                    else "upstream combat degradation detected"
+                )
+                log.warning("FarmEcho %s; restarting the client once", restart_reason)
+                try:
+                    restarted = bool(client_restart())
+                except Exception as exc:
+                    retry_error = f"client restart failed: {exc}"
+                    log.exception("FarmEcho client restart failed")
+                    break
+                if not restarted:
+                    retry_error = "client restart adapter returned false"
+                    break
+                recoveries.append(
+                    FarmEchoRecoveryResult(
+                        success=True,
+                        reason=f"client restarted once after {restart_reason}",
+                        evidence_path=None,
+                        worker_result_path="",
+                        kind="client_restart",
+                    )
                 )
                 resume_active_realm = False
 
@@ -305,36 +421,43 @@ def maybe_recover_farm_echo_death(
             remaining_runtime = retry_deadline - time.monotonic()
             if remaining_runtime <= 0:
                 raise RuntimeError(
-                    "FarmEcho one-hour absorption budget exhausted during recovery"
+                    "FarmEcho no-progress window exhausted during recovery"
                 )
             attempt_limit = confirmed_retry_attempt_limit(remaining)
             retry_kwargs: dict[str, object] = {
                 "target_count": remaining,
                 "attempt_limit": attempt_limit,
-                "runtime_limit_seconds": min(
-                    MAX_FARM_ECHO_RUNTIME_SECONDS,
-                    remaining_runtime,
-                ),
+                "runtime_limit_seconds": no_progress_window,
             }
             if resume_active_realm:
                 retry_kwargs["resume_active_realm"] = True
+                combat_rebind_attempts += 1
             resume_active_realm = False
             with temporary_farm_echo_repeat_count(attempt_limit):
                 current = run_confirmed_farm_echo_retry(
                     **retry_kwargs,
                 )
             attempts.append(current)
-            attempt_counts.append(
-                min(
-                    remaining,
-                    int(
-                        current.config.get(
-                            "confirmed_farm_echo_absorption_count"
-                        )
-                        or 0
-                    ),
-                )
+            completed_this_run = min(
+                remaining,
+                int(
+                    current.config.get("confirmed_farm_echo_absorption_count")
+                    or 0
+                ),
             )
+            attempt_counts.append(completed_this_run)
+            if completed_this_run > 0:
+                consecutive_no_progress_retries = 0
+                degraded_runs = 0
+                retry_deadline = time.monotonic() + no_progress_window
+                log.info(
+                    "FarmEcho total progress advanced to %s/%s; Worker recovery "
+                    "remains unlimited and the no-progress window was reset",
+                    min(target, sum(attempt_counts)),
+                    target,
+                )
+            else:
+                consecutive_no_progress_retries += 1
     except Exception as exc:
         retry_error = str(exc)
         log.exception("FarmEcho bounded retry failed before returning a result")
@@ -352,4 +475,6 @@ def maybe_recover_farm_echo_death(
         retry_error=retry_error,
         entry_retry_attempts=entry_retry_attempts,
         client_restart_triggered=client_restart_done,
+        combat_rebind_attempts=combat_rebind_attempts,
+        consecutive_no_progress_retries=consecutive_no_progress_retries,
     )

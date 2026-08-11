@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from game_automation_core.reporting.agent import build_evidence_bundle
-
 from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.noise import known_upstream_noise_lines
+from wuwa_auto.reporting.parser import build_wuwa_agent_evidence
 from wuwa_auto.settings import REPORTS_DIR, RUNS_DIR
 
 
@@ -21,8 +20,9 @@ class _Candidate:
     facts: RunFacts
 
     @property
-    def sort_key(self) -> str:
-        return str(getattr(self.result, "finished_at", "")) or self.run_id
+    def sort_key(self) -> tuple[str, str]:
+        finished_at = str(getattr(self.result, "finished_at", ""))
+        return finished_at, self.run_id
 
     @property
     def sequence(self) -> dict[str, Any]:
@@ -75,6 +75,8 @@ def _read_result(path: Path) -> Any | None:
 
 
 def _archived_candidates(day: str) -> list[_Candidate]:
+    from wuwa_auto.reporting.parser import parse_run
+
     candidates: list[_Candidate] = []
     if not REPORTS_DIR.is_dir():
         return candidates
@@ -84,13 +86,16 @@ def _archived_candidates(day: str) -> list[_Candidate]:
         try:
             archive = json.loads(path.read_text(encoding="utf-8"))
             run_id = str(archive.get("run_id", ""))
-            facts_value = archive.get("facts")
-            if not run_id or not isinstance(facts_value, dict):
+            if not run_id or not isinstance(archive.get("facts"), dict):
                 continue
             result = _read_result(RUNS_DIR / run_id / "result.json")
             if result is None:
                 continue
-            facts = RunFacts.from_dict(facts_value)
+            # Archives may already be a same-day rollup.  Reusing their
+            # combined facts as one phase recursively carries stale successes
+            # and old errors into every later notification.  Reparse only the
+            # source run's own immutable result/log slice.
+            facts = parse_run(result)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             continue
         if facts.workflow_task == "weekly_garden":
@@ -103,12 +108,11 @@ def _select_stage(
     candidates: list[_Candidate],
     *,
     attempted: str,
-    succeeded: str,
 ) -> _Candidate | None:
     stage = [item for item in candidates if getattr(item, attempted)]
-    successful = [item for item in stage if getattr(item, succeeded)]
-    pool = successful or stage
-    return max(pool, key=lambda item: item.sort_key) if pool else None
+    # The latest settled attempt is authoritative.  Preferring any earlier
+    # success hides a later failure and produces a false-positive Feishu card.
+    return max(stage, key=lambda item: item.sort_key) if stage else None
 
 
 def _dedupe_items(items: list[ReportItem]) -> list[ReportItem]:
@@ -122,6 +126,17 @@ def _dedupe_items(items: list[ReportItem]) -> list[ReportItem]:
     return result
 
 
+def _stage_items(
+    key: str,
+    label: str,
+    items: list[ReportItem],
+) -> list[ReportItem]:
+    return [
+        ReportItem(f"{key}-{item.item_id}", f"{label}阶段：{item.text}")
+        for item in items
+    ]
+
+
 def _combined_evidence(candidates: list[_Candidate]) -> dict[str, Any]:
     parts: list[str] = []
     source_ids: list[str] = []
@@ -133,9 +148,8 @@ def _combined_evidence(candidates: list[_Candidate]) -> dict[str, Any]:
         parts.append(f"=== HOST DAY PHASE {item.run_id} ===\n{text}")
         source_ids.append(item.run_id)
     merged = "\n\n".join(parts)
-    return build_evidence_bundle(
-        game="wuwa",
-        log_text=merged,
+    return build_wuwa_agent_evidence(
+        merged,
         source=",".join(source_ids),
         ignored_line_numbers=known_upstream_noise_lines(merged),
     )
@@ -157,12 +171,10 @@ def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> Run
     daily = _select_stage(
         candidates,
         attempted="daily_attempted",
-        succeeded="daily_succeeded",
     )
     followup = _select_stage(
         candidates,
         attempted="followup_attempted",
-        succeeded="followup_succeeded",
     )
 
     # A genuinely standalone phase remains a phase report.  Once both daily
@@ -173,9 +185,11 @@ def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> Run
     selected = list({item.run_id: item for item in (daily, followup)}.values())
     issues: list[ReportItem] = []
     if not daily.daily_succeeded:
-        issues.extend(daily.facts.issues)
+        issues.extend(_stage_items("daily", "日常", daily.facts.issues))
     if not followup.followup_succeeded:
-        issues.extend(followup.facts.issues)
+        issues.extend(
+            _stage_items("followup", "讨伐后续", followup.facts.issues)
+        )
 
     latest = max(candidates, key=lambda item: item.sort_key)
     cleanup_data = latest.facts.cleanup
@@ -198,7 +212,14 @@ def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> Run
         reason=(
             "same-day daily and FarmEcho phases completed"
             if status == "completed"
-            else "; ".join(item.facts.reason for item in selected if item.facts.reason)
+            else "; ".join(
+                (
+                    f"{'日常' if item.run_id == daily.run_id else '讨伐后续'}阶段："
+                    f"{item.facts.reason}"
+                )
+                for item in selected
+                if item.facts.reason
+            )
         ),
         duration_seconds=sum(item.facts.duration_seconds for item in selected),
         workflow_task="daily",

@@ -61,6 +61,7 @@ DIVERGENT_COUNTS_PATTERN = re.compile(
 REDEMPTION_CODE_ONLY_PATTERN = re.compile(r"^[A-Za-z0-9]{8,24}$")
 
 DAILY_COMPLETED_MARKER = "每日实训已完成"
+DAILY_ALREADY_SETTLED_MARKER = "每日实训尚未刷新"
 DAILY_INCOMPLETE_MARKER = "每日实训未完成"
 RUN_STOP_MARKER = "停止运行"
 STALE_SECONDS = 600
@@ -430,6 +431,10 @@ def parse_m7a_run(
             report.daily_status = "completed"
             report.overall_status = "completed"
             _append_unique(report.rewards_completed, "每日实训奖励完成")
+        elif message == DAILY_ALREADY_SETTLED_MARKER:
+            report.daily_status = "completed"
+            report.overall_status = "completed"
+            _append_unique(report.other_tasks, "每日实训已在本刷新周期结清")
         elif message == DAILY_INCOMPLETE_MARKER:
             report.daily_status = "failed"
             report.overall_status = "failed"

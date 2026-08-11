@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
-from wuwa_auto.client.launcher import ensure_client_ready
+from wuwa_auto.client.launcher import stop_client_launchers
 from wuwa_auto.input.viiper import managed_virtual_mouse
 from wuwa_auto.okww.compatibility import validate_okww_compatibility
 from wuwa_auto.okww.config import (
@@ -44,6 +44,19 @@ TACET_DEATH_RECOVERY_FAILURE = (
     "TacetTask:raise_not_in_combat char dead",
     "TacetTask:info_set Revive Failed",
 )
+
+
+def _prepare_okww_cold_start() -> None:
+    """Leave no pre-opened official client for OK-WW to bind.
+
+    Historical successful runs let OK-WW's ``start_exe=True`` path launch the
+    game and enumerate its own fresh window.  The host owns only bounded
+    cleanup before that handoff.
+    """
+    stop_daily_workers()
+    stop_wuthering_game()
+    stop_client_launchers()
+    log.info("official client is closed; OK-WW owns the next game launch")
 
 
 def _read_result_log(result: OkRunResult) -> str:
@@ -237,14 +250,33 @@ def _run_boss_then_daily_task(
             target_count=target,
             attempt_limit=attempt_limit,
         )
-    if client_restart is None:
-        boss = maybe_recover_farm_echo_death(boss)
-    else:
-        boss = maybe_recover_farm_echo_death(boss, client_restart=client_restart)
+    boss = maybe_recover_farm_echo_death(
+        boss,
+        client_restart=client_restart,
+    )
 
-    # The boss phase is best-effort: DailyTask must still get its own chance
-    # and the merged report will accurately expose a partial result.
     stop_daily_workers()
+    if boss.status != "success":
+        skipped_log = Path(boss.log_slice_path).parent / "daily-skipped.log"
+        skipped_log.write_text(
+            "DailyTask was not started because FarmEcho did not reach the "
+            f"required {target}/{target} absorption boundary.\n",
+            encoding="utf-8",
+        )
+        skipped_at = datetime.now().astimezone().isoformat()
+        daily = OkRunResult(
+            run_id=f"{boss.run_id}_daily_skipped",
+            status="failed",
+            reason="DailyTask skipped until FarmEcho reaches 5/5",
+            started_at=skipped_at,
+            finished_at=skipped_at,
+            duration_seconds=0,
+            log_slice_path=str(skipped_log),
+            evidence_path=boss.evidence_path,
+            config={"workflow_task": "daily", "skipped_after_farm_echo": True},
+            exit_code=1,
+        )
+        return _compose_ordered_daily_result(boss, daily)
     daily = _maybe_recover_daily_state(run_daily_task())
     return _compose_ordered_daily_result(boss, daily)
 
@@ -252,6 +284,8 @@ def _run_boss_then_daily_task(
 def _settle_business_transaction(
     task_name: str,
     result: OkRunResult,
+    *,
+    client_restart: Callable[[], bool] | None = None,
 ) -> OkRunResult:
     """Resolve every in-process top-up and recovery before notification."""
     current = result
@@ -262,7 +296,12 @@ def _settle_business_transaction(
                 return current
             current = _maybe_recover_daily_state(current)
         if task_name in {"daily", "farm_echo"}:
-            return maybe_recover_farm_echo_death(current)
+            if client_restart is None:
+                return maybe_recover_farm_echo_death(current)
+            return maybe_recover_farm_echo_death(
+                current,
+                client_restart=client_restart,
+            )
         return current
     except Exception as exc:
         reason = f"{task_name} business transaction settlement exception: {exc}"
@@ -292,21 +331,14 @@ def _run_workflow(task_name: str, task_runner) -> int:
     try:
         validate_okww_compatibility()
         # Keep a real PnP HID mouse present for game UI input and UU cleanup.
-        with managed_virtual_mouse() as mouse:
+        with managed_virtual_mouse():
             try:
                 log.info("%s workflow: local virtual HID mouse is ready", task_name)
                 log.info("%s workflow: ensure Wuthering Waves acceleration", task_name)
                 ensure_connected()
                 acceleration_connected = True
-                log.info("%s workflow: prepare official Wuthering Waves client", task_name)
-                client = ensure_client_ready(mouse)
-                log.info(
-                    "%s workflow: client ready pid=%s updated=%s actions=%s",
-                    task_name,
-                    client.game_pid,
-                    client.updated,
-                    client.launcher_actions,
-                )
+                log.info("%s workflow: prepare OK-WW cold start", task_name)
+                _prepare_okww_cold_start()
                 log.info("%s workflow: start OK-WW task", task_name)
                 restart_state: dict[str, bool] = {"done": False}
 
@@ -314,31 +346,32 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     if restart_state["done"]:
                         return False
                     log.info(
-                        "%s workflow: FarmEcho combat degraded; "
-                        "restarting Wuthering Waves client once",
+                        "%s workflow: close Wuthering Waves so the next "
+                        "OK-WW worker can relaunch and rebind it",
                         task_name,
                     )
                     stop_daily_workers()
                     stop_wuthering_game()
-                    ensure_client_ready(mouse)
+                    stop_client_launchers()
                     restart_state["done"] = True
                     return True
 
-                def run_with_restart() -> OkRunResult:
-                    return _run_boss_then_daily_task(
+                if task_runner is _run_boss_then_daily_task:
+                    result = _run_boss_then_daily_task(
                         client_restart=restart_client_once,
                     )
-
-                runner = (
-                    run_with_restart
-                    if task_runner is _run_boss_then_daily_task
-                    else task_runner
-                )
-                result = runner()
+                else:
+                    result = task_runner()
                 # A retry is part of this workflow's business transaction, not
                 # a new reportable run.  Only the settled composite result may
                 # cross the notification boundary below.
-                result = _settle_business_transaction(task_name, result)
+                result = _settle_business_transaction(
+                    task_name,
+                    result,
+                    client_restart=(
+                        restart_client_once if task_name == "farm_echo" else None
+                    ),
+                )
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"
                 log.exception(failure_reason)

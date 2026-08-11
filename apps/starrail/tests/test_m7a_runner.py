@@ -7,7 +7,11 @@ from unittest.mock import patch
 
 from starrail_auto.m7a.config import EXIT_OK
 from starrail_auto.m7a.environment import is_game_network_ready, wait_for_game_ready
-from starrail_auto.m7a.logs import daily_run_outcome, main_run_outcome, stage_for_exit_code
+from starrail_auto.m7a.logs import (
+    daily_run_outcome,
+    main_run_outcome,
+    stage_for_exit_code,
+)
 from starrail_auto.m7a.models import M7ALogCheckpoint
 from starrail_auto.m7a.watchdog import hard_timeout_for_task, watch
 
@@ -67,6 +71,23 @@ class MainRunPolicyTests(unittest.TestCase):
             return_value="每日实训已完成\n停止运行",
         ):
             self.assertEqual(main_run_outcome(checkpoint), "completed")
+
+    def test_same_cycle_already_settled_resolves_main_at_stop_marker(self) -> None:
+        checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)
+        with patch(
+            "starrail_auto.m7a.logs.read_log_since",
+            return_value="每日实训尚未刷新\n停止运行",
+        ):
+            self.assertEqual(daily_run_outcome(checkpoint), "completed")
+            self.assertEqual(main_run_outcome(checkpoint), "completed")
+
+    def test_same_cycle_already_settled_waits_for_main_stop_marker(self) -> None:
+        checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)
+        with patch(
+            "starrail_auto.m7a.logs.read_log_since",
+            return_value="每日实训尚未刷新",
+        ):
+            self.assertIsNone(main_run_outcome(checkpoint))
 
     def test_main_stop_marker_exits_watchdog_without_touching_process(self) -> None:
         checkpoint = M7ALogCheckpoint(path=Path("unused.log"), offset=0)

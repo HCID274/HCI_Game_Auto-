@@ -41,7 +41,7 @@ class OkConfigurationTests(unittest.TestCase):
         self.assertEqual(facts["boss_challenge_index"], 2)
         self.assertEqual(facts["repeat_farm_count"], 5)
 
-    def test_temporary_repeat_count_restores_original_bytes(self) -> None:
+    def test_fixed_repeat_count_guard_preserves_original_bytes(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as folder:
@@ -51,12 +51,12 @@ class OkConfigurationTests(unittest.TestCase):
             )
             path.write_bytes(original)
             with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
-                with config.temporary_farm_echo_repeat_count(2):
+                with config.temporary_farm_echo_repeat_count(5):
                     current = json.loads(path.read_text(encoding="utf-8"))
-                    self.assertEqual(current["Repeat Farm Count"], 2)
+                    self.assertEqual(current["Repeat Farm Count"], 5)
                 self.assertEqual(path.read_bytes(), original)
 
-    def test_temporary_repeat_count_restores_original_bytes_after_error(self) -> None:
+    def test_fixed_repeat_count_guard_preserves_bytes_after_error(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as folder:
@@ -68,12 +68,12 @@ class OkConfigurationTests(unittest.TestCase):
             with (
                 patch.object(config, "OK_FARM_ECHO_CONFIG", path),
                 self.assertRaisesRegex(RuntimeError, "simulated retry failure"),
-                config.temporary_farm_echo_repeat_count(2),
+                config.temporary_farm_echo_repeat_count(5),
             ):
                 raise RuntimeError("simulated retry failure")
             self.assertEqual(path.read_bytes(), original)
 
-    def test_temporary_repeat_count_allows_bounded_combat_passes(self) -> None:
+    def test_fixed_repeat_count_guard_rejects_runtime_override(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as folder:
@@ -82,15 +82,54 @@ class OkConfigurationTests(unittest.TestCase):
                 "utf-8"
             )
             path.write_bytes(original)
-            with patch.object(config, "OK_FARM_ECHO_CONFIG", path):
+            with patch.object(config, "OK_FARM_ECHO_CONFIG", path), self.assertRaisesRegex(
+                ValueError, "must remain fixed at 5"
+            ):
                 with config.temporary_farm_echo_repeat_count(60):
-                    current = json.loads(path.read_text(encoding="utf-8"))
-                    self.assertEqual(current["Repeat Farm Count"], 60)
+                    self.fail("runtime override must be rejected")
                 self.assertEqual(path.read_bytes(), original)
 
-    def test_confirmed_retry_attempt_limit_allows_detector_reentry(self) -> None:
-        self.assertEqual(config.confirmed_retry_attempt_limit(1), 12)
-        self.assertEqual(config.confirmed_retry_attempt_limit(5), 60)
+    def test_temporary_repeat_count_rejects_broken_persistent_invariant(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "FarmEchoTask.json"
+            contaminated = dict(FARM_ECHO_CONFIG)
+            contaminated["Repeat Farm Count"] = 60
+            original = (
+                json.dumps(contaminated, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            path.write_bytes(original)
+            with (
+                patch.object(config, "OK_FARM_ECHO_CONFIG", path),
+                self.assertRaisesRegex(RuntimeError, "invariant is broken"),
+                config.temporary_farm_echo_repeat_count(5),
+            ):
+                self.fail("broken persistent configuration must fail fast")
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_fixed_repeat_count_guard_restores_external_change(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "FarmEchoTask.json"
+            original = (
+                json.dumps(FARM_ECHO_CONFIG, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            path.write_bytes(original)
+            with (
+                patch.object(config, "OK_FARM_ECHO_CONFIG", path),
+                self.assertRaisesRegex(RuntimeError, "restored the original bytes"),
+                config.temporary_farm_echo_repeat_count(5),
+            ):
+                corrupted = dict(FARM_ECHO_CONFIG)
+                corrupted["Repeat Farm Count"] = 60
+                path.write_text(json.dumps(corrupted), encoding="utf-8")
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_confirmed_retry_attempt_limit_keeps_original_five(self) -> None:
+        self.assertEqual(config.confirmed_retry_attempt_limit(1), 5)
+        self.assertEqual(config.confirmed_retry_attempt_limit(5), 5)
 
     def test_weekly_preflight_reads_only_garden_configuration(self) -> None:
         with patch.object(config, "_validate_common_paths"), patch.object(
@@ -172,7 +211,7 @@ class OkRunnerPreflightTests(unittest.TestCase):
         with pytest.raises(ValueError, match="within"):
             run_confirmed_farm_echo_retry(
                 target_count=5,
-                attempt_limit=60,
+                attempt_limit=5,
                 runtime_limit_seconds=MAX_FARM_ECHO_RUNTIME_SECONDS + 1,
             )
 

@@ -22,7 +22,7 @@ from starrail_auto.settings import get_secret
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 AI_TIMEOUT_SECONDS = 45.0
-AI_MAX_TOKENS = 4096
+AI_MAX_TOKENS = 8192
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ def _build_ai_input(report: RunReport) -> dict[str, Any]:
 
 
 def summarize_with_ai(report: RunReport) -> NarrativeReport:
-    """Use DeepSeek V4 Flash high-thinking mode to word structured facts."""
+    """Use low-reasoning DeepSeek output to word deterministic facts."""
     api_key = get_secret("DEEPSEEK_API_KEY")
     if not api_key:
         raise AISummaryError("DEEPSEEK_API_KEY is not configured")
@@ -340,7 +340,7 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
         model=model,
         messages=messages,
         stream=False,
-        reasoning_effort="high",
+        reasoning_effort="low",
         extra_body={"thinking": {"type": "enabled"}},
         response_format={"type": "json_object"},
         max_tokens=AI_MAX_TOKENS,

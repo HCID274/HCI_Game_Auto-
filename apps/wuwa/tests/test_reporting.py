@@ -8,7 +8,7 @@ from wuwa_auto.okww.runner import OkRunResult
 from wuwa_auto.reporting.day_rollup import build_daily_rollup
 from wuwa_auto.reporting.models import NarrativeReport, ReportItem, RunFacts
 from wuwa_auto.reporting.noise import known_upstream_noise_lines
-from wuwa_auto.reporting.parser import parse_run
+from wuwa_auto.reporting.parser import build_wuwa_agent_evidence, parse_run
 from wuwa_auto.reporting.prompting import compose_report_messages
 from wuwa_auto.reporting.service import (
     _archive_stem,
@@ -181,7 +181,8 @@ def test_same_day_successful_daily_and_followup_are_rolled_up(
 
     assert rolled_up.overall_status == "completed"
     assert [item.text for item in rolled_up.daily] == [
-        "领取每日活跃度奖励（活跃度140点，已确认100%）"
+        "无音区清剿1场，消耗60结晶波片",
+        "每日活跃度已确认达到100（当前140点，奖励状态已结算）",
     ]
     assert [item.text for item in rolled_up.followup] == [
         "讨伐强敌第2项 5次",
@@ -190,6 +191,85 @@ def test_same_day_successful_daily_and_followup_are_rolled_up(
     assert rolled_up.issues == []
     assert rolled_up.evidence["source"] == (
         "20260809_132616,20260809_170403_farm_echo_confirmed_retry"
+    )
+
+
+def test_latest_failed_followup_overrides_earlier_success(
+    tmp_path: Path,
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    daily_result = _ok_result(
+        tmp_path,
+        run_id="20260811_053000_daily",
+        workflow="daily",
+        status="success",
+        log_text="DailyTask:Daily Task Completed\n",
+    )
+    daily_facts = RunFacts(
+        overall_status="completed",
+        reason="Daily Task Completed",
+        duration_seconds=600,
+        workflow_task="daily",
+        daily=[ReportItem("daily", "今日任务已完成")],
+    )
+    (reports / f"{daily_result.run_id}.json").write_text(
+        json.dumps(
+            {"run_id": daily_result.run_id, "facts": daily_facts.to_dict()},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    earlier = _ok_result(
+        tmp_path,
+        run_id="20260811_060000_farm_echo_confirmed_retry",
+        workflow="farm_echo_confirmed_retry",
+        status="success",
+        log_text="FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
+    )
+    stale_rollup = RunFacts(
+        overall_status="completed",
+        reason="old success",
+        duration_seconds=600,
+        workflow_task="daily",
+        followup=[ReportItem("echo-picked", "吸收声骸1次")],
+        evidence={"source": f"{daily_result.run_id},{earlier.run_id}"},
+    )
+    (reports / f"{earlier.run_id}_daily_rollup.json").write_text(
+        json.dumps(
+            {"run_id": earlier.run_id, "facts": stale_rollup.to_dict()},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    latest = _ok_result(
+        tmp_path,
+        run_id="20260811_120000_farm_echo_confirmed_retry",
+        workflow="farm_echo_confirmed_retry",
+        status="failed",
+        log_text="FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
+    )
+    latest_facts = RunFacts(
+        overall_status="failed",
+        reason="absorbed 0/1",
+        duration_seconds=600,
+        workflow_task="farm_echo_confirmed_retry",
+        issues=[ReportItem("run-failure", "讨伐失败：吸收0/1")],
+    )
+
+    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+    ):
+        rolled_up = build_daily_rollup(latest, None, latest_facts)
+
+    assert rolled_up.overall_status == "partial_success"
+    assert rolled_up.followup == []
+    assert [item.text for item in rolled_up.issues] == [
+        "讨伐后续阶段：讨伐失败：吸收0/1"
+    ]
+    assert rolled_up.evidence["source"] == (
+        "20260811_053000_daily,"
+        "20260811_120000_farm_echo_confirmed_retry"
     )
 
 
@@ -335,6 +415,78 @@ def test_wuwa_agent_archives_provider_token_usage() -> None:
     assert narrative.token_usage["output_tokens"] == 20
     assert narrative.token_usage["output_input_ratio"] == 0.25
     assert narrative.issues == ["主流程失败：测试异常"]
+    create_kwargs = client_class.return_value.chat.completions.create.call_args.kwargs
+    assert create_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_wuwa_agent_keeps_more_than_the_core_default_evidence_window() -> None:
+    lines = [f"DailyTask: progress {index}" for index in range(1, 501)]
+
+    evidence = build_wuwa_agent_evidence("\n".join(lines))
+
+    assert len(evidence["line_refs"]) == 500
+    assert "L500" in evidence["line_refs"]
+
+
+def test_deepseek_length_response_retries_with_larger_output_budget() -> None:
+    facts = RunFacts(
+        overall_status="failed",
+        reason="test failure",
+        duration_seconds=1,
+        issues=[ReportItem("failure", "程序确认失败")],
+        evidence={"line_refs": ["L1"]},
+    )
+    first = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=""),
+                finish_reason="length",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=6_000,
+            completion_tokens=8_192,
+            total_tokens=14_192,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=8_192),
+        ),
+    )
+    second = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='{"summary":"恢复生成","daily":[],"weekly":[],'
+                    '"followup":[],"issues":["任意模型措辞"]}'
+                ),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=6_000,
+            completion_tokens=200,
+            total_tokens=6_200,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+    )
+
+    with patch("wuwa_auto.reporting.summarizer.get_secret") as secret, patch(
+        "wuwa_auto.reporting.summarizer.OpenAI"
+    ) as client_class:
+        secret.side_effect = lambda name: {
+            "DEEPSEEK_API_KEY": "test",
+            "DEEPSEEK_MODEL": "test-model",
+        }.get(name, "")
+        create = client_class.return_value.chat.completions.create
+        create.side_effect = [first, second]
+        narrative = summarize_with_ai(facts)
+
+    assert create.call_count == 2
+    assert create.call_args_list[0].kwargs["max_tokens"] == 8_192
+    assert create.call_args_list[1].kwargs["max_tokens"] == 16_384
+    assert narrative.token_usage["input_tokens"] == 12_000
+    assert narrative.token_usage["output_tokens"] == 8_392
+    assert narrative.token_usage["attempts"] == 2
+    assert narrative.token_usage["finish_reason"] == "stop"
+    assert narrative.issues == ["程序确认失败"]
 
 
 def test_streamed_wuwa_response_is_joined_and_keeps_usage() -> None:
@@ -400,6 +552,32 @@ def test_agent_report_uses_full_sections_without_fact_id_wording_map() -> None:
 
     assert narrative.daily == ["自然语言日常汇报"]
     assert narrative.followup == ["自然语言后续汇报"]
+
+
+def test_impacted_report_cannot_replace_program_facts_with_hallucinated_causes() -> None:
+    facts = RunFacts(
+        overall_status="failed",
+        reason="active character bind failed",
+        duration_seconds=61,
+        followup=[ReportItem("rebind", "Worker重绑定1次")],
+        issues=[ReportItem("failure", "当前角色绑定失败")],
+    )
+
+    narrative = _parse_agent_report(
+        {
+            "summary": "HUD不稳定且三次重试耗尽，任务失败",
+            "daily": [],
+            "weekly": [],
+            "followup": ["未进入HUD"],
+            "issues": ["三次重试耗尽"],
+        },
+        facts,
+        token_usage={},
+    )
+
+    assert narrative.summary == "鸣潮日常失败，耗时1分1秒"
+    assert narrative.followup == ["Worker重绑定1次"]
+    assert narrative.issues == ["当前角色绑定失败"]
 
 
 def test_clean_completed_run_discards_non_impacting_ai_diagnostics() -> None:
@@ -880,6 +1058,170 @@ def test_incomplete_recovery_does_not_claim_exit_and_heal(tmp_path: Path) -> Non
     issue_text = [item.text for item in facts.issues]
     assert "讨伐中途倒地2次，已自动恢复并重试；声骸累计吸收0/5次" in issue_text
     assert all("退本回血" not in text for text in issue_text)
+
+
+def test_client_restart_is_not_reported_as_an_extra_death(tmp_path: Path) -> None:
+    result = _result(
+        tmp_path,
+        "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
+        status="failed",
+        reason=(
+            "FarmEcho recovery incomplete: absorbed 0/1; "
+            "recoveries=2; retry=maximum retry count exhausted"
+        ),
+        config={
+            "workflow_task": "farm_echo_confirmed_retry",
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 1,
+                "recovery_attempts": 2,
+                "retry_completed": 0,
+                "total_completed": 0,
+                "first_safe_recovery": True,
+                "final_safe_recovery": True,
+                "recoveries": [
+                    {
+                        "success": True,
+                        "realm_defeat": True,
+                        "kind": "death_recovery",
+                    },
+                    {
+                        "success": True,
+                        "realm_defeat": False,
+                        "kind": "client_restart",
+                        "reason": "client restarted once to restore upstream combat",
+                    },
+                ],
+            },
+        },
+    )
+
+    facts = parse_run(result)
+
+    issue_text = [item.text for item in facts.issues]
+    assert (
+        "讨伐副本团灭1次，客户端重启1次，已自动恢复并重试；"
+        "声骸累计吸收0/1次"
+    ) in issue_text
+    assert all("中途倒地" not in text for text in issue_text)
+    assert "recoveries=1" in facts.reason
+    assert all("recoveries=2" not in text for text in issue_text)
+
+
+def test_worker_rebind_failure_is_reported_without_fabricating_death(
+    tmp_path: Path,
+) -> None:
+    result = _result(
+        tmp_path,
+        "FarmEchoTask:could not find char 0 please check current char\n",
+        status="failed",
+        reason="FarmEcho recovery incomplete: absorbed 0/1; recoveries=0",
+        config={
+            "workflow_task": "farm_echo_confirmed_retry",
+            "target_count": 1,
+            "confirmed_farm_echo_absorption_count": 0,
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 1,
+                "total_completed": 0,
+                "retry_completed": 0,
+                "recovery_attempts": 0,
+                "combat_rebind_attempts": 1,
+                "client_restart_triggered": False,
+                "retry_runs": 1,
+                "retry_limit": 3,
+                "recoveries": [],
+            },
+        },
+    )
+
+    facts = parse_run(result)
+    issue_text = [item.text for item in facts.issues]
+
+    assert (
+        "上游战斗劣化后Worker重绑定1次，已执行1/3次Worker重试，仍未恢复"
+        in issue_text
+    )
+    assert "worker_retries=1/3" in facts.reason
+    assert all("倒地" not in text and "团灭" not in text for text in issue_text)
+
+
+def test_progress_driven_worker_retries_do_not_report_a_false_total_cap(
+    tmp_path: Path,
+) -> None:
+    result = _result(
+        tmp_path,
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5\n",
+        status="success",
+        reason="FarmEcho recovered and completed 5/5",
+        config={
+            "workflow_task": "farm_echo_confirmed_retry",
+            "target_count": 5,
+            "confirmed_farm_echo_absorption_count": 5,
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "total_completed": 5,
+                "retry_completed": 5,
+                "recovery_attempts": 0,
+                "combat_rebind_attempts": 1,
+                "client_restart_triggered": False,
+                "retry_runs": 5,
+                "retry_limit": None,
+                "progress_driven_retries": True,
+                "recoveries": [],
+            },
+        },
+    )
+
+    facts = parse_run(result)
+    followup = [item.text for item in facts.followup]
+
+    assert (
+        "上游战斗劣化后Worker重绑定1次，已执行5次Worker重试"
+        "（有吸收进度不设总上限），任务已恢复"
+    ) in followup
+    assert "worker_retries=5 (progress-driven)" in facts.reason
+    assert all("5/3" not in text for text in followup)
+
+
+def test_progress_worker_boundary_is_preserved_after_success(tmp_path: Path) -> None:
+    result = _result(
+        tmp_path,
+        "RuntimeError: confirmed retry exhausted its bounded combat attempts: "
+        "absorbed=3/5\nHOST_FARM_ECHO_ABSORPTION_CONFIRMED 2/2\n",
+        status="success",
+        reason="FarmEcho recovered and completed 5/5",
+        config={
+            "workflow_task": "farm_echo_confirmed_retry",
+            "target_count": 5,
+            "confirmed_farm_echo_absorption_count": 5,
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "initial_completed": 3,
+                "retry_completed": 2,
+                "total_completed": 5,
+                "recovery_attempts": 0,
+                "combat_rebind_attempts": 0,
+                "client_restart_triggered": False,
+                "retry_runs": 1,
+                "retry_limit": None,
+                "progress_driven_retries": True,
+                "recoveries": [],
+            },
+        },
+    )
+
+    facts = parse_run(result)
+
+    assert any(
+        item.text
+        == "首个Worker达到尝试上限时确认3/5，后续Worker续跑1次并补吸收2次，"
+        "累计5/5（有吸收进度不设总上限），任务已恢复"
+        for item in facts.followup
+    )
+    assert not facts.issues
 
 
 def test_entry_retry_does_not_claim_a_death_recovery(tmp_path: Path) -> None:

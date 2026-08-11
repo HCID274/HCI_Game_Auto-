@@ -414,6 +414,20 @@ class LogParserTests(unittest.TestCase):
             "开拓力 < 40，保留该计划",
         )
 
+    def test_same_cycle_already_settled_is_idempotent_success(self) -> None:
+        content = """\
+2026-08-11 16:20:00,000 | INFO | 每日实训尚未刷新
+|                                                     停止运行                                                      |
+"""
+
+        report = parse_m7a_run(content, now=datetime(2026, 8, 11, 16, 21))
+
+        self.assertEqual(report.daily_status, "completed")
+        self.assertEqual(report.overall_status, "completed")
+        self.assertTrue(report.stopped_normally)
+        self.assertIn("每日实训已在本刷新周期结清", report.other_tasks)
+        self.assertNotIn("每日实训奖励完成", report.rewards_completed)
+
     def test_repeated_interface_failures_are_classified_as_stalled(self) -> None:
         lines = [
             (

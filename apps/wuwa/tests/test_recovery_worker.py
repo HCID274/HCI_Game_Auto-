@@ -2,12 +2,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 from wuwa_auto.okww.recovery_worker import (
+    PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER,
     REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
     RECOVERY_COMPLETED_MARKER,
     REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER,
     VirtualHidRecoveryMixin,
     _active_challenge_visible,
     _heal_after_realm_defeat,
+    _heal_after_party_member_unavailable,
     _recover_detected_death_state,
     _recovery_result_payload,
     _require_recovery_completion,
@@ -213,3 +215,42 @@ def test_realm_defeat_exits_and_heals_before_next_entry() -> None:
     click_exit.assert_called_once_with(task)
     task.revive_at_tower_and_heal.assert_called_once_with()
     assert sequence == ["exit", "wait", "heal", "wait"]
+
+
+def test_unavailable_party_member_exits_active_realm_then_heals() -> None:
+    task = Mock()
+    task.wait_click_feature.return_value = object()
+    task.wait_in_team_and_world.return_value = True
+
+    marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    task.send_key.assert_called_once_with("esc", after_sleep=1)
+    task.wait_click_feature.assert_called_once_with(
+        "gray_confirm_exit_button",
+        relative_x=-1,
+        raise_if_not_found=False,
+        time_out=5,
+        click_after_delay=0.5,
+        threshold=0.7,
+        after_sleep=1,
+    )
+    task.revive_at_tower_and_heal.assert_called_once_with()
+    assert task.wait_in_team_and_world.call_count == 2
+
+
+def test_unavailable_party_member_extends_upstream_waypoint_loading_wait() -> None:
+    task = Mock()
+    task.wait_click_feature.return_value = object()
+    observed_timeouts: list[float] = []
+    task.wait_in_team_and_world.side_effect = lambda **kwargs: (
+        observed_timeouts.append(kwargs["time_out"]) or True
+    )
+    task.revive_at_tower_and_heal.side_effect = lambda: (
+        task.wait_in_team_and_world(time_out=20)
+    )
+
+    marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    assert observed_timeouts == [120, 120.0, 120]

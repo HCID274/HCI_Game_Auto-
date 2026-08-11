@@ -9,6 +9,7 @@ from starrail_auto.integrations.feishu import (
 )
 from starrail_auto.m7a.config import (
     DEFAULT_TIMEOUTS,
+    EXIT_DAILY_VALIDATION_FAILED,
     EXIT_GAME_NETWORK_FAILED,
     EXIT_OK,
     EXIT_UU_FAILED,
@@ -22,6 +23,7 @@ from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
 from starrail_auto.uu.service import ensure_uu_connected
 
 log = logging.getLogger(__name__)
+DAILY_RESET_HOUR = 5
 
 
 def _setup_logging() -> None:
@@ -90,7 +92,19 @@ def _send_short_notification(result: RunResult) -> None:
         notify_starrail_failure(result.stage or "未知", result.retries)
 
 
+def _daily_reset_has_passed(now: datetime | None = None) -> bool:
+    current = now or datetime.now().astimezone()
+    return current.hour >= DAILY_RESET_HOUR
+
+
 def run_daily(timeout: int | None = None) -> int:
+    if not _daily_reset_has_passed():
+        _setup_logging()
+        log.error(
+            "refusing Star Rail daily before the %02d:00 local daily reset",
+            DAILY_RESET_HOUR,
+        )
+        return EXIT_DAILY_VALIDATION_FAILED
     return execute_task("main", timeout)
 
 
