@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from wuwa_auto.okww.confirmed_retry import (
 )
 from wuwa_auto.okww.logs import (
     count_farm_echo_absorptions,
+    has_farm_echo_combat_degradation,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
     is_recoverable_farm_echo_realm_defeat,
@@ -97,6 +99,7 @@ def _write_composite(
     recoveries: list[FarmEchoRecoveryResult],
     retry_error: str = "",
     entry_retry_attempts: int = 0,
+    client_restart_triggered: bool = False,
 ) -> OkRunResult:
     initial_completed = attempt_counts[0]
     retry_completed = sum(attempt_counts[1:])
@@ -114,6 +117,7 @@ def _write_composite(
         "first_recovery_reason": recoveries[0].reason if recoveries else "",
         "recovery_attempts": len(recoveries),
         "entry_retry_attempts": entry_retry_attempts,
+        "client_restart_triggered": client_restart_triggered,
         "recoveries": [
             {
                 "success": recovery.success,
@@ -187,7 +191,11 @@ def _write_composite(
     return result
 
 
-def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
+def maybe_recover_farm_echo_death(
+    result: OkRunResult,
+    *,
+    client_restart: Callable[[], bool] | None = None,
+) -> OkRunResult:
     """Recover known FarmEcho failures within one shared absorption deadline."""
     if result.status == "success":
         return result
@@ -237,6 +245,7 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
     attempt_counts = [initial_completed]
     recoveries: list[FarmEchoRecoveryResult] = []
     entry_retry_attempts = 0
+    client_restart_done = False
     retry_error = ""
     try:
         current = result
@@ -249,15 +258,37 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
             if not (death_failure or entry_failure):
                 break
             if death_failure:
-                recovery = _recover_safely(
-                    Path(current.log_slice_path).parent,
-                    attempt=len(recoveries) + 1,
-                    realm_defeat=realm_defeat,
-                )
-                recoveries.append(recovery)
-                if not recovery.success or sum(attempt_counts) >= target:
-                    break
-                resume_active_realm = recovery.resume_active_realm
+                degraded = has_farm_echo_combat_degradation(current_text)
+                if (
+                    degraded
+                    and client_restart is not None
+                    and not client_restart_done
+                ):
+                    client_restart_done = True
+                    log.warning(
+                        "FarmEcho combat degradation detected; "
+                        "restarting the Wuthering Waves client once"
+                    )
+                    client_restart()
+                    recoveries.append(
+                        FarmEchoRecoveryResult(
+                            success=True,
+                            reason="client restarted once due to combat degradation",
+                            evidence_path=None,
+                            worker_result_path="",
+                        )
+                    )
+                    resume_active_realm = False
+                else:
+                    recovery = _recover_safely(
+                        Path(current.log_slice_path).parent,
+                        attempt=len(recoveries) + 1,
+                        realm_defeat=realm_defeat,
+                    )
+                    recoveries.append(recovery)
+                    if not recovery.success or sum(attempt_counts) >= target:
+                        break
+                    resume_active_realm = recovery.resume_active_realm
             else:
                 # The next worker begins with ensure_main and a verified F2
                 # boss-page selection, so no death/teleport-heal UI is needed.
@@ -320,4 +351,5 @@ def maybe_recover_farm_echo_death(result: OkRunResult) -> OkRunResult:
         recoveries=recoveries,
         retry_error=retry_error,
         entry_retry_attempts=entry_retry_attempts,
+        client_restart_triggered=client_restart_done,
     )

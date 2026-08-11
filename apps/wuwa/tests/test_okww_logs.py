@@ -7,6 +7,7 @@ from wuwa_auto.okww.logs import (
     count_farm_echo_completions,
     count_farm_echo_kill_confirmations,
     find_failure,
+    has_farm_echo_combat_degradation,
     is_recoverable_farm_echo_death,
     is_recoverable_farm_echo_entry_failure,
     is_recoverable_farm_echo_realm_defeat,
@@ -127,3 +128,14 @@ FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 2/5
 """
     assert count_farm_echo_kill_confirmations(text) == 3
     assert count_farm_echo_absorptions(text) == 2
+
+def test_farm_echo_combat_degradation_markers() -> None:
+    assert has_farm_echo_combat_degradation(
+        "clicked liberation but no effect"
+    )
+    assert has_farm_echo_combat_degradation(
+        "Target enemy failed, please disable Nvidia/AMD Filter or Sharpening!"
+    )
+    assert not has_farm_echo_combat_degradation(
+        "FarmEchoTask:farm echo walk_find_echo True"
+    )

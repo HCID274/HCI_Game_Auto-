@@ -3,12 +3,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from wuwa_auto.cleanup import CleanupResult
 from wuwa_auto.daily import _run_boss_then_daily_task, _run_workflow
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.runner import OkRunResult
-
 
 DEATH = """
 FarmEchoTask:raise_not_in_combat char dead
@@ -413,7 +411,11 @@ def test_daily_workflow_runs_boss_before_daily_and_reports_once(
         order.append("boss")
         return boss
 
-    def settle_boss(result: OkRunResult) -> OkRunResult:
+    def settle_boss(
+        result: OkRunResult,
+        *,
+        client_restart: object | None = None,
+    ) -> OkRunResult:
         order.append("settle-boss")
         return result
 
@@ -464,7 +466,9 @@ def test_daily_workflow_runs_boss_before_daily_and_reports_once(
         "daily",
         "settle-daily",
     ]
-    recover_boss.assert_called_once_with(boss)
+    recover_boss.assert_called_once()
+    assert recover_boss.call_args.args == (boss,)
+    assert callable(recover_boss.call_args.kwargs["client_restart"])
     report.assert_called_once()
     final_result = report.call_args.args[0]
     assert final_result.status == "success"

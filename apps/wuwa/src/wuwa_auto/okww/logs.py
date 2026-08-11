@@ -38,6 +38,10 @@ HOST_FARM_ECHO_CONFIRMATION = "HOST_FARM_ECHO_KILL_CONFIRMED"
 HOST_FARM_ECHO_ABSORPTION_CONFIRMATION = (
     "HOST_FARM_ECHO_ABSORPTION_CONFIRMED"
 )
+FARM_ECHO_COMBAT_DEGRADATION_MARKERS = (
+    "clicked liberation but no effect",
+    "Target enemy failed, please disable Nvidia/AMD Filter or Sharpening!",
+)
 FARM_ECHO_PICKUP_CONFIRMATION_MARKERS = (
     "FarmEchoTask:farm echo on the face",
     "FarmEchoTask:farm echo yolo find True",
@@ -153,6 +157,11 @@ def count_farm_echo_absorptions(text: str) -> int:
         for line in text.splitlines()
         if any(marker in line for marker in FARM_ECHO_PICKUP_CONFIRMATION_MARKERS)
     )
+
+
+def has_farm_echo_combat_degradation(text: str) -> bool:
+    """Recognize OK-WW combat input/detection degradation in a failed run."""
+    return any(marker in text for marker in FARM_ECHO_COMBAT_DEGRADATION_MARKERS)
 
 
 def is_recoverable_farm_echo_death(text: str) -> bool:

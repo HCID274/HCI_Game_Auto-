@@ -1,21 +1,14 @@
 """End-to-end Wuthering Waves daily workflow."""
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from wuwa_auto.client.launcher import ensure_client_ready
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
+from wuwa_auto.client.launcher import ensure_client_ready
 from wuwa_auto.input.viiper import managed_virtual_mouse
 from wuwa_auto.okww.compatibility import validate_okww_compatibility
-from wuwa_auto.okww.runner import (
-    OkRunResult,
-    run_daily_task,
-    run_weekly_garden_task,
-    stop_daily_workers,
-    write_result,
-    write_workflow_failure,
-)
 from wuwa_auto.okww.config import (
     EXPECTED_REPEAT_FARM_COUNT,
     confirmed_retry_attempt_limit,
@@ -27,6 +20,15 @@ from wuwa_auto.okww.recovery import (
     run_world_state_recovery,
 )
 from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
+from wuwa_auto.okww.runner import (
+    OkRunResult,
+    run_daily_task,
+    run_weekly_garden_task,
+    stop_daily_workers,
+    stop_wuthering_game,
+    write_result,
+    write_workflow_failure,
+)
 from wuwa_auto.reporting.service import report_run
 from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
 from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
@@ -224,7 +226,9 @@ def _compose_ordered_daily_result(
     return result
 
 
-def _run_boss_then_daily_task() -> OkRunResult:
+def _run_boss_then_daily_task(
+    client_restart: Callable[[], bool] | None = None,
+) -> OkRunResult:
     """Run five confirmed boss absorptions before the pure daily task."""
     target = EXPECTED_REPEAT_FARM_COUNT
     attempt_limit = confirmed_retry_attempt_limit(target)
@@ -233,7 +237,10 @@ def _run_boss_then_daily_task() -> OkRunResult:
             target_count=target,
             attempt_limit=attempt_limit,
         )
-    boss = maybe_recover_farm_echo_death(boss)
+    if client_restart is None:
+        boss = maybe_recover_farm_echo_death(boss)
+    else:
+        boss = maybe_recover_farm_echo_death(boss, client_restart=client_restart)
 
     # The boss phase is best-effort: DailyTask must still get its own chance
     # and the merged report will accurately expose a partial result.
@@ -301,7 +308,33 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     client.launcher_actions,
                 )
                 log.info("%s workflow: start OK-WW task", task_name)
-                result = task_runner()
+                restart_state: dict[str, bool] = {"done": False}
+
+                def restart_client_once() -> bool:
+                    if restart_state["done"]:
+                        return False
+                    log.info(
+                        "%s workflow: FarmEcho combat degraded; "
+                        "restarting Wuthering Waves client once",
+                        task_name,
+                    )
+                    stop_daily_workers()
+                    stop_wuthering_game()
+                    ensure_client_ready(mouse)
+                    restart_state["done"] = True
+                    return True
+
+                def run_with_restart() -> OkRunResult:
+                    return _run_boss_then_daily_task(
+                        client_restart=restart_client_once,
+                    )
+
+                runner = (
+                    run_with_restart
+                    if task_runner is _run_boss_then_daily_task
+                    else task_runner
+                )
+                result = runner()
                 # A retry is part of this workflow's business transaction, not
                 # a new reportable run.  Only the settled composite result may
                 # cross the notification boundary below.
