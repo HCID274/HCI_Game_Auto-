@@ -6,6 +6,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,10 @@ TRAVEL_RETRY_MARKER = "HOST_NIGHTMARE_TRAVEL_RETRY"
 TRAVEL_NOT_CONFIRMED_MARKER = "HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED"
 TRAVEL_RECOVERED_MARKER = "HOST_NIGHTMARE_TRAVEL_RECOVERED_TO_WORLD"
 COMPATIBILITY_MARKER = "HOST_NIGHTMARE_OVERRIDE_COMPATIBLE"
+DAILY_RESUME_MARKER = "HOST_DAILY_RESUME_AFTER_NIGHTMARE"
+AUTO_FARM_NIGHTMARE_NEST = "Auto Farm all Nightmare Nest"
+ADDITIONAL_TASKS = "Additional Tasks to Run After Daily Task"
+FARM_NIGHTMARE_FOR_DAILY_ECHO = "Farm Nightmare Nest for Daily Echo"
 
 
 def _target_key(nest: object) -> str:
@@ -219,15 +224,62 @@ def install_nightmare_override(task_class: type[Any]) -> None:
     setattr(task_class, "_travel_to_nest_or_skip", host_travel)
 
 
+def install_daily_resume_after_nightmare(task_class: type[Any]) -> None:
+    """Skip only already-settled Nightmare work in this worker process."""
+
+    original = getattr(task_class, "run", None)
+    if not callable(original) or getattr(original, "__wuwa_host_daily_resume__", False):
+        return
+
+    @wraps(original)
+    def resumed(self: Any, *args: Any, **kwargs: Any) -> Any:
+        config = getattr(self, "config", None)
+        if not isinstance(config, dict):
+            raise RuntimeError("DailyTask config is unavailable for bounded resume")
+        had_farm_nightmare = FARM_NIGHTMARE_FOR_DAILY_ECHO in config
+        original_farm_nightmare = config.get(FARM_NIGHTMARE_FOR_DAILY_ECHO)
+        had_additional = ADDITIONAL_TASKS in config
+        original_additional = config.get(ADDITIONAL_TASKS)
+        config[FARM_NIGHTMARE_FOR_DAILY_ECHO] = False
+        config[ADDITIONAL_TASKS] = [
+            item
+            for item in list(original_additional or [])
+            if item != AUTO_FARM_NIGHTMARE_NEST
+        ]
+        self.log_info(DAILY_RESUME_MARKER)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            if had_farm_nightmare:
+                config[FARM_NIGHTMARE_FOR_DAILY_ECHO] = original_farm_nightmare
+            else:
+                config.pop(FARM_NIGHTMARE_FOR_DAILY_ECHO, None)
+            if had_additional:
+                config[ADDITIONAL_TASKS] = original_additional
+            else:
+                config.pop(ADDITIONAL_TASKS, None)
+
+    resumed.__wuwa_host_daily_resume__ = True
+    task_class.run = resumed
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     compatibility_only = False
-    if arguments and arguments[0] == "--check-compatibility":
-        compatibility_only = True
-        arguments.pop(0)
+    resume_after_nightmare = False
+    while arguments and arguments[0].startswith("--"):
+        option = arguments.pop(0)
+        if option == "--check-compatibility":
+            compatibility_only = True
+            continue
+        if option == "--resume-after-nightmare":
+            resume_after_nightmare = True
+            continue
+        raise SystemExit(f"unsupported host worker option: {option}")
     if len(arguments) != 1:
         raise SystemExit(
-            "usage: daily_worker.py [--check-compatibility] OK_WORKING_DIR"
+            "usage: daily_worker.py [--check-compatibility] "
+            "[--resume-after-nightmare] OK_WORKING_DIR"
         )
 
     working_dir = Path(arguments[0]).resolve()
@@ -249,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         forgery_task_class=ForgeryTask,
         simulation_task_class=SimulationTask,
     )
+    if resume_after_nightmare:
+        install_daily_resume_after_nightmare(DailyTask)
     if compatibility_only:
         print(COMPATIBILITY_MARKER)
         return 0

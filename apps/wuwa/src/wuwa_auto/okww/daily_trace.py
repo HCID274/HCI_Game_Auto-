@@ -25,12 +25,23 @@ STAMINA_MAX_SAMPLES = 3
 STAMINA_REQUIRED_AGREEMENT = 2
 STAMINA_ZERO_MIN_CONFIDENCE = 0.60
 STAMINA_PANEL_REFRESH_ATTEMPTS = 1
+BOOK_TAB_MAX_ATTEMPTS = 3
 _STAMINA_SAMPLES_ATTR = "__wuwa_host_stamina_ocr_samples__"
 _STAMINA_RATIO_RE = re.compile(r"\d+\s*/\s*\d+")
 _BOOK_TAB_OCR_REGION = (0.03, 0.10, 0.36, 0.98)
-_BOOK_FORWARD_VIEW_REGION = (0.60, 0.60, 0.99, 0.98)
-_BOOK_FORWARD_VIEW_RE = re.compile(
-    r"前往查看|前往檢視|Go\s+to\s+view",
+_BOOK_TAB_ROW_CLICK_X = 0.24
+# The 2026-08 client renders the title starting around x=0.37.  Starting the
+# OCR crop at 0.40 clips the first glyphs and turns the correct page into a
+# false negative, so retain enough left context for the complete title.
+_BOOK_TARGET_TITLE_REGION = (0.30, 0.08, 0.91, 0.30)
+_BOOK_TARGET_ROW_REGION = (0.40, 0.18, 0.91, 0.96)
+_BOOK_TARGET_BUTTON_REGION = (0.9113, 0.229, 0.9613, 0.861)
+_BOOK_WUYIN_TITLE_RE = re.compile(
+    r"合鸣套装筛选|合鳴套裝篩選|Echo\s+Set\s+Filter",
+    re.IGNORECASE,
+)
+_BOOK_WUYIN_ROW_RE = re.compile(
+    r"无音区|無音區|声骸套装|聲骸套裝|Tacet\s+(?:Field|Suppression)|Echo\s+Set",
     re.IGNORECASE,
 )
 _BOOK_TAB_PATTERNS = {
@@ -40,6 +51,10 @@ _BOOK_TAB_PATTERNS = {
         re.IGNORECASE,
     ),
 }
+
+
+class BookTabSelectionError(RuntimeError):
+    """The host clicked a known book tab but could not prove its target page."""
 
 
 def _json_value(value: Any, *, limit: int = 240) -> Any:
@@ -353,6 +368,63 @@ def _box_center(box: Any) -> tuple[int, int] | None:
     return None
 
 
+def _book_wuyin_page_state(task: Any) -> dict[str, Any]:
+    """Return semantic evidence that the Tacet target list is really active.
+
+    ``boss_proceed`` is deliberately insufficient: the cultivation landing
+    page reuses the same visual button for material acquisition.  We only hand
+    control to upstream after the target-list title, a Tacet/Echo-set row and
+    at least one target button agree in the same frame.
+    """
+
+    ocr = getattr(task, "ocr", None)
+    find_feature = getattr(task, "find_feature", None)
+    box_of_screen = getattr(task, "box_of_screen", None)
+    if not all(callable(item) for item in (ocr, find_feature, box_of_screen)):
+        return {
+            "confirmed": False,
+            "reason": "semantic_page_checks_unavailable",
+            "title_names": [],
+            "row_names": [],
+            "boss_buttons": [],
+        }
+
+    title_boxes = ocr(
+        *_BOOK_TARGET_TITLE_REGION,
+        match=_BOOK_WUYIN_TITLE_RE,
+        log=False,
+    )
+    row_boxes = ocr(
+        *_BOOK_TARGET_ROW_REGION,
+        match=_BOOK_WUYIN_ROW_RE,
+        log=False,
+    )
+    target_box = box_of_screen(*_BOOK_TARGET_BUTTON_REGION)
+    boss_buttons = find_feature(
+        "boss_proceed",
+        box=target_box,
+        threshold=0.8,
+    )
+    title_names = [str(getattr(box, "name", box)) for box in title_boxes or []]
+    row_names = [str(getattr(box, "name", box)) for box in row_boxes or []]
+    button_boxes = [_raw_ocr_box(box) for box in boss_buttons or []]
+    confirmed = bool(title_names and row_names and button_boxes)
+    missing = []
+    if not title_names:
+        missing.append("target_list_title")
+    if not row_names:
+        missing.append("tacet_or_echo_set_row")
+    if not button_boxes:
+        missing.append("boss_proceed")
+    return {
+        "confirmed": confirmed,
+        "reason": None if confirmed else "missing:" + ",".join(missing),
+        "title_names": title_names,
+        "row_names": row_names,
+        "boss_buttons": button_boxes,
+    }
+
+
 def _refresh_stamina_panel_with_hid(task: Any) -> bool:
     """Re-select the proven F2 boss tab when PostMessage left a stale page open."""
 
@@ -423,6 +495,7 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
     def open_boss_book(self: Any, name: str, after_sleep: float = 2) -> Any:
         pattern = _BOOK_TAB_PATTERNS.get(name)
         ocr = getattr(self, "ocr", None)
+        selection_started = False
         if pattern is not None and callable(ocr):
             try:
                 boxes = ocr(*_BOOK_TAB_OCR_REGION, match=pattern, log=False)
@@ -454,81 +527,92 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
                             _virtual_hid_click,
                         )
 
-                        absolute_x, absolute_y = get_abs_cords(*point)
-                        evidence_before = _capture_stamina_evidence(
-                            self,
-                            f"book_tab_{name}_before",
+                        frame_width = getattr(self, "width", None)
+                        if not isinstance(frame_width, (int, float)) or frame_width <= 0:
+                            frame = getattr(self, "frame", None)
+                            shape = getattr(frame, "shape", ())
+                            frame_width = shape[1] if len(shape) >= 2 else None
+                        click_point = (
+                            (int(frame_width * _BOOK_TAB_ROW_CLICK_X), point[1])
+                            if isinstance(frame_width, (int, float)) and frame_width > 0
+                            else point
                         )
-                        _virtual_hid_click(
-                            int(absolute_x),
-                            int(absolute_y),
-                            hold=0.2,
-                            log_action=True,
-                        )
+                        absolute_x, absolute_y = get_abs_cords(*click_point)
                         sleeper = getattr(self, "sleep", None)
-                        if callable(sleeper):
-                            sleeper(max(1.5, after_sleep))
-                        else:
-                            time.sleep(max(1.5, after_sleep))
+                        attempts = BOOK_TAB_MAX_ATTEMPTS if name == "wuyin" else 1
+                        last_state: dict[str, Any] | None = None
+                        for attempt in range(1, attempts + 1):
+                            evidence_before = _capture_stamina_evidence(
+                                self,
+                                f"book_tab_{name}_before_attempt_{attempt}",
+                            )
+                            # From this point onward the UI may have changed.
+                            # Never fall back to upstream's generic
+                            # ``boss_proceed`` scan if input or the semantic
+                            # postcondition fails: the cultivation root reuses
+                            # that same button and was the 2026-08-12 misclick.
+                            selection_started = True
+                            _virtual_hid_click(
+                                int(absolute_x),
+                                int(absolute_y),
+                                hold=0.2,
+                                log_action=True,
+                            )
+                            if callable(sleeper):
+                                sleeper(max(1.5, after_sleep))
+                            else:
+                                time.sleep(max(1.5, after_sleep))
+                            _log(
+                                self,
+                                "book_tab_hid_click",
+                                tab=name,
+                                attempt=attempt,
+                                max_attempts=attempts,
+                                ocr_text_point=point,
+                                frame_point=click_point,
+                                absolute_point=(absolute_x, absolute_y),
+                                evidence_before=evidence_before,
+                            )
+
+                            if name != "wuyin":
+                                return None
+
+                            last_state = _book_wuyin_page_state(self)
+                            _log(
+                                self,
+                                "book_tab_target_page_check",
+                                tab=name,
+                                attempt=attempt,
+                                max_attempts=attempts,
+                                **last_state,
+                            )
+                            if last_state["confirmed"]:
+                                _log(
+                                    self,
+                                    "book_tab_target_page_confirmed",
+                                    tab=name,
+                                    attempt=attempt,
+                                )
+                                return None
+
+                        evidence_after = _capture_stamina_evidence(
+                            self,
+                            "book_tab_wuyin_unconfirmed",
+                        )
                         _log(
                             self,
-                            "book_tab_hid_click",
+                            "book_tab_target_page_unconfirmed",
                             tab=name,
-                            frame_point=point,
-                            absolute_point=(absolute_x, absolute_y),
-                            evidence_before=evidence_before,
+                            attempts=attempts,
+                            last_state=last_state,
+                            evidence_after=evidence_after,
                         )
-
-                        # The updated “无音清剿” page is a cultivation-plan
-                        # landing page.  Its localized “前往查看” opens the
-                        # legacy target list consumed by TacetTask.
-                        if name == "wuyin":
-                            forward_boxes = ocr(
-                                *_BOOK_FORWARD_VIEW_REGION,
-                                match=_BOOK_FORWARD_VIEW_RE,
-                                log=False,
-                            )
-                            forward = (forward_boxes or [None])[0]
-                            forward_point = (
-                                _box_center(forward) if forward is not None else None
-                            )
-                            if forward_point is not None:
-                                forward_x, forward_y = get_abs_cords(*forward_point)
-                                _virtual_hid_click(
-                                    int(forward_x),
-                                    int(forward_y),
-                                    hold=0.2,
-                                    log_action=True,
-                                )
-                                if callable(sleeper):
-                                    sleeper(max(1.5, after_sleep))
-                                else:
-                                    time.sleep(max(1.5, after_sleep))
-                                evidence_after = _capture_stamina_evidence(
-                                    self,
-                                    "book_tab_wuyin_forward_view_after",
-                                )
-                                _log(
-                                    self,
-                                    "book_tab_forward_view_hid_click",
-                                    tab=name,
-                                    region=_BOOK_FORWARD_VIEW_REGION,
-                                    raw_names=[
-                                        str(getattr(item, "name", item))
-                                        for item in forward_boxes or []
-                                    ],
-                                    frame_point=forward_point,
-                                    absolute_point=(forward_x, forward_y),
-                                    evidence_after=evidence_after,
-                                )
-                            else:
-                                _log(
-                                    self,
-                                    "book_tab_forward_view_absent",
-                                    tab=name,
-                                    region=_BOOK_FORWARD_VIEW_REGION,
-                                )
-                        return None
+                        raise BookTabSelectionError(
+                            "wuyin target page not confirmed after "
+                            f"{attempts} HID attempts; evidence={evidence_after}"
+                        )
+            except BookTabSelectionError:
+                raise
             except Exception as exc:  # noqa: BLE001 - retain upstream fallback
                 _log(
                     self,
@@ -537,6 +621,15 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+                if name == "wuyin" and selection_started:
+                    evidence_after = _capture_stamina_evidence(
+                        self,
+                        "book_tab_wuyin_check_error",
+                    )
+                    raise BookTabSelectionError(
+                        "wuyin target page check failed after HID input; "
+                        f"evidence={evidence_after}; cause={type(exc).__name__}: {exc}"
+                    ) from exc
         _log(self, "book_tab_upstream_fallback", tab=name)
         return original(self, name, after_sleep=after_sleep)
 

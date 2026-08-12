@@ -404,6 +404,57 @@ def test_tacet_death_waits_for_world_and_retries_daily_once(
     )
 
 
+def test_daily_resume_recovery_never_falls_back_to_full_daily(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "resume-initial",
+        RESTORED_TACET_FAILURE,
+        status="failed",
+        absorbed=0,
+    )
+    initial.config.update(
+        workflow_task="daily",
+        daily_resume="after_nightmare",
+    )
+    retry = _result(
+        runs,
+        "resume-retry",
+        "Daily Task Completed\n",
+        status="success",
+        absorbed=0,
+    )
+    retry.config.update(
+        workflow_task="daily",
+        daily_resume="after_nightmare",
+    )
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+
+    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ), patch(
+        "wuwa_auto.daily.run_daily_resume_task",
+        return_value=retry,
+    ) as resume_daily, patch(
+        "wuwa_auto.daily.run_daily_task",
+    ) as full_daily:
+        from wuwa_auto.daily import _maybe_recover_daily_state
+
+        result = _maybe_recover_daily_state(initial)
+
+    assert result.status == "success"
+    resume_daily.assert_called_once_with()
+    full_daily.assert_not_called()
+
+
 def test_daily_workflow_runs_boss_before_daily_and_reports_once(
     tmp_path: Path,
 ) -> None:

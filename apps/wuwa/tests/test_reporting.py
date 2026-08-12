@@ -1230,6 +1230,78 @@ def test_progress_worker_boundary_is_preserved_after_success(tmp_path: Path) -> 
     assert not facts.issues
 
 
+def test_daily_failure_does_not_reclassify_completed_farm_echo_recovery(
+    tmp_path: Path,
+) -> None:
+    result = _result(
+        tmp_path,
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n"
+        "DailyTask:Daily Task exception stopped\n",
+        status="failed",
+        reason="DailyTask failed: OK-WW failure marker: Daily Task exception stopped",
+        config={
+            "boss_challenge_index": 2,
+            "workflow_task": "daily",
+            "confirmed_farm_echo_absorption_count": 5,
+            "farm_echo_absorption_target": 5,
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "initial_completed": 4,
+                "retry_completed": 1,
+                "total_completed": 5,
+                "retry_runs": 1,
+                "progress_driven_retries": True,
+            },
+            "daily_sequence": {
+                "boss_status": "success",
+                "daily_status": "failed",
+                "settled": True,
+            },
+        },
+    )
+
+    facts = parse_run(result)
+    followup = [item.text for item in facts.followup]
+    issues = [item.text for item in facts.issues]
+
+    assert facts.overall_status == "partial_success"
+    assert (
+        "首个Worker结束时确认4/5，后续Worker续跑1次并补吸收1次，"
+        "累计5/5（有吸收进度不设总上限），任务已恢复"
+    ) in followup
+    assert any("DailyTask failed" in text for text in issues)
+    assert all("仍未恢复" not in text for text in issues)
+
+
+def test_recovery_total_proves_farm_echo_completion_despite_later_failure(
+    tmp_path: Path,
+) -> None:
+    result = _result(
+        tmp_path,
+        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
+        status="failed",
+        reason="later daily phase failed",
+        config={
+            "workflow_task": "daily",
+            "farm_echo_recovery": {
+                "triggered": True,
+                "target_count": 5,
+                "initial_completed": 4,
+                "retry_completed": 1,
+                "total_completed": 5,
+                "retry_runs": 1,
+            },
+        },
+    )
+
+    facts = parse_run(result)
+
+    assert any("任务已恢复" in item.text for item in facts.followup)
+    assert all("仍未恢复" not in item.text for item in facts.issues)
+    assert any("later daily phase failed" in item.text for item in facts.issues)
+
+
 def test_entry_retry_does_not_claim_a_death_recovery(tmp_path: Path) -> None:
     text = (
         "HOST_FARM_ECHO_BOSS_PAGE_RESELECTED\n"

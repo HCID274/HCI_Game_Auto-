@@ -311,7 +311,21 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
         progress_driven_retries = recovery.get("progress_driven_retries") is True
         retry_limit = int(recovery.get("retry_limit") or 3)
         total_completed = int(recovery.get("total_completed") or boss_runs)
-        target = int(recovery.get("target_count") or total_completed)
+        structured_target = (
+            recovery.get("target_count")
+            or result.config.get("farm_echo_absorption_target")
+            or result.config.get("target_count")
+        )
+        target = int(structured_target or total_completed)
+        sequence = result.config.get("daily_sequence") or {}
+        farm_echo_completed = (
+            isinstance(sequence, dict)
+            and sequence.get("boss_status") == "success"
+        ) or (
+            structured_target is not None
+            and int(structured_target) > 0
+            and total_completed >= int(structured_target)
+        )
         recovery_history = recovery.get("recoveries") or []
         client_restart_attempts = sum(
             1
@@ -377,9 +391,9 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
             item = ReportItem(
                 "upstream-combat-recovery",
                 f"上游战斗劣化后{action_text}，{retry_text}"
-                + ("，任务已恢复" if result.status == "success" else "，仍未恢复"),
+                + ("，任务已恢复" if farm_echo_completed else "，仍未恢复"),
             )
-            if result.status == "success":
+            if farm_echo_completed:
                 followup.append(item)
             else:
                 issues.append(item)
@@ -401,14 +415,14 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                 f"{boundary}时确认{initial_completed}/{target}，"
                 f"后续Worker续跑{retry_runs}次并补吸收{retry_completed}次，"
                 f"累计{total_completed}/{target}{retry_policy}，"
-                + ("任务已恢复" if result.status == "success" else "仍未恢复"),
+                + ("任务已恢复" if farm_echo_completed else "仍未恢复"),
             )
-            if result.status == "success":
+            if farm_echo_completed:
                 followup.append(item)
             else:
                 issues.append(item)
 
-        if recovery_attempts and result.status == "success":
+        if recovery_attempts and farm_echo_completed:
             if retry_completed:
                 recovery_wording = recovery_summary(
                     f"已自动恢复并补吸收声骸{retry_completed}次"

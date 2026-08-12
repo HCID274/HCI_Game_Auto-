@@ -23,6 +23,7 @@ from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
 from wuwa_auto.okww.runner import (
     OkRunResult,
     run_daily_task,
+    run_daily_resume_task,
     run_weekly_garden_task,
     stop_daily_workers,
     stop_wuthering_game,
@@ -151,7 +152,12 @@ def _maybe_recover_daily_state(result: OkRunResult) -> OkRunResult:
                 recovery=recovery,
                 recovery_kind=recovery_kind,
             )
-        retry = run_daily_task()
+        runner = (
+            run_daily_resume_task
+            if current.config.get("daily_resume") == "after_nightmare"
+            else run_daily_task
+        )
+        retry = runner()
         current = _compose_daily_start_recovery(
             current,
             retry=retry,
@@ -421,6 +427,12 @@ def run_daily_workflow() -> int:
 def run_daily_only_workflow() -> int:
     """Run and report DailyTask without the optional pre-daily boss phase."""
     return _run_workflow("daily", run_daily_task)
+
+
+def run_daily_resume_workflow() -> int:
+    """Resume DailyTask after settled Nightmare work without replaying it."""
+
+    return _run_workflow("daily", run_daily_resume_task)
 
 
 def run_farm_echo_workflow() -> int:

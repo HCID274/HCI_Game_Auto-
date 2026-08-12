@@ -2,8 +2,14 @@ import json
 import re
 from types import SimpleNamespace
 
+import pytest
+
 import wuwa_auto.okww.daily_trace as daily_trace_module
-from wuwa_auto.okww.daily_trace import STAMINA_OCR_REGION, install_daily_trace
+from wuwa_auto.okww.daily_trace import (
+    STAMINA_OCR_REGION,
+    BookTabSelectionError,
+    install_daily_trace,
+)
 
 
 class _Box:
@@ -235,7 +241,9 @@ def test_stamina_guard_retries_after_hid_panel_refresh(monkeypatch) -> None:
     assert refreshes == [True]
 
 
-def test_updated_book_tab_is_selected_by_bounded_ocr_and_hid(monkeypatch) -> None:
+def test_updated_book_tab_requires_semantic_target_page_before_upstream(
+    monkeypatch,
+) -> None:
     from wuwa_auto.okww import virtual_hid
 
     clicks: list[tuple[int, int]] = []
@@ -245,6 +253,7 @@ def test_updated_book_tab_is_selected_by_bounded_ocr_and_hid(monkeypatch) -> Non
             return x + 7, y + 11
 
     class Tacet:
+        width = 2560
         executor = SimpleNamespace(
             interaction=SimpleNamespace(capture=Capture()),
         )
@@ -260,9 +269,21 @@ def test_updated_book_tab_is_selected_by_bounded_ocr_and_hid(monkeypatch) -> Non
             return None
 
         def ocr(self, *args: object, **_kwargs: object) -> list[_Box]:
-            if float(args[0]) >= 0.60:
-                return [_Box("前往查看", x=1900, y=1150)]
+            match = _kwargs.get("match")
+            pattern = getattr(match, "pattern", "")
+            if "合鸣套装筛选" in pattern:
+                assert args[0] <= 0.37
+                return [_Box("合鸣套装筛选", x=1000, y=180)]
+            if "无音区" in pattern:
+                return [_Box("荒石高地无音区", x=1400, y=500)]
             return [_Box("无音清剿", x=410, y=800)]
+
+        def box_of_screen(self, *args: float) -> tuple[float, ...]:
+            return args
+
+        def find_feature(self, name: str, **_kwargs: object) -> list[_Box]:
+            assert name == "boss_proceed"
+            return [_Box("boss_proceed", x=2400, y=950)]
 
         def open_boss_book(self, name: str, after_sleep: float = 2) -> None:
             self.upstream_calls.append(name)
@@ -282,10 +303,145 @@ def test_updated_book_tab_is_selected_by_bounded_ocr_and_hid(monkeypatch) -> Non
 
     task.open_boss_book("wuyin", after_sleep=0)
 
-    assert clicks == [(432, 817), (1922, 1167)]
+    assert clicks == [(621, 817)]
     assert task.upstream_calls == []
     assert any('"event": "book_tab_hid_click"' in item for item in task.messages)
     assert any(
-        '"event": "book_tab_forward_view_hid_click"' in item
+        '"event": "book_tab_target_page_confirmed"' in item
         for item in task.messages
     )
+    assert not any("book_tab_forward_view" in item for item in task.messages)
+
+
+def test_wuyin_root_material_page_retries_three_times_then_fails_fast(
+    monkeypatch,
+) -> None:
+    from wuwa_auto.okww import virtual_hid
+
+    clicks: list[tuple[int, int]] = []
+
+    class Capture:
+        def get_abs_cords(self, x: int, y: int) -> tuple[int, int]:
+            return x, y
+
+    class Tacet:
+        width = 2560
+        executor = SimpleNamespace(
+            interaction=SimpleNamespace(capture=Capture()),
+        )
+
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+            self.upstream_calls: list[str] = []
+
+        def log_info(self, message: str) -> None:
+            self.messages.append(message)
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+        def ocr(self, *args: object, **kwargs: object) -> list[_Box]:
+            pattern = getattr(kwargs.get("match"), "pattern", "")
+            if "合鸣套装筛选" in pattern or "无音区" in pattern:
+                # The real wrong page contains 培养目标/所需材料 plus three
+                # generic 前往 buttons, but none of the Tacet list semantics.
+                return []
+            return [_Box("无音清剿", x=410, y=800)]
+
+        def box_of_screen(self, *args: float) -> tuple[float, ...]:
+            return args
+
+        def find_feature(self, name: str, **_kwargs: object) -> list[_Box]:
+            assert name == "boss_proceed"
+            return [
+                _Box("boss_proceed", x=2400, y=390),
+                _Box("boss_proceed", x=2400, y=585),
+                _Box("boss_proceed", x=2400, y=780),
+            ]
+
+        def open_boss_book(self, name: str, after_sleep: float = 2) -> None:
+            self.upstream_calls.append(name)
+
+    monkeypatch.setattr(
+        daily_trace_module,
+        "_capture_stamina_evidence",
+        lambda *_args: "wuyin-unconfirmed.png",
+    )
+    monkeypatch.setattr(
+        virtual_hid,
+        "_virtual_hid_click",
+        lambda x, y, **_kwargs: clicks.append((x, y)),
+    )
+    install_daily_trace(SimpleNamespace, tacet_task_class=Tacet)
+    task = Tacet()
+
+    with pytest.raises(BookTabSelectionError, match="after 3 HID attempts"):
+        task.open_boss_book("wuyin", after_sleep=0)
+
+    assert clicks == [(614, 806), (614, 806), (614, 806)]
+    assert task.upstream_calls == []
+    assert sum("book_tab_target_page_check" in item for item in task.messages) == 3
+    assert any("book_tab_target_page_unconfirmed" in item for item in task.messages)
+
+
+def test_wuyin_semantic_check_error_after_hid_never_falls_back(
+    monkeypatch,
+) -> None:
+    from wuwa_auto.okww import virtual_hid
+
+    clicks: list[tuple[int, int]] = []
+
+    class Capture:
+        def get_abs_cords(self, x: int, y: int) -> tuple[int, int]:
+            return x, y
+
+    class Tacet:
+        width = 2560
+        executor = SimpleNamespace(
+            interaction=SimpleNamespace(capture=Capture()),
+        )
+
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+            self.upstream_calls: list[str] = []
+
+        def log_info(self, message: str) -> None:
+            self.messages.append(message)
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+        def ocr(self, *args: object, **kwargs: object) -> list[_Box]:
+            pattern = getattr(kwargs.get("match"), "pattern", "")
+            if "合鸣套装筛选" in pattern:
+                raise RuntimeError("ocr backend unavailable")
+            return [_Box("无音清剿", x=410, y=800)]
+
+        def box_of_screen(self, *args: float) -> tuple[float, ...]:
+            return args
+
+        def find_feature(self, *_args: object, **_kwargs: object) -> list[_Box]:
+            return []
+
+        def open_boss_book(self, name: str, after_sleep: float = 2) -> None:
+            self.upstream_calls.append(name)
+
+    monkeypatch.setattr(
+        daily_trace_module,
+        "_capture_stamina_evidence",
+        lambda *_args: "wuyin-check-error.png",
+    )
+    monkeypatch.setattr(
+        virtual_hid,
+        "_virtual_hid_click",
+        lambda x, y, **_kwargs: clicks.append((x, y)),
+    )
+    install_daily_trace(SimpleNamespace, tacet_task_class=Tacet)
+    task = Tacet()
+
+    with pytest.raises(BookTabSelectionError, match="check failed after HID input"):
+        task.open_boss_book("wuyin", after_sleep=0)
+
+    assert clicks == [(614, 806)]
+    assert task.upstream_calls == []
+    assert any("book_tab_hid_error" in item for item in task.messages)

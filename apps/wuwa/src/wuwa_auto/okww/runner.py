@@ -242,13 +242,21 @@ def write_workflow_failure(
     return result
 
 
-def _build_task_command(task_index: int, task_label: str) -> list[str]:
+def _build_task_command(
+    task_index: int,
+    task_label: str,
+    *,
+    daily_resume_after_nightmare: bool = False,
+) -> list[str]:
     if task_label == "daily":
-        return [
+        command = [
             str(OK_PYTHONW_EXE),
             str(DAILY_WORKER_ENTRYPOINT),
-            str(OK_WORKING_DIR),
         ]
+        if daily_resume_after_nightmare:
+            command.append("--resume-after-nightmare")
+        command.append(str(OK_WORKING_DIR))
+        return command
     return [
         str(OK_PYTHONW_EXE),
         str(OK_ENTRYPOINT),
@@ -266,10 +274,13 @@ def _run_task(
     success_marker: str,
     preflight: Callable[[], dict[str, object]],
     run_suffix: str = "",
+    daily_resume_after_nightmare: bool = False,
 ) -> OkRunResult:
     require_admin()
     facts = preflight()
     facts["workflow_task"] = task_label
+    if daily_resume_after_nightmare:
+        facts["daily_resume"] = "after_nightmare"
     if task_index is None:
         resolved_index = facts.get("garden_task_index")
         if not isinstance(resolved_index, int) or resolved_index < 1:
@@ -286,7 +297,11 @@ def _run_task(
 
     # ok-ww.exe is a graphical PyAppify application manager.  The real CLI is
     # the installed app's bundled interpreter plus working/main.py.
-    command = _build_task_command(task_index, task_label)
+    command = _build_task_command(
+        task_index,
+        task_label,
+        daily_resume_after_nightmare=daily_resume_after_nightmare,
+    )
     log.info("starting OK-WW %s: %s", task_label, command)
     resume_active_mouse_control()
     launcher = subprocess.Popen(
@@ -430,6 +445,19 @@ def run_daily_task() -> OkRunResult:
         task_label="daily",
         success_marker=SUCCESS_MARKER,
         preflight=preflight_daily_task,
+    )
+
+
+def run_daily_resume_task() -> OkRunResult:
+    """Resume DailyTask after Nightmare without changing installed config."""
+
+    return _run_task(
+        task_index=1,
+        task_label="daily",
+        success_marker=SUCCESS_MARKER,
+        preflight=preflight_daily_task,
+        run_suffix="_daily_resume",
+        daily_resume_after_nightmare=True,
     )
 
 
