@@ -119,6 +119,12 @@ def test_prompt_uses_log_order_and_declares_filtered_startup_noise() -> None:
     system_text = "\n".join(item["content"] for item in messages[:2])
     assert "时间戳和证据行号" in system_text
     assert "不要套用或硬编码" in system_text
+    assert "不能互相改名" in system_text
+    assert "summary只概括 confirmed_results" in system_text
+    assert "跨栏目移动、遗漏" in system_text
+    assert "相同项数和相同顺序" in system_text
+    assert "不得合并两项" in system_text
+    assert "不要求逐字照抄" in system_text
     assert "过滤固定无害噪声" in system_text
 
 
