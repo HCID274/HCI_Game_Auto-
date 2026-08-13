@@ -326,6 +326,11 @@ def _locate_network_retry(
     The 2.6.3 client enlarged the remote-configuration failure dialog and
     changed the button border.  Keep the old asset as a fallback so a client
     rollback does not reintroduce the startup deadlock.
+
+    Callers must pass a right-half button-row ``region`` (see
+    ``_network_retry_region``) so the match can never resolve to the left
+    "退出" button.  ``retry_button_in_right_half`` rejects any result that falls
+    on the left side of the window as a final geometric guard.
     """
     current = _locate(
         WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE,
@@ -341,13 +346,28 @@ def _locate_network_retry(
     )
 
 
+def _retry_button_in_right_half(
+    point: tuple[int, int],
+    window: WindowInfo,
+) -> bool:
+    """Reject any retry candidate on the left half of the client window.
+
+    The dialog always pairs 退出 (left) with 重试 (right).  A retry match whose
+    x coordinate lands left of the window midline is, by construction, the exit
+    button and must never be clicked.
+    """
+    left, _top, right, _bottom = window.rect
+    midpoint = left + (right - left) / 2
+    return point[0] >= midpoint
+
+
 def startup_network_retry_visible() -> bool:
     """Return whether the exact retry action is visible in the owned game window."""
     game = _game_window()
     if game is None:
         return False
-    retry = _locate_network_retry(region=_search_region(game))
-    return retry is not None and _point_in_window(retry, game)
+    retry = _locate_network_retry(region=_network_retry_region(game))
+    return retry is not None and _retry_button_in_right_half(retry, game)
 
 
 def click_startup_network_retry() -> bool:
@@ -355,17 +375,43 @@ def click_startup_network_retry() -> bool:
 
     This helper deliberately does not cross login or gameplay states.  The caller
     owns the three-click budget and may restart the OK-owned client afterward.
+
+    Returns False (and never clicks) when the only match is on the left "退出"
+    button, or when the client window disappears within a short post-click probe
+    (the signature symptom of having clicked exit by mistake).
     """
     game = _game_window()
     if game is None:
         return False
-    retry = _locate_network_retry(region=_search_region(game))
-    if retry is None or not _point_in_window(retry, game):
+    retry = _locate_network_retry(region=_network_retry_region(game))
+    if retry is None or not _retry_button_in_right_half(retry, game):
+        log.warning(
+            "startup network retry rejected: candidate %s is not the right-half "
+            "retry button in window %s",
+            retry,
+            game.rect,
+        )
         return False
     _restore_game(game)
     with managed_virtual_mouse() as mouse:
         evidence: list[str] = []
         _click_state(mouse, game, retry, "ok_startup_network_retry", evidence)
+    # Post-click liveness probe: if the client vanished within a couple of
+    # seconds, the click almost certainly hit 退出 instead of 重试.  Report the
+    # miss so the caller stops immediately instead of waiting out the full
+    # log-stall timeout.
+    time.sleep(2.0)
+    if not is_game_window_alive():
+        log.error(
+            "client window disappeared after startup network retry click at %s; "
+            "the click likely hit 退出 instead of 重试",
+            retry,
+        )
+        try:
+            _save_screenshot("wuwa_launcher_startup_network_retry_client_gone")
+        except Exception:
+            log.exception("could not save post-click evidence")
+        return False
     return True
 
 
@@ -442,6 +488,44 @@ def _search_region(window: WindowInfo) -> tuple[int, int, int, int]:
     right = min(screen_width, right)
     bottom = min(screen_height, bottom)
     return left, top, max(1, right - left), max(1, bottom - top)
+
+
+# The remote-configuration failure dialog shows two buttons side by side:
+# "退出" (exit) on the LEFT and "重试" (retry) on the RIGHT.  On 2026-08-13 a
+# full-window template match drifted onto the left "退出" button (click landed
+# near x=855 on a 2560-wide client, i.e. left of center), closing the client.
+# Pin the retry search to the right half of the button row so a match can never
+# resolve to the exit button.  Proportions match the 2.6.3 enlarged dialog where
+# both button centers sit near y=905 on a 2560x1440 client (~63% height) and the
+# retry button center is near x=1607.
+def _network_retry_region(window: WindowInfo) -> tuple[int, int, int, int]:
+    """Return the right-half button-row ROI that excludes the exit button."""
+    left, top, right, bottom = window.rect
+    screen_width, screen_height = pyautogui.size()
+    width = right - left
+    height = bottom - top
+    region_left = round(left + width * 0.55)
+    region_top = round(top + height * 0.55)
+    region_right = min(screen_width, round(left + width * 0.99))
+    region_bottom = min(screen_height, round(top + height * 0.75))
+    region_left = max(0, min(region_left, screen_width - 1))
+    region_top = max(0, min(region_top, screen_height - 1))
+    if region_right <= region_left:
+        region_right = region_left + 1
+    if region_bottom <= region_top:
+        region_bottom = region_top + 1
+    return region_left, region_top, region_right - region_left, region_bottom - region_top
+
+
+def is_game_window_alive() -> bool:
+    """Return True iff a visible Wuthering Waves client window still exists.
+
+    Used as a post-click liveness probe: if a startup-network retry click
+    closes the client (the classic "clicked 退出 instead of 重试" symptom),
+    the caller must stop immediately instead of waiting out the full log-stall
+    timeout.
+    """
+    return _game_window() is not None
 
 
 def _near_white_ratio(image: Image.Image) -> float:
@@ -544,11 +628,11 @@ def _ensure_game_world(
             actions.append("confirm_client_update_restart")
             raise _ClientRestartRequired(game.pid)
 
-        network_retry = _locate_network_retry(region=region)
+        network_retry = _locate_network_retry(region=_network_retry_region(game))
         network_retry_due = clock() - last_network_retry >= READY_RETRY_SECONDS
         if (
             network_retry is not None
-            and _point_in_window(network_retry, game)
+            and _retry_button_in_right_half(network_retry, game)
             and network_retry_clicks < MAX_CLICKS_PER_STATE
             and (network_retry_clicks == 0 or network_retry_due)
         ):

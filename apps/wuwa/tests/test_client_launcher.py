@@ -10,9 +10,14 @@ from wuwa_auto.client.launcher import (
     _ClientRestartRequired,
     _ensure_game_world,
     _locate_network_retry,
+    _network_retry_region,
+    _retry_button_in_right_half,
     _search_region,
     _world_hud_visible,
+    click_startup_network_retry,
     ensure_client_ready,
+    is_game_window_alive,
+    startup_network_retry_visible,
 )
 from wuwa_auto.settings import (
     WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
@@ -274,6 +279,130 @@ def test_network_retry_recognizes_new_dialog_then_keeps_legacy_fallback() -> Non
 
     assert locate.call_args_list[0].args[0] == WUWA_CLIENT_REMOTE_CONFIG_RETRY_TEMPLATE
     assert locate.call_args_list[1].args[0] == WUWA_CLIENT_NETWORK_RETRY_TEMPLATE
+
+
+def _full_game_window() -> WindowInfo:
+    """2560x1440 borderless client, matching the real 8/13 incident geometry."""
+    return WindowInfo(
+        hwnd=1,
+        pid=2,
+        title="鸣潮",
+        executable=Path("D:/Client-Win64-Shipping.exe"),
+        rect=(0, 0, 2560, 1440),
+    )
+
+
+def test_network_retry_region_excludes_left_exit_button() -> None:
+    """The retry ROI must cover only the right half of the button row.
+
+    On 2026-08-13 a full-window match drifted to the left 退出 button
+    (click near x=855).  The right-half ROI makes such a drift impossible.
+    """
+    with patch(
+        "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
+    ):
+        region = _network_retry_region(_full_game_window())
+
+    left, top, width, height = region
+    # Region left edge must be right of the window midline (1280 for 2560 wide).
+    assert left >= 1280, f"retry ROI leaked into left half: left={left}"
+    # Region must still contain the real retry button center (~1607, 905).
+    assert left <= 1607 < left + width
+    assert top <= 905 < top + height
+
+
+def test_retry_button_in_right_half_rejects_exit_button() -> None:
+    """A left-half match (the 退出 button) must be rejected."""
+    window = _full_game_window()
+    # 退出 sits left of midline (x=855 on 2560-wide client, as on 8/13).
+    assert _retry_button_in_right_half((855, 903), window) is False
+    # 重试 sits right of midline (x=1607).
+    assert _retry_button_in_right_half((1607, 905), window) is True
+
+
+def test_startup_network_retry_visible_rejects_left_exit_match() -> None:
+    """If the template drifts onto the left 退出 button, it must not be
+    reported as a visible retry action."""
+    window = _full_game_window()
+    with patch(
+        "wuwa_auto.client.launcher._game_window", return_value=window
+    ), patch(
+        "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
+    ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry", return_value=(855, 903)
+    ):
+        assert startup_network_retry_visible() is False
+
+
+def test_click_startup_network_retry_returns_false_when_client_disappears() -> None:
+    """The post-click liveness probe must catch the 'clicked 退出' symptom.
+
+    After a click, if the client window is gone within the probe window the
+    helper returns False (and never claims success), so the caller stops
+    instead of waiting out the full log-stall timeout.
+    """
+    window = _full_game_window()
+    with patch(
+        "wuwa_auto.client.launcher._game_window",
+        side_effect=[window, None, None],
+    ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry", return_value=(1607, 905)
+    ), patch("wuwa_auto.client.launcher._restore_game"), patch(
+        "wuwa_auto.client.launcher.managed_virtual_mouse"
+    ), patch(
+        "wuwa_auto.client.launcher._click_state"
+    ), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("gone.png")
+    ), patch("wuwa_auto.client.launcher.time.sleep"):
+        assert click_startup_network_retry() is False
+
+
+def test_click_startup_network_retry_succeeds_when_client_survives() -> None:
+    """A correct retry click leaves the client alive; returns True."""
+    window = _full_game_window()
+    clicked: list[tuple[int, int]] = []
+    with patch(
+        "wuwa_auto.client.launcher._game_window",
+        side_effect=[window, window, window],
+    ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry", return_value=(1607, 905)
+    ), patch("wuwa_auto.client.launcher._restore_game"), patch(
+        "wuwa_auto.client.launcher.managed_virtual_mouse"
+    ), patch(
+        "wuwa_auto.client.launcher._click_state",
+        side_effect=lambda mouse, win, point, state, ev: clicked.append(point),
+    ), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("ok.png")
+    ), patch("wuwa_auto.client.launcher.time.sleep"):
+        assert click_startup_network_retry() is True
+    assert clicked == [(1607, 905)]
+
+
+def test_click_startup_network_retry_refuses_left_exit_button() -> None:
+    """A match on the left 退出 button must never be clicked at all."""
+    window = _full_game_window()
+    with patch(
+        "wuwa_auto.client.launcher._game_window", return_value=window
+    ), patch(
+        "wuwa_auto.client.launcher._locate_network_retry", return_value=(855, 903)
+    ), patch(
+        "wuwa_auto.client.launcher._click_state"
+    ) as click_state:
+        assert click_startup_network_retry() is False
+    click_state.assert_not_called()
+
+
+def test_is_game_window_alive_reflects_client_presence() -> None:
+    """The liveness probe used by the FarmEcho/daily monitor loops."""
+    window = _full_game_window()
+    with patch(
+        "wuwa_auto.client.launcher._game_window", return_value=window
+    ):
+        assert is_game_window_alive() is True
+    with patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ):
+        assert is_game_window_alive() is False
 
 
 def test_client_update_complete_is_confirmed_and_requests_restart() -> None:

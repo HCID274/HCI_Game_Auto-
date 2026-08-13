@@ -24,6 +24,7 @@ from wuwa_auto.okww.config import (
     validate_farm_echo_configuration,
     validate_weekly_garden_configuration,
 )
+from wuwa_auto.client.launcher import is_game_window_alive
 from wuwa_auto.okww.daily_activity import (
     parse_activity_marker,
     parse_activity_panel_marker,
@@ -314,6 +315,7 @@ def _run_task(
     started_monotonic = time.monotonic()
     last_log_activity = started_monotonic
     saw_log_activity = False
+    saw_game_window = False
     status = "failed"
     reason = "unknown"
     evidence: Path | None = None
@@ -396,6 +398,22 @@ def _run_task(
             )
             reason = f"OK-WW worker exited {boundary} (code={worker_exit_code})"
             evidence = save_step_screenshot("ok_daily_worker_exited")
+            break
+        # Liveness guard: track whether the client window has EVER appeared
+        # during this run.  Only after it has appeared once do we treat its
+        # disappearance as a crash / wrong-click (退出 instead of 重试) that
+        # must stop immediately rather than wait out the 45-minute log-stall
+        # timeout.  During cold start the window legitimately does not exist
+        # yet, so we must not fire there.
+        game_alive = is_game_window_alive()
+        if game_alive:
+            saw_game_window = True
+        elif saw_game_window:
+            reason = (
+                "Wuthering Waves client window disappeared during the task; "
+                "stopping instead of waiting out the log-stall timeout"
+            )
+            evidence = save_step_screenshot(f"ok_{task_label}_client_gone")
             break
         if saw_log_activity and now - last_log_activity > LOG_STALL_TIMEOUT:
             reason = "OK-WW current-run log stalled for 45 minutes"

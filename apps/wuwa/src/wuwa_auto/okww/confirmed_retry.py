@@ -11,6 +11,7 @@ from pathlib import Path
 
 from wuwa_auto.client.launcher import (
     click_startup_network_retry,
+    is_game_window_alive,
     startup_network_retry_visible,
 )
 from wuwa_auto.okww.logs import (
@@ -191,6 +192,7 @@ def run_confirmed_farm_echo_retry(
     no_progress_deadline = started_monotonic + runtime_limit_seconds
     last_confirmed_absorptions = 0
     saw_log_activity = False
+    saw_game_window = False
     timeout_reason = ""
     live_combat_degradation = False
     startup_window_focused = False
@@ -270,6 +272,27 @@ def run_confirmed_farm_echo_retry(
             if network_retry_reason:
                 timeout_reason = network_retry_reason
                 startup_network_retry_exhausted = True
+                break
+            # Liveness guard: track whether the client window has EVER appeared
+            # during this run.  Only after it has appeared once do we treat its
+            # disappearance as a crash / wrong-click (退出 instead of 重试) that
+            # must stop immediately rather than wait out the 45-minute log-stall
+            # timeout.  During cold start the window legitimately does not exist
+            # yet, so we must not fire there.
+            game_alive = is_game_window_alive()
+            if game_alive:
+                saw_game_window = True
+            elif saw_game_window:
+                timeout_reason = (
+                    "Wuthering Waves client window disappeared during confirmed "
+                    "FarmEcho retry; the startup network retry likely clicked "
+                    "退出 instead of 重试"
+                )
+                log.error(timeout_reason)
+                try:
+                    save_step_screenshot("ok_confirmed_retry_client_gone")
+                except Exception:
+                    log.exception("could not save client-gone evidence")
                 break
             if now >= no_progress_deadline:
                 timeout_reason = (
