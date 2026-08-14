@@ -18,7 +18,6 @@
             RelativePath = 'apps\wuwa'
             Commands = @{
                 Daily = @('run', 'wuwa-auto', 'daily')
-                DailyRetry = @('run', 'wuwa-auto', 'daily-retry')
                 FarmEcho = @('run', 'wuwa-auto', 'farm-echo')
                 WeeklyGarden = @('run', 'wuwa-auto', 'weekly-garden')
                 UuStart = @('run', 'wuwa-auto', 'uu', 'start')
@@ -43,13 +42,6 @@
             LockWaitMinutes = 210
             ExecutionLimitHours = 8
             Description = 'Sunday Wuthering Waves weekly garden through the shared orchestrator'
-        }
-        WuwaDailyRetry = @{
-            Name = 'Game_Wuwa_DailyRetry_0635'
-            At = '06:35'
-            LockWaitMinutes = 115
-            ExecutionLimitHours = 3
-            Description = 'Same-day Wuthering Waves completion retry; no-op when the day is already green'
         }
     }
 

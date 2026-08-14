@@ -155,39 +155,6 @@ def _combined_evidence(candidates: list[_Candidate]) -> dict[str, Any]:
     )
 
 
-def same_day_stage_status(day: str) -> dict[str, bool | None]:
-    """Return the latest settled stage state for a day from raw run archives.
-
-    Retry planning must not depend on report archives existing: it runs right
-    after a failed morning chain whose report may be the only archive, and a
-    missing archive must never read as "nothing attempted".  Raw ``result.json``
-    files are the authoritative record; ``None`` means the stage was never
-    attempted that day.
-    """
-
-    from wuwa_auto.reporting.parser import parse_run
-
-    candidates: list[_Candidate] = []
-    if RUNS_DIR.is_dir():
-        for path in sorted(RUNS_DIR.glob(f"{day}*/result.json")):
-            result = _read_result(path)
-            if result is None:
-                continue
-            try:
-                facts = parse_run(result)
-            except (OSError, TypeError, ValueError):
-                continue
-            if facts.workflow_task == "weekly_garden":
-                continue
-            candidates.append(_Candidate(path.parent.name, result, facts))
-    daily = _select_stage(candidates, attempted="daily_attempted")
-    followup = _select_stage(candidates, attempted="followup_attempted")
-    return {
-        "daily_succeeded": bool(daily.daily_succeeded) if daily else None,
-        "followup_succeeded": bool(followup.followup_succeeded) if followup else None,
-    }
-
-
 def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> RunFacts:
     """Return final same-day phase state, keeping weekly reports independent."""
 

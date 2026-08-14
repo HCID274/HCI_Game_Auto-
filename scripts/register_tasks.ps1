@@ -60,10 +60,6 @@ $weeklyTrigger = New-ScheduledTaskTrigger `
     -At (Get-Date $weekly.At)
 Register-AutomationTask -Definition $weekly -Trigger $weeklyTrigger -Mode 'weekly-garden'
 
-$wuwaRetry = $config.Tasks.WuwaDailyRetry
-$wuwaRetryTrigger = New-ScheduledTaskTrigger -Daily -At (Get-Date $wuwaRetry.At)
-Register-AutomationTask -Definition $wuwaRetry -Trigger $wuwaRetryTrigger -Mode 'wuwa-daily-retry'
-
 foreach ($taskName in $config.RemovedTasks) {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($task) {
@@ -72,7 +68,7 @@ foreach ($taskName in $config.RemovedTasks) {
     }
 }
 
-foreach ($taskName in @($daily.Name, $weekly.Name, $wuwaRetry.Name)) {
+foreach ($taskName in @($daily.Name, $weekly.Name)) {
     $task = Get-ScheduledTask -TaskName $taskName
     $info = Get-ScheduledTaskInfo -TaskName $taskName
     Write-Host "registered: $taskName"
