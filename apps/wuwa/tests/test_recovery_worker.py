@@ -220,6 +220,10 @@ def test_realm_defeat_exits_and_heals_before_next_entry() -> None:
 def test_unavailable_party_member_exits_active_realm_then_heals() -> None:
     task = Mock()
     task.wait_click_feature.return_value = object()
+    task.wait_feature.return_value = None
+    task.wait_ocr.return_value = None
+    task.in_world.return_value = False
+    task.in_combat.return_value = True
     task.wait_in_team_and_world.return_value = True
 
     marker = _heal_after_party_member_unavailable(task)
@@ -242,6 +246,10 @@ def test_unavailable_party_member_exits_active_realm_then_heals() -> None:
 def test_unavailable_party_member_extends_upstream_waypoint_loading_wait() -> None:
     task = Mock()
     task.wait_click_feature.return_value = object()
+    task.wait_feature.return_value = None
+    task.wait_ocr.return_value = None
+    task.in_world.return_value = False
+    task.in_combat.return_value = True
     observed_timeouts: list[float] = []
     task.wait_in_team_and_world.side_effect = lambda **kwargs: (
         observed_timeouts.append(kwargs["time_out"]) or True
@@ -254,3 +262,88 @@ def test_unavailable_party_member_extends_upstream_waypoint_loading_wait() -> No
 
     assert marker == PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
     assert observed_timeouts == [120, 120.0, 120]
+
+
+def test_party_member_recovery_uses_live_realm_defeat_at_worker_start() -> None:
+    """Replay the 8/14 state change already complete before worker action."""
+
+    task = Mock()
+    task.wait_in_team_and_world.return_value = True
+    with patch(
+        "wuwa_auto.okww.recovery_worker.realm_defeat_visible",
+        return_value=True,
+    ), patch(
+        "wuwa_auto.okww.recovery_worker.click_realm_defeat_exit"
+    ) as click_exit:
+        marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+    click_exit.assert_called_once_with(task)
+    task.send_key.assert_not_called()
+    task.revive_at_tower_and_heal.assert_called_once_with()
+
+
+def test_party_member_recovery_reclassifies_defeat_while_exit_probe_waits() -> None:
+    """Replay 8/14: combat at trigger time, defeat UI after worker startup."""
+
+    task = Mock()
+    task.wait_feature.return_value = None
+    task.in_world.return_value = False
+    task.in_combat.return_value = True
+    task.wait_click_feature.return_value = None
+    task.wait_in_team_and_world.return_value = True
+    with patch(
+        "wuwa_auto.okww.recovery_worker.realm_defeat_visible",
+        side_effect=[False, True],
+    ), patch(
+        "wuwa_auto.okww.recovery_worker.click_realm_defeat_exit"
+    ) as click_exit:
+        marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER
+    task.send_key.assert_called_once_with("esc", after_sleep=1)
+    click_exit.assert_called_once_with(task)
+    task.revive_at_tower_and_heal.assert_called_once_with()
+
+
+def test_party_member_recovery_uses_live_revive_dialog_before_combat() -> None:
+    task = Mock()
+    task.wait_feature.return_value = object()
+    task.revive_action.return_value = True
+    with patch(
+        "wuwa_auto.okww.recovery_worker.realm_defeat_visible",
+        return_value=False,
+    ):
+        marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER
+    task.revive_action.assert_called_once_with()
+    task.send_key.assert_not_called()
+
+
+def test_party_member_recovery_heals_if_transition_already_reached_world() -> None:
+    task = Mock()
+    task.wait_feature.return_value = None
+    task.wait_ocr.return_value = None
+    task.in_combat.return_value = False
+    task.in_world.return_value = True
+    task.wait_in_team_and_world.return_value = True
+
+    marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    task.revive_at_tower_and_heal.assert_called_once_with()
+    task.send_key.assert_not_called()
+
+
+def test_party_member_recovery_refuses_unknown_live_state() -> None:
+    task = Mock()
+    task.wait_feature.return_value = None
+    task.wait_ocr.return_value = None
+    task.in_world.return_value = False
+    task.in_combat.return_value = False
+
+    with pytest.raises(RuntimeError, match="live UI is neither"):
+        _heal_after_party_member_unavailable(task)
+
+    task.send_key.assert_not_called()

@@ -37,6 +37,7 @@ WORLD_RECOVERY_COMPLETED_MARKER = "HOST_WORLD_STATE_RECOVERY_COMPLETED"
 RECOVERY_HID_CLICK_MARKER = "HOST_FARM_ECHO_RECOVERY_VIRTUAL_HID_CLICK"
 DETECT_ACTION_OCR_MARKER = "HOST_FARM_ECHO_RECOVERY_DETECT_ACTION_OCR"
 EXTENDED_WORLD_WAIT_MARKER = "HOST_FARM_ECHO_RECOVERY_EXTENDED_WORLD_WAIT"
+RECOVERY_STATE_MARKER = "HOST_FARM_ECHO_RECOVERY_STATE"
 MIN_WAYPOINT_WORLD_WAIT_SECONDS = 120.0
 _DETECT_ACTION_RE = re.compile(r"探测|探測|Detect", re.IGNORECASE)
 _DETECT_ACTION_REGION = (0.70, 0.78, 0.99, 0.98)
@@ -220,6 +221,78 @@ def _recover_detected_death_state(task: object) -> str:
     return REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER
 
 
+def _log_recovery_state(task: object, *, phase: str, state: str) -> None:
+    task.log_info(  # type: ignore[attr-defined]
+        f"{RECOVERY_STATE_MARKER} phase={phase} state={state}"
+    )
+
+
+def _revive_dialog_visible(task: object, *, time_out: float) -> bool:
+    return bool(
+        task.wait_feature(  # type: ignore[attr-defined]
+            "revive_confirm_hcenter_vcenter",
+            threshold=0.8,
+            time_out=time_out,
+        )
+    )
+
+
+def _heal_after_revive_dialog(task: object) -> str:
+    revive_action = getattr(task, "revive_action", None)
+    if not callable(revive_action) or not revive_action():
+        raise RuntimeError("upstream revive_action did not complete waypoint healing")
+    task.log_info(  # type: ignore[attr-defined]
+        REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER
+    )
+    return REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER
+
+
+def _open_world_visible(task: object) -> bool:
+    try:
+        return task.in_world() is True  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _heal_party_from_world(task: object) -> str:
+    """Heal a confirmed open-world party and verify the postcondition."""
+
+    _heal_at_waypoint_with_extended_world_wait(task)
+    if not task.wait_in_team_and_world(  # type: ignore[attr-defined]
+        time_out=120,
+        raise_if_not_found=False,
+    ):
+        raise RuntimeError(
+            "party-member waypoint healing did not return to the world state"
+        )
+    task.log_info(  # type: ignore[attr-defined]
+        PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    )
+    return PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+
+
+def _recover_party_state_transition(
+    task: object,
+    *,
+    phase: str,
+) -> str | None:
+    """Reclassify the live UI instead of trusting the stale worker exception.
+
+    A party-member failure is emitted while the last character can still be
+    alive.  During recovery-worker startup that character may die and the UI
+    may transition to the realm-defeat screen.  The current visible state owns
+    the recovery action, not the several-seconds-old log classification.
+    """
+
+    if realm_defeat_visible(task, time_out=2):
+        _log_recovery_state(task, phase=phase, state="realm_defeat")
+        return _heal_after_realm_defeat(task)
+    if _revive_dialog_visible(task, time_out=1):
+        _log_recovery_state(task, phase=phase, state="revive_dialog")
+        return _heal_after_revive_dialog(task)
+    return None
+
+
 def _heal_after_realm_defeat(task: object) -> str:
     """Exit a failed realm, heal at a waypoint, and re-enter from F2 later."""
 
@@ -240,8 +313,37 @@ def _heal_after_realm_defeat(task: object) -> str:
 
 
 def _heal_after_party_member_unavailable(task: object) -> str:
-    """Stop the active challenge, exit it, and heal the whole party."""
+    """Recover the live state after a party member becomes unavailable.
 
+    The state is sampled before every action because the last living character
+    can die while the separate recovery worker initializes.  Realm defeat and
+    revive UI therefore take priority over the older active-combat marker.
+    """
+
+    transitioned = _recover_party_state_transition(task, phase="worker_start")
+    if transitioned is not None:
+        return transitioned
+
+    if not _active_challenge_visible(task):
+        transitioned = _recover_party_state_transition(
+            task,
+            phase="active_challenge_not_confirmed",
+        )
+        if transitioned is not None:
+            return transitioned
+        if _open_world_visible(task):
+            _log_recovery_state(
+                task,
+                phase="active_challenge_not_confirmed",
+                state="open_world",
+            )
+            return _heal_party_from_world(task)
+        raise RuntimeError(
+            "party member became unavailable but the live UI is neither an "
+            "active challenge, a defeat/revive state, nor the open world"
+        )
+
+    _log_recovery_state(task, phase="worker_start", state="active_challenge")
     task.send_key("esc", after_sleep=1)  # type: ignore[attr-defined]
     exited = task.wait_click_feature(  # type: ignore[attr-defined]
         "gray_confirm_exit_button",
@@ -253,27 +355,45 @@ def _heal_after_party_member_unavailable(task: object) -> str:
         after_sleep=1,
     )
     if not exited:
+        transitioned = _recover_party_state_transition(
+            task,
+            phase="active_exit_missing",
+        )
+        if transitioned is not None:
+            return transitioned
+        if _open_world_visible(task):
+            _log_recovery_state(
+                task,
+                phase="active_exit_missing",
+                state="open_world",
+            )
+            return _heal_party_from_world(task)
         raise RuntimeError(
             "party member became unavailable but the active realm exit "
-            "control was not visible"
+            "control was not visible and no successor failure state was confirmed"
         )
     if not task.wait_in_team_and_world(  # type: ignore[attr-defined]
         time_out=120,
         raise_if_not_found=False,
     ):
+        transitioned = _recover_party_state_transition(
+            task,
+            phase="active_exit_world_wait_failed",
+        )
+        if transitioned is not None:
+            return transitioned
+        if _open_world_visible(task):
+            _log_recovery_state(
+                task,
+                phase="active_exit_world_wait_failed",
+                state="open_world",
+            )
+            return _heal_party_from_world(task)
         raise RuntimeError(
             "party-member recovery did not return to the team/world state"
         )
-    _heal_at_waypoint_with_extended_world_wait(task)
-    if not task.wait_in_team_and_world(  # type: ignore[attr-defined]
-        time_out=120,
-        raise_if_not_found=False,
-    ):
-        raise RuntimeError(
-            "party-member waypoint healing did not return to the world state"
-        )
-    task.log_info(PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER)  # type: ignore[attr-defined]
-    return PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    _log_recovery_state(task, phase="active_exit_completed", state="open_world")
+    return _heal_party_from_world(task)
 
 
 def _heal_at_waypoint_with_extended_world_wait(task: object) -> None:

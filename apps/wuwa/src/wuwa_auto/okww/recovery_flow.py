@@ -129,9 +129,11 @@ def _write_composite(
     initial_completed = attempt_counts[0]
     retry_completed = sum(attempt_counts[1:])
     total_completed = min(target, sum(attempt_counts))
-    completed = total_completed >= target and all(
-        recovery.success for recovery in recoveries
+    final_state_safe = bool(
+        attempts[-1].status == "success"
+        or (game_recoveries and game_recoveries[-1].success)
     )
+    completed = total_completed >= target and final_state_safe
     config = dict(initial.config)
     config["confirmed_farm_echo_absorption_count"] = total_completed
     config["farm_echo_recovery"] = {
@@ -170,11 +172,18 @@ def _write_composite(
         "retry_status": attempts[-1].status if len(attempts) > 1 else "not_run",
         "retry_error": retry_error,
         "final_safe_recovery": (
-            game_recoveries[-1].success if game_recoveries else None
+            final_state_safe if game_recoveries else None
         ),
         "final_recovery_reason": (
-            game_recoveries[-1].reason if game_recoveries else ""
+            game_recoveries[-1].reason
+            if game_recoveries and game_recoveries[-1].success
+            else "final Worker completed from a fresh safe entry"
+            if game_recoveries and final_state_safe
+            else game_recoveries[-1].reason
+            if game_recoveries
+            else ""
         ),
+        "final_state_safe": final_state_safe,
         "total_completed": total_completed,
         "attempt_run_ids": [attempt.run_id for attempt in attempts],
     }
@@ -323,6 +332,7 @@ def maybe_recover_farm_echo_death(
             confirmed_worker_failure = current.config.get("workflow_task") == (
                 "farm_echo_confirmed_retry"
             )
+            recovery_failed = False
             if not (
                 death_failure
                 or entry_failure
@@ -349,9 +359,30 @@ def maybe_recover_farm_echo_death(
                     **recovery_kwargs,
                 )
                 recoveries.append(recovery)
-                if not recovery.success or sum(attempt_counts) >= target:
+                if not recovery.success:
+                    recovery_failed = True
+                    consecutive_no_progress_retries += 1
+                    log.warning(
+                        "FarmEcho safety recovery made no progress: "
+                        "consecutive=%s/%s reason=%s",
+                        consecutive_no_progress_retries,
+                        MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+                        recovery.reason,
+                    )
+                    if (
+                        consecutive_no_progress_retries
+                        >= MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+                    ):
+                        retry_error = (
+                            "maximum consecutive FarmEcho no-progress retries "
+                            "exhausted during safety recovery: "
+                            f"{MAX_CONSECUTIVE_NO_PROGRESS_RETRIES}"
+                        )
+                        break
+                elif sum(attempt_counts) >= target:
                     break
-                resume_active_realm = recovery.resume_active_realm
+                else:
+                    resume_active_realm = recovery.resume_active_realm
 
             if (
                 consecutive_no_progress_retries
@@ -372,6 +403,11 @@ def maybe_recover_farm_echo_death(
                 resume_active_realm = True
 
             restart_for_network = startup_network_failure and not client_restart_done
+            restart_for_failed_recovery = bool(
+                recovery_failed
+                and client_restart is not None
+                and not client_restart_done
+            )
             restart_for_degradation = (
                 degraded
                 and degraded_runs >= DEGRADED_RUNS_BEFORE_CLIENT_RESTART
@@ -383,7 +419,11 @@ def maybe_recover_farm_echo_death(
                     "OK-owned client restart"
                 )
                 break
-            if restart_for_network or restart_for_degradation:
+            if (
+                restart_for_network
+                or restart_for_failed_recovery
+                or restart_for_degradation
+            ):
                 if client_restart is None:
                     retry_error = (
                         "FarmEcho requires a clean client restart but no restart "
@@ -394,6 +434,8 @@ def maybe_recover_farm_echo_death(
                 restart_reason = (
                     "startup network retry exhausted"
                     if restart_for_network
+                    else "safety recovery did not reach a confirmed safe state"
+                    if restart_for_failed_recovery
                     else "upstream combat degradation detected"
                 )
                 log.warning("FarmEcho %s; restarting the client once", restart_reason)
@@ -416,6 +458,13 @@ def maybe_recover_farm_echo_death(
                     )
                 )
                 resume_active_realm = False
+
+            # A failed recovery may be retried up to the shared no-progress
+            # limit.  Never start a business Worker from an unconfirmed unsafe
+            # screen unless a clean OK-owned client restart just established a
+            # fresh-entry boundary.
+            if recovery_failed and not restart_for_failed_recovery:
+                continue
 
             remaining = target - sum(attempt_counts)
             remaining_runtime = retry_deadline - time.monotonic()
