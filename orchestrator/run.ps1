@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
+    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'wuwa-daily-retry', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -153,6 +153,9 @@ try {
     if ($runMode -eq 'weekly-garden') {
         $lockWaitMinutes = [int]$config.Tasks.WeeklyGarden.LockWaitMinutes
     }
+    elseif ($runMode -eq 'wuwa-daily-retry') {
+        $lockWaitMinutes = [int]$config.Tasks.WuwaDailyRetry.LockWaitMinutes
+    }
     $lockTaken = Enter-OrchestratorMutex -WaitMinutes $lockWaitMinutes
     if (-not $lockTaken) {
         Write-OrchestratorLog "global lock wait expired after $lockWaitMinutes minutes"
@@ -188,6 +191,11 @@ try {
                 $starRailCode = 0
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Daily -Label 'Wuthering Waves daily'
+            }
+            'wuwa-daily-retry' {
+                $starRailCode = 0
+                $starRailCleanupCode = 0
+                $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName DailyRetry -Label 'Wuthering Waves daily retry'
             }
             'weekly-garden' {
                 $starRailCode = 0

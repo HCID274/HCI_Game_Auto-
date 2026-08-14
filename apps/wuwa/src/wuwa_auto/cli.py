@@ -11,6 +11,7 @@ from wuwa_auto.daily import (
     run_daily_workflow,
     run_daily_only_workflow,
     run_farm_echo_workflow,
+    run_daily_retry_workflow,
     run_daily_resume_workflow,
     run_weekly_garden_workflow,
 )
@@ -57,6 +58,10 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "daily-resume",
         help="resume DailyTask after already-settled Nightmare work",
+    )
+    commands.add_parser(
+        "daily-retry",
+        help="complete today's daily from its current state; no-op when green",
     )
     commands.add_parser("farm-echo", help="run only OK-WW FarmEchoTask")
     commands.add_parser("weekly-garden", help="run only OK-WW GardenTask")
@@ -194,6 +199,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_daily_only_workflow()
     if args.command == "daily-resume":
         return run_daily_resume_workflow()
+    if args.command == "daily-retry":
+        return run_daily_retry_workflow()
     if args.command == "farm-echo":
         return run_farm_echo_workflow()
     if args.command == "weekly-garden":

@@ -30,6 +30,7 @@ from wuwa_auto.okww.runner import (
     write_result,
     write_workflow_failure,
 )
+from wuwa_auto.reporting.day_rollup import same_day_stage_status
 from wuwa_auto.reporting.service import report_run
 from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
 from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
@@ -465,3 +466,41 @@ def run_farm_echo_workflow() -> int:
 
 def run_weekly_garden_workflow() -> int:
     return _run_workflow("weekly_garden", run_weekly_garden_task)
+
+
+def plan_daily_retry(day: str | None = None) -> str:
+    """Choose the smallest safe completion path for the same day.
+
+    ``noop``      both stages already settled green; no game interaction.
+    ``resume``    FarmEcho reached 5/5 but DailyTask failed; replay only the
+                  daily task through the resume runner.
+    ``farm-echo`` DailyTask completed but FarmEcho did not; farm the missing
+                  absorptions.
+    ``full``      nothing settled; cold-start the whole chain again.
+    """
+
+    resolved_day = day or datetime.now().strftime("%Y%m%d")
+    status = same_day_stage_status(resolved_day)
+    daily_ok = status["daily_succeeded"]
+    followup_ok = status["followup_succeeded"]
+    if daily_ok and followup_ok:
+        return "noop"
+    if followup_ok:
+        return "resume"
+    if daily_ok:
+        return "farm-echo"
+    return "full"
+
+
+def run_daily_retry_workflow() -> int:
+    """Complete today's Wuwa daily from whatever state the day is in."""
+
+    plan = plan_daily_retry()
+    log.info("daily retry plan: %s", plan)
+    if plan == "noop":
+        return 0
+    if plan == "resume":
+        return run_daily_resume_workflow()
+    if plan == "farm-echo":
+        return run_farm_echo_workflow()
+    return run_daily_workflow()
