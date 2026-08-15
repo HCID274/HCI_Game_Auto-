@@ -503,6 +503,7 @@ def test_daily_workflow_runs_boss_before_daily_and_reports_once(
         result: OkRunResult,
         *,
         client_restart: object | None = None,
+        workflow_started: object | None = None,
     ) -> OkRunResult:
         order.append("settle-daily")
         return result
@@ -681,7 +682,7 @@ def test_unknown_daily_failure_enters_bounded_generic_retry_and_recovers(
     assert "Daily Task Completed" in combined
 
 
-def test_generic_retry_exhausted_reports_failure_with_full_records(
+def test_retry_ladder_stops_only_after_no_progress_window(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
@@ -695,23 +696,31 @@ def test_generic_retry_exhausted_reports_failure_with_full_records(
         ),
         reason="daily workflow exception: RuntimeError('surprise')",
     )
-    retry_1 = replace(
-        _result(
-            runs,
-            "retry-1",
-            UNKNOWN_FAILURE_LOG,
-            status="failed",
-            absorbed=0,
-        ),
-        reason="daily workflow exception: RuntimeError('surprise') again",
+    retries = iter(
+        [
+            replace(
+                _result(
+                    runs,
+                    "retry-1",
+                    UNKNOWN_FAILURE_LOG,
+                    status="failed",
+                    absorbed=0,
+                ),
+                reason="surprise again",
+            ),
+            replace(
+                _result(
+                    runs,
+                    "retry-2",
+                    UNKNOWN_FAILURE_LOG,
+                    status="failed",
+                    absorbed=0,
+                ),
+                reason="surprise again",
+            ),
+        ]
     )
-    retry_2 = _result(
-        runs,
-        "retry-2",
-        UNKNOWN_FAILURE_LOG,
-        status="failed",
-        absorbed=0,
-    )
+    clock = {"t": 0.0}
     recovery = FarmEchoRecoveryResult(
         True,
         "HOST_WORLD_STATE_RECOVERY_COMPLETED",
@@ -719,41 +728,58 @@ def test_generic_retry_exhausted_reports_failure_with_full_records(
         "world-recovery.json",
     )
 
+    def now_fn() -> float:
+        return clock["t"]
+
+    def run_daily() -> OkRunResult:
+        clock["t"] += 2400.0  # each failed retry burns 40 minutes
+        return next(retries)
+
     with patch("wuwa_auto.daily.stop_daily_workers"), patch(
         "wuwa_auto.daily.run_world_state_recovery",
         return_value=recovery,
-    ) as recover_world, patch(
+    ), patch(
         "wuwa_auto.daily.run_daily_task",
-        side_effect=[retry_1, retry_2],
+        side_effect=run_daily,
     ) as retry_daily:
-        result = _maybe_recover_daily_state(initial)
+        result = _maybe_recover_daily_state(initial, now_fn=now_fn)
 
     assert result.status == "failed"
     assert result.exit_code == 1
     assert retry_daily.call_count == 2
-    assert recover_world.call_count == 2
     history = result.config["daily_state_recoveries"]
-    assert len(history) == 2
-    assert [record["attempt"] for record in history] == [1, 2]
+    retry_records = [record for record in history if record["triggered"]]
+    assert [record["attempt"] for record in retry_records] == [1, 2]
     assert all(
-        record["kind"] == "generic-bounded-retry" for record in history
+        record["kind"] == "generic-bounded-retry" for record in retry_records
     )
-    assert history[0]["initial_run_id"] == "initial"
-    assert history[0]["retry_run_id"] == "retry-1"
-    assert history[0]["failure_reason"] == (
+    assert all(record["progressed"] is False for record in retry_records)
+    assert retry_records[0]["failure_reason"] == (
         "daily workflow exception: RuntimeError('surprise')"
     )
-    assert history[-1]["retry_status"] == "failed"
+    assert retry_records[-1]["minutes_since_progress"] == 80
+    terminal = history[-1]
+    assert terminal["kind"] == "generic-bounded-retry-exhausted"
+    assert terminal["triggered"] is False
+    assert terminal["minutes_since_progress"] == 80
+    assert "no game-state progress" in terminal["reason"]
 
 
-def test_generic_retry_cold_restarts_once_when_world_recovery_fails(
+def test_cold_restart_repeats_while_world_recovery_fails(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
     initial = _result(
         runs,
         "initial",
-        UNKNOWN_FAILURE_LOG,
+        UNKNOWN_FAILURE_LOG + '"current_stamina": 104\n',
+        status="failed",
+        absorbed=0,
+    )
+    fail_low_stamina = _result(
+        runs,
+        "retry-1",
+        UNKNOWN_FAILURE_LOG + '"current_stamina": 44\n',
         status="failed",
         absorbed=0,
     )
@@ -774,7 +800,171 @@ def test_generic_retry_cold_restarts_once_when_world_recovery_fails(
 
     def fake_client_restart() -> bool:
         restart_calls.append(1)
-        return len(restart_calls) == 1
+        return True
+
+    clock = {"t": 0.0}
+
+    def now_fn() -> float:
+        return clock["t"]
+
+    def run_daily() -> OkRunResult:
+        clock["t"] += 600.0
+        if len(restart_calls) < 2:
+            return fail_low_stamina
+        return retry
+
+    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ), patch(
+        "wuwa_auto.daily.run_daily_task",
+        side_effect=run_daily,
+    ):
+        result = _maybe_recover_daily_state(
+            initial,
+            client_restart=fake_client_restart,
+            now_fn=now_fn,
+        )
+
+    assert result.status == "success"
+    assert result.exit_code == 0
+    assert len(restart_calls) == 2
+    history = result.config["daily_state_recoveries"]
+    restarted = [record for record in history if record.get("client_restarted")]
+    assert len(restarted) == 2
+    assert all(record["success"] is False for record in restarted)
+    assert restarted[-1]["retry_status"] == "success"
+
+
+def test_retry_ladder_resets_clock_on_game_state_progress(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        UNKNOWN_FAILURE_LOG + '"current_stamina": 104\n',
+        status="failed",
+        absorbed=0,
+    )
+    retry_1 = _result(
+        runs,
+        "retry-1",
+        UNKNOWN_FAILURE_LOG + '"current_stamina": 44\n',
+        status="failed",
+        absorbed=0,
+    )
+    retry_2 = _result(
+        runs,
+        "retry-2",
+        UNKNOWN_FAILURE_LOG + '"current_stamina": 12\n',
+        status="failed",
+        absorbed=0,
+    )
+    retry_3 = _result(
+        runs,
+        "retry-3",
+        "Daily Task Completed\n",
+        status="success",
+        absorbed=0,
+    )
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+    clock = {"t": 0.0}
+
+    def now_fn() -> float:
+        return clock["t"]
+
+    def run_daily() -> OkRunResult:
+        clock["t"] += 2500.0
+        return next(retries)
+
+    retries = iter([retry_1, retry_2, retry_3])
+
+    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ), patch(
+        "wuwa_auto.daily.run_daily_task",
+        side_effect=run_daily,
+    ) as retry_daily:
+        result = _maybe_recover_daily_state(initial, now_fn=now_fn)
+
+    # Without the progress reset the third iteration would already be
+    # 5000s > 3600s since "progress" and the ladder would have stopped.
+    assert result.status == "success"
+    assert retry_daily.call_count == 3
+    history = result.config["daily_state_recoveries"]
+    assert [record["progressed"] for record in history] == [True, True, True]
+    assert all(record["kind"] == "generic-bounded-retry" for record in history)
+
+
+def test_retry_ladder_stops_immediately_at_hard_deadline(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        UNKNOWN_FAILURE_LOG,
+        status="failed",
+        absorbed=0,
+    )
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+
+    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ) as recover_world, patch(
+        "wuwa_auto.daily.run_daily_task",
+    ) as retry_daily:
+        result = _maybe_recover_daily_state(
+            initial,
+            workflow_started=0.0,
+            now_fn=lambda: 166 * 60.0,
+        )
+
+    assert result.status == "failed"
+    retry_daily.assert_not_called()
+    recover_world.assert_not_called()
+    terminal = result.config["daily_state_recoveries"][-1]
+    assert terminal["kind"] == "generic-bounded-retry-exhausted"
+    assert terminal["reason"] == "workflow hard deadline reached"
+
+
+def test_retry_ladder_stops_when_clock_stops_advancing(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        UNKNOWN_FAILURE_LOG,
+        status="failed",
+        absorbed=0,
+    )
+    retry = _result(
+        runs,
+        "retry-1",
+        UNKNOWN_FAILURE_LOG,
+        status="failed",
+        absorbed=0,
+    )
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
 
     with patch("wuwa_auto.daily.stop_daily_workers"), patch(
         "wuwa_auto.daily.run_world_state_recovery",
@@ -782,20 +972,69 @@ def test_generic_retry_cold_restarts_once_when_world_recovery_fails(
     ), patch(
         "wuwa_auto.daily.run_daily_task",
         return_value=retry,
-    ):
+    ) as retry_daily:
         result = _maybe_recover_daily_state(
             initial,
-            client_restart=fake_client_restart,
+            now_fn=lambda: 100.0,
         )
 
+    assert result.status == "failed"
+    assert retry_daily.call_count == 1
+    terminal = result.config["daily_state_recoveries"][-1]
+    assert terminal["kind"] == "generic-bounded-retry-exhausted"
+    assert terminal["reason"] == "retry clock stopped advancing"
+
+
+def test_retry_ladder_carries_daily_resume_flag_across_composites(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "resume-initial",
+        UNKNOWN_FAILURE_LOG,
+        status="failed",
+        absorbed=0,
+    )
+    initial.config["daily_resume"] = "after_nightmare"
+    # A retry whose runner stopped re-injecting the workflow flag must not
+    # degrade the next ladder iteration into a full daily re-run.
+    retry_without_flag = _result(
+        runs,
+        "resume-retry-1",
+        UNKNOWN_FAILURE_LOG,
+        status="failed",
+        absorbed=0,
+    )
+    retry_success = _result(
+        runs,
+        "resume-retry-2",
+        "Daily Task Completed\n",
+        status="success",
+        absorbed=0,
+    )
+    recovery = FarmEchoRecoveryResult(
+        True,
+        "HOST_WORLD_STATE_RECOVERY_COMPLETED",
+        None,
+        "world-recovery.json",
+    )
+
+    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
+        "wuwa_auto.daily.run_world_state_recovery",
+        return_value=recovery,
+    ), patch(
+        "wuwa_auto.daily.run_daily_resume_task",
+        side_effect=[retry_without_flag, retry_success],
+    ) as resume_daily, patch(
+        "wuwa_auto.daily.run_daily_task",
+    ) as full_daily:
+        result = _maybe_recover_daily_state(initial)
+
     assert result.status == "success"
-    assert result.exit_code == 0
-    assert restart_calls == [1]
-    record = result.config["daily_state_recoveries"][-1]
-    assert record["kind"] == "generic-bounded-retry"
-    assert record["success"] is False
-    assert record["client_restarted"] is True
-    assert record["retry_status"] == "success"
+    assert resume_daily.call_count == 2
+    full_daily.assert_not_called()
+    assert result.config["daily_resume"] == "after_nightmare"
 
 
 def test_marker_recovery_failure_falls_through_to_generic_retry(
