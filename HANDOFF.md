@@ -205,6 +205,30 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
 
 > 8-13 事故原始证据（弹窗截图、`(855,903)` 点击坐标、45 分钟假等待）存档于 `apps/wuwa/runtime/runs/20260813_053815_farm_echo_confirmed_retry/` 及当日 evidence 目录；当日无官方维护公告佐证，结论以代码缺陷为准。
 
+### 8.5 2026-08-15 晨：第四种死法——`TacetTask.walk_to_treasure` 抛 `WaitFailedException`
+
+0815 晨 FarmEcho 恢复层真实生效（4 个 Worker 累进 0→1→3→5、一次客户端重启、5/5 成功），失败挪到 DailyTask 阶段：06:28 `TacetTask.walk_to_treasure` 抛 `WaitFailedException`，该特征不在任何恢复清单里，链路放弃时 3 小时预算还剩约 2 小时。证据：`apps/wuwa/runtime/runs/20260815_061006/ok-current-run.log`（trace 行 634–672、traceback 行 675 起）、截图 `apps/wuwa/runtime/evidence/ok_daily_failed_20260815_062826_007281.png`。
+
+阶段 A 对比结论（0815 失败 run 对 0814 晚全绿 run `20260814_204909/ok-current-run.log` 同阶段，行号均指各自日志）：
+
+- a) 超时发生在当日第一个清剿目标（0815 行 649 `Teleport to Tacet Suppression 2`，即配置 `which_tacet=3` 的 index 2）。上游体力门槛只有 `total(=当前+备用) < 60`（`TacetTask.farm_tacet`），104+238=342 通过；"两次 Tacet 共需 120 > 104"从未被评估——daily 模式按 `must_use=180-used_stamina` 强制消耗，备用波片自动补位。体力与本次死亡无关。
+- b) 06:10–06:26 是健康的 NightmareNest 全清（4 巢 0/41→41/41 等，行 94/340/444/551/621，画像与 0814 晚一致）；06:27:17 传送并开挑战后，06:27:52 首次切人检查时队伍 HUD 置信度仅 0.117（行 663），战斗约 4 秒即 "not in_team while switching" 误退（行 664/666）；战斗从未发生→宝箱不存在→06:27:55 起 `walk_to_treasure` 找图标 30 秒超时（行 669/670/672）抛异常炸穿 DailyTask。截图任务计数 0/3 未动，正是战斗从未发生的直接后果。
+- c) 晨/晚 DailyTask 输入状态客观差异极小：两日 daily progress 都是 0（0815 行 80 / 0814 行 82）、巢穴计数都是全 0（0815 行 94 / 0814 行 96）——0814 晚同样是"当日首次"。真实差异只有三点：①体力 104/342 对 191/429（0815 行 644 / 0814 行 643，均过门槛，非死因）；②挑战入场加载画像：0814 晚两次 WGC 丢帧重启、开挑战到战斗 67 秒（行 652/655/665），0815 晨零丢帧、仅 30 秒（行 651/660）；③首次切人 in-team 判定 True 对 0.117（0814 行 666 / 0815 行 663）。结论：这是"场景加载完成度"与"首次 in-team 检查"之间的时序竞态，与"早上"无必然联系——四天四处互不相同的死因证明枚举式补丁打地鼠必输。
+
+### 8.6 修复：DailyTask 有界通用重试（不再只认已知 marker）
+
+- 任何 `status != "success"`（无论异常类型）进入有界恢复：每次尝试 = 退出挑战/世界态校验（复用 `okww/recovery.py` 的 `run_world_state_recovery`）→ 若世界态恢复失败则从整轮共享预算花一次 OK 冷启动（`restart_client_once` 模式，全轮至多一次，与 FarmEcho 恢复共享）→ 保持 resume 语义（`daily_resume` 随结果传递）重跑 DailyTask；重试上限 2 次，耗尽后按现行失败路径汇报。
+- 每次重试写结构化 `daily_state_recoveries` 记录（`kind=generic-bounded-retry`，含 `attempt`/`failure_reason`/`client_restarted`/`retry_status`）；无 broad catch 吞错。
+- 原有两个 marker（`DAILY_START_BOOK_FAILURE`/`TACET_DEATH_RECOVERY_FAILURE`）专门路径保留；其世界态恢复失败不再终点红，而是落入通用层继续有界恢复。
+- 未改 `recovery_flow.py`/`recovery_worker.py` 语义、未新增计划任务、未动 `Repeat Farm Count=5`、未动星铁与 `automation.psd1`。
+- 单测新增 5 例（未知异常 `RuntimeError('surprise')` → 恢复 → 绿；两次重试耗尽 → 红且记录完整；世界态恢复失败 → 冷启动一次 → 重试绿；marker 恢复失败贯穿通用层；generic 重试保持 daily_resume 语义），全套 230 passed。
+
+### 8.7 真机验收（2026-08-15 晚，wuwa-daily 与 farm-echo 双链全绿）
+
+- 19:31–20:01 经生产任务 `Game_Daily_0530`（`runtime/orchestrator/next-run.mode=wuwa-daily`，任务以 Highest 权限运行 `run.ps1`，与 05:30 生产路径相同）全链：FarmEcho 首 Worker 3/5、次 Worker 0/2、第三个 Worker 补齐 2/2，恢复层合成 5/5（worker_retries=2）；DailyTask 19:53–20:00 一次通过（晨间已完成的 4 个巢穴自动跳过、两个清剿体力 239→120、20:00:47 `Daily Task Completed`）；总控 `runtime/orchestrator/20260815_193134/` `wuwa_exit_code=0`、`exit_code=0`。今晚 DailyTask 一次通过，通用重试层未被真机触发（行为由 5 例单测覆盖）。
+- 20:06–20:19 farm-echo 复读：恢复层合成 5/5（worker_retries=1），总控 exit 0，最新 farm_echo run `status=success`（`20260815_201654_farm_echo_confirmed_retry`）。
+- 当晚 day_rollup 以最新已结算为准合并"晨败晚成"，overall=completed、单条通知（`apps/wuwa/runtime/reports/20260815_200644_farm_echo_confirmed_retry_recovery_daily_rollup.json`）。
+
 ## 9. 验证、发布与排障手册
 
 ### 9.1 常用命令
@@ -258,6 +282,10 @@ uv run --project apps/wuwa wuwa-auto elevate client prepare
 ### P0（已清零）：晨间链路三连故障
 
 8-12 页面导航、8-13 弹窗误点、8-14 恢复误判均已修复（`d46387e`、`aa571c8`、`d5261cf`）并以 8-14 晚全绿真机验收（见 §8.3）。新的观察哨：连续保持 05:30 绿色；首个红色日按 §9.2 顺序归因，不回滚已验证路径。
+
+### P0 更新（2026-08-15）：第四故障与策略转向
+
+8-15 晨死于 `TacetTask.walk_to_treasure` `WaitFailedException`（归因见 §8.5，加载时序竞态而非可枚举缺陷）。策略已从"枚举失败特征再补丁"转向"DailyTask 有界通用恢复"（§8.6），并以 8-15 晚双链真机验收（§8.7）。新观察哨：连续保持 05:30 绿色；若再现红色，先读该 run 的 `daily_state_recoveries` 记录确认恢复动作（世界态校验/冷启动/重跑）是否按预期执行与耗尽，而不是先新增 marker。
 
 ### P1：稳定性与可观测性
 
