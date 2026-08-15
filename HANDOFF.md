@@ -229,6 +229,18 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
 - 20:06–20:19 farm-echo 复读：恢复层合成 5/5（worker_retries=1），总控 exit 0，最新 farm_echo run `status=success`（`20260815_201654_farm_echo_confirmed_retry`）。
 - 当晚 day_rollup 以最新已结算为准合并"晨败晚成"，overall=completed、单条通知（`apps/wuwa/runtime/reports/20260815_200644_farm_echo_confirmed_retry_recovery_daily_rollup.json`）。
 
+### 8.8 策略再升级：次数上限改为双时钟时间预算（2026-08-15 深夜，用户裁定）
+
+用户裁定：3 小时晨间预算是主要约束，"有限次数失败就全失败"不可接受；同类问题 **60 分钟无进展** 才可判失败。§8.6 的 2 次重试上限据此废除，改为双时钟阶梯（`_retry_daily_after_any_failure`）：
+
+- **无进展时钟**：每次重试用 `_daily_progress_fingerprint`（巢穴已击败对、按序体力读数、完成 marker、吸收数）与上次比较；指纹变化=有进展→时钟归零。连续 60 分钟（`DAILY_NO_PROGRESS_TIMEOUT`）无进展才终止（记录 `kind=generic-bounded-retry-exhausted`）。
+- **硬截止**：自 workflow 开始 165 分钟（`DAILY_RETRY_HARD_DEADLINE`）强制结算，保证不烧穿晨间窗口。
+- **冷启动不再限 1 次**：daily 阶梯专用 `restart_client_for_daily`（无 done 标志，由时钟约束）；FarmEcho 保持原 `restart_client_once` 整轮 1 次预算不变。
+- **时钟域**：阶梯全部用 `time.perf_counter`（本机 `time.monotonic` 为 GetTickCount64、分辨率 15.6ms，快迭代会读到相同 tick）；含"时钟停滞即终止"守卫。
+- **防御性继承**：`_compose_recovery_result` 在 retry 缺失时从 initial 继承 `daily_resume`/`workflow_task`，防止未来 runner 改动把 resume 阶梯静默退化为全量重跑。
+- 单测 234 passed（新增：无进展 80 分钟才停、进展归零时钟、硬截止立即停、时钟停滞停、冷启动两次、resume 标志跨合成继承）；DeepSeek Worker 两轮只读审查均 pass（第一轮两个发现即上述守卫与继承，已修）。
+- 真机复验：2026-08-15 22:40–22:58 经生产任务 wuwa-daily 全链 exit=0（FarmEcho 5/5 + DailyTask success，`runtime/orchestrator/20260815_224000/`），确认改造未破坏生产路径。
+
 ## 9. 验证、发布与排障手册
 
 ### 9.1 常用命令
