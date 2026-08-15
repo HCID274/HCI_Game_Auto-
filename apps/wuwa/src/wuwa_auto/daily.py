@@ -45,6 +45,11 @@ TACET_DEATH_RECOVERY_FAILURE = (
     "TacetTask:raise_not_in_combat char dead",
     "TacetTask:info_set Revive Failed",
 )
+# The 0815 morning DailyTask crash (WaitFailedException in walk_to_treasure)
+# matched no enumerated marker.  Unknown failures therefore get the same
+# bounded recovery instead of a terminal red.
+DAILY_GENERIC_RETRY_KIND = "generic-bounded-retry"
+DAILY_GENERIC_RETRY_LIMIT = 2
 
 
 def _prepare_okww_cold_start() -> None:
@@ -65,20 +70,22 @@ def _read_result_log(result: OkRunResult) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
 
 
-def _compose_daily_start_recovery(
+def _compose_recovery_result(
     initial: OkRunResult,
     *,
     retry: OkRunResult | None,
     recovery: FarmEchoRecoveryResult,
     recovery_kind: str,
+    run_suffix: str,
+    record_extra: dict[str, object] | None = None,
 ) -> OkRunResult:
     base_dir = Path(initial.log_slice_path).parent.parent
-    run_id = f"{initial.run_id}_daily_start_recovery"
+    run_id = f"{initial.run_id}_{run_suffix}"
     run_dir = base_dir / run_id
     suffix = 1
     while run_dir.exists():
         suffix += 1
-        run_id = f"{initial.run_id}_daily_start_recovery_{suffix}"
+        run_id = f"{initial.run_id}_{run_suffix}_{suffix}"
         run_dir = base_dir / run_id
     run_dir.mkdir(parents=True)
 
@@ -91,14 +98,17 @@ def _compose_daily_start_recovery(
     final = retry or initial
     config = dict(final.config)
     recovery_history = list(initial.config.get("daily_state_recoveries") or [])
-    recovery_history.append({
+    record: dict[str, object] = {
         "kind": recovery_kind,
         "triggered": True,
         "success": recovery.success,
         "reason": recovery.reason,
         "initial_run_id": initial.run_id,
         "retry_run_id": retry.run_id if retry is not None else "",
-    })
+    }
+    if record_extra:
+        record.update(record_extra)
+    recovery_history.append(record)
     config["daily_state_recoveries"] = recovery_history
     started = datetime.fromisoformat(initial.started_at)
     finished = datetime.fromisoformat(final.finished_at)
@@ -126,8 +136,16 @@ def _compose_daily_start_recovery(
     return composite
 
 
-def _maybe_recover_daily_state(result: OkRunResult) -> OkRunResult:
-    """Recover known residual/death states once each before final reporting."""
+def _maybe_recover_daily_state(
+    result: OkRunResult,
+    *,
+    client_restart: Callable[[], bool] | None = None,
+) -> OkRunResult:
+    """Recover known residual/death states once each before final reporting.
+
+    Unknown failures fall through to the bounded generic retry so the next
+    unenumerated crash (0815-style) still gets a full re-run.
+    """
     current = result
     recoverable_states = (
         ("restored-tacet-challenge", DAILY_START_BOOK_FAILURE),
@@ -146,23 +164,78 @@ def _maybe_recover_daily_state(result: OkRunResult) -> OkRunResult:
             attempt=1,
         )
         if not recovery.success:
-            return _compose_daily_start_recovery(
+            # The failure is settled for this marker, but the bounded
+            # generic retry below still owns any remaining recovery budget.
+            current = _compose_recovery_result(
                 current,
                 retry=None,
                 recovery=recovery,
                 recovery_kind=recovery_kind,
+                run_suffix="daily_start_recovery",
             )
+            break
         runner = (
             run_daily_resume_task
             if current.config.get("daily_resume") == "after_nightmare"
             else run_daily_task
         )
         retry = runner()
-        current = _compose_daily_start_recovery(
+        current = _compose_recovery_result(
             current,
             retry=retry,
             recovery=recovery,
             recovery_kind=recovery_kind,
+            run_suffix="daily_start_recovery",
+        )
+    return _retry_daily_after_any_failure(
+        current,
+        client_restart=client_restart,
+    )
+
+
+def _retry_daily_after_any_failure(
+    current: OkRunResult,
+    *,
+    client_restart: Callable[[], bool] | None = None,
+) -> OkRunResult:
+    """Bounded recovery for any DailyTask failure, known or unknown.
+
+    Each attempt resets world state (exiting any half-finished challenge);
+    if that recovery itself fails, one OK-owned cold start is spent from the
+    shared per-workflow budget before re-running DailyTask.  At most
+    DAILY_GENERIC_RETRY_LIMIT re-runs happen, then the settled failure is
+    reported through the normal path.
+    """
+    for attempt in range(1, DAILY_GENERIC_RETRY_LIMIT + 1):
+        if current.status == "success":
+            return current
+        failure_reason = current.reason
+        stop_daily_workers()
+        recovery = run_world_state_recovery(
+            Path(current.log_slice_path).parent,
+            attempt=attempt,
+        )
+        client_restarted = False
+        if not recovery.success and client_restart is not None:
+            client_restarted = bool(client_restart())
+        runner = (
+            run_daily_resume_task
+            if current.config.get("daily_resume") == "after_nightmare"
+            else run_daily_task
+        )
+        retry = runner()
+        current = _compose_recovery_result(
+            current,
+            retry=retry,
+            recovery=recovery,
+            recovery_kind=DAILY_GENERIC_RETRY_KIND,
+            run_suffix=f"daily_generic_retry_{attempt}",
+            record_extra={
+                "attempt": attempt,
+                "failure_reason": failure_reason,
+                "client_restarted": client_restarted,
+                "retry_status": retry.status,
+            },
         )
     return current
 
@@ -283,7 +356,10 @@ def _run_boss_then_daily_task(
             exit_code=1,
         )
         return _compose_ordered_daily_result(boss, daily)
-    daily = _maybe_recover_daily_state(run_daily_task())
+    daily = _maybe_recover_daily_state(
+        run_daily_task(),
+        client_restart=client_restart,
+    )
     return _compose_ordered_daily_result(boss, daily)
 
 
@@ -300,8 +376,12 @@ def _settle_business_transaction(
             sequence = current.config.get("daily_sequence") or {}
             if isinstance(sequence, dict) and sequence.get("settled") is True:
                 return current
-            current = _maybe_recover_daily_state(current)
-        if task_name in {"daily", "farm_echo"}:
+            current = _maybe_recover_daily_state(
+                current,
+                client_restart=client_restart,
+            )
+            return maybe_recover_farm_echo_death(current)
+        if task_name == "farm_echo":
             if client_restart is None:
                 return maybe_recover_farm_echo_death(current)
             return maybe_recover_farm_echo_death(
@@ -375,7 +455,9 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     task_name,
                     result,
                     client_restart=(
-                        restart_client_once if task_name == "farm_echo" else None
+                        restart_client_once
+                        if task_name in {"daily", "farm_echo"}
+                        else None
                     ),
                 )
             except Exception as exc:
