@@ -1,7 +1,10 @@
 """End-to-end Wuthering Waves daily workflow."""
 
 import logging
+import re
+import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -49,7 +52,15 @@ TACET_DEATH_RECOVERY_FAILURE = (
 # matched no enumerated marker.  Unknown failures therefore get the same
 # bounded recovery instead of a terminal red.
 DAILY_GENERIC_RETRY_KIND = "generic-bounded-retry"
-DAILY_GENERIC_RETRY_LIMIT = 2
+# A recurring failure with no observable game-state progress only turns
+# fatal after this much wall time: restarting has a real chance of fixing
+# transient upstream states and the morning budget can absorb it.
+DAILY_NO_PROGRESS_TIMEOUT = 60 * 60.0
+# Hard backstop measured from workflow start so the retry ladder can never
+# burn through the whole scheduled morning window.
+DAILY_RETRY_HARD_DEADLINE = 165 * 60.0
+_NIGHTMARE_CLEARED = re.compile(r"已击败残象：(\d+)/(\d+)")
+_STAMINA_CURRENT = re.compile(r'"current_stamina": (\d+)')
 
 
 def _prepare_okww_cold_start() -> None:
@@ -97,6 +108,12 @@ def _compose_recovery_result(
 
     final = retry or initial
     config = dict(final.config)
+    # Workflow-level flags must survive composes even if a future runner
+    # change stops re-injecting them; losing daily_resume here would
+    # silently degrade a resume ladder into a full daily re-run.
+    for flag in ("daily_resume", "workflow_task"):
+        if flag in initial.config and flag not in config:
+            config[flag] = initial.config[flag]
     recovery_history = list(initial.config.get("daily_state_recoveries") or [])
     record: dict[str, object] = {
         "kind": recovery_kind,
@@ -140,11 +157,13 @@ def _maybe_recover_daily_state(
     result: OkRunResult,
     *,
     client_restart: Callable[[], bool] | None = None,
+    workflow_started: float | None = None,
+    now_fn: Callable[[], float] = time.perf_counter,
 ) -> OkRunResult:
     """Recover known residual/death states once each before final reporting.
 
-    Unknown failures fall through to the bounded generic retry so the next
-    unenumerated crash (0815-style) still gets a full re-run.
+    Unknown failures fall through to the time-budgeted generic retry so the
+    next unenumerated crash (0815-style) still gets a full re-run.
     """
     current = result
     recoverable_states = (
@@ -190,25 +209,102 @@ def _maybe_recover_daily_state(
     return _retry_daily_after_any_failure(
         current,
         client_restart=client_restart,
+        workflow_started=workflow_started,
+        now_fn=now_fn,
     )
+
+
+def _daily_progress_fingerprint(result: OkRunResult) -> tuple[object, ...]:
+    """Observable game-state progress extracted from one settled attempt.
+
+    Cleared nightmare nests, spent stamina, the completion marker, and boss
+    absorptions all advance between attempts while the ladder is making
+    progress; a recurring identical fingerprint means the same failure is
+    not being worked around and the no-progress clock keeps running.
+    """
+    text = _read_result_log(result)
+    nests = tuple(sorted(set(_NIGHTMARE_CLEARED.findall(text))))
+    stamina = tuple(_STAMINA_CURRENT.findall(text))
+    completed = "Daily Task Completed" in text
+    absorbed = int(result.config.get("confirmed_farm_echo_absorption_count") or 0)
+    return (nests, stamina, completed, absorbed)
+
+
+def _append_terminal_recovery_record(
+    current: OkRunResult,
+    *,
+    why: str,
+    minutes: int,
+) -> OkRunResult:
+    config = dict(current.config)
+    history = list(config.get("daily_state_recoveries") or [])
+    history.append({
+        "kind": "generic-bounded-retry-exhausted",
+        "triggered": False,
+        "reason": why,
+        "minutes_since_progress": minutes,
+    })
+    config["daily_state_recoveries"] = history
+    updated = replace(current, config=config)
+    write_result(updated, Path(current.log_slice_path).parent)
+    log.info("daily generic retry ladder stopped: %s", why)
+    return updated
 
 
 def _retry_daily_after_any_failure(
     current: OkRunResult,
     *,
     client_restart: Callable[[], bool] | None = None,
+    workflow_started: float | None = None,
+    now_fn: Callable[[], float] = time.perf_counter,
 ) -> OkRunResult:
-    """Bounded recovery for any DailyTask failure, known or unknown.
+    """Time-budgeted recovery for any DailyTask failure, known or unknown.
 
-    Each attempt resets world state (exiting any half-finished challenge);
-    if that recovery itself fails, one OK-owned cold start is spent from the
-    shared per-workflow budget before re-running DailyTask.  At most
-    DAILY_GENERIC_RETRY_LIMIT re-runs happen, then the settled failure is
-    reported through the normal path.
+    Retries continue while either clock allows: the same failure with no
+    observable game-state progress only turns fatal after
+    DAILY_NO_PROGRESS_TIMEOUT, and the ladder never crosses the workflow
+    hard deadline.  Each attempt resets world state (exiting any
+    half-finished challenge); when that recovery itself fails, an OK-owned
+    cold start rebuilds a clean entry boundary before the re-run, as often
+    as the clocks allow.  Every attempt writes a structured
+    ``daily_state_recoveries`` record; nothing is caught or swallowed.
     """
-    for attempt in range(1, DAILY_GENERIC_RETRY_LIMIT + 1):
-        if current.status == "success":
-            return current
+    hard_deadline = (
+        (workflow_started if workflow_started is not None else now_fn())
+        + DAILY_RETRY_HARD_DEADLINE
+    )
+    last_progress_at = now_fn()
+    previous = _daily_progress_fingerprint(current)
+    attempt = 0
+    last_tick: float | None = None
+    while current.status != "success":
+        now = now_fn()
+        if last_tick is not None and now <= last_tick:
+            # The monotonic clock must advance across a full retry cycle; a
+            # frozen one would otherwise spin the ladder forever.
+            return _append_terminal_recovery_record(
+                current,
+                why="retry clock stopped advancing",
+                minutes=round((now - last_progress_at) / 60.0),
+            )
+        last_tick = now
+        minutes_since_progress = (now - last_progress_at) / 60.0
+        if minutes_since_progress * 60.0 >= DAILY_NO_PROGRESS_TIMEOUT:
+            return _append_terminal_recovery_record(
+                current,
+                why=(
+                    "no game-state progress for "
+                    f"{minutes_since_progress:.0f} minutes"
+                ),
+                minutes=round(minutes_since_progress),
+            )
+        if now >= hard_deadline:
+            return _append_terminal_recovery_record(
+                current,
+                why="workflow hard deadline reached",
+                minutes=round(minutes_since_progress),
+            )
+        attempt += 1
         failure_reason = current.reason
         stop_daily_workers()
         recovery = run_world_state_recovery(
@@ -224,6 +320,11 @@ def _retry_daily_after_any_failure(
             else run_daily_task
         )
         retry = runner()
+        fingerprint = _daily_progress_fingerprint(retry)
+        progressed = fingerprint != previous
+        if progressed:
+            last_progress_at = now_fn()
+            previous = fingerprint
         current = _compose_recovery_result(
             current,
             retry=retry,
@@ -235,6 +336,10 @@ def _retry_daily_after_any_failure(
                 "failure_reason": failure_reason,
                 "client_restarted": client_restarted,
                 "retry_status": retry.status,
+                "progressed": progressed,
+                "minutes_since_progress": round(
+                    (now_fn() - last_progress_at) / 60.0
+                ),
             },
         )
     return current
@@ -320,6 +425,8 @@ def _compose_ordered_daily_result(
 
 def _run_boss_then_daily_task(
     client_restart: Callable[[], bool] | None = None,
+    daily_client_restart: Callable[[], bool] | None = None,
+    workflow_started: float | None = None,
 ) -> OkRunResult:
     """Run five confirmed boss absorptions before the pure daily task."""
     target = EXPECTED_REPEAT_FARM_COUNT
@@ -358,7 +465,8 @@ def _run_boss_then_daily_task(
         return _compose_ordered_daily_result(boss, daily)
     daily = _maybe_recover_daily_state(
         run_daily_task(),
-        client_restart=client_restart,
+        client_restart=daily_client_restart,
+        workflow_started=workflow_started,
     )
     return _compose_ordered_daily_result(boss, daily)
 
@@ -368,6 +476,7 @@ def _settle_business_transaction(
     result: OkRunResult,
     *,
     client_restart: Callable[[], bool] | None = None,
+    workflow_started: float | None = None,
 ) -> OkRunResult:
     """Resolve every in-process top-up and recovery before notification."""
     current = result
@@ -379,6 +488,7 @@ def _settle_business_transaction(
             current = _maybe_recover_daily_state(
                 current,
                 client_restart=client_restart,
+                workflow_started=workflow_started,
             )
             return maybe_recover_farm_echo_death(current)
         if task_name == "farm_echo":
@@ -426,6 +536,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
                 log.info("%s workflow: prepare OK-WW cold start", task_name)
                 _prepare_okww_cold_start()
                 log.info("%s workflow: start OK-WW task", task_name)
+                workflow_started_monotonic = time.perf_counter()
                 restart_state: dict[str, bool] = {"done": False}
 
                 def restart_client_once() -> bool:
@@ -442,9 +553,25 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     restart_state["done"] = True
                     return True
 
+                def restart_client_for_daily() -> bool:
+                    # The daily retry ladder may rebuild a clean entry
+                    # boundary as often as its no-progress clock allows;
+                    # the shared once-per-run budget stays with FarmEcho.
+                    log.info(
+                        "%s workflow: close Wuthering Waves so the daily "
+                        "retry ladder can relaunch a clean entry boundary",
+                        task_name,
+                    )
+                    stop_daily_workers()
+                    stop_wuthering_game()
+                    stop_client_launchers()
+                    return True
+
                 if task_runner is _run_boss_then_daily_task:
                     result = _run_boss_then_daily_task(
                         client_restart=restart_client_once,
+                        daily_client_restart=restart_client_for_daily,
+                        workflow_started=workflow_started_monotonic,
                     )
                 else:
                     result = task_runner()
@@ -456,9 +583,12 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     result,
                     client_restart=(
                         restart_client_once
-                        if task_name in {"daily", "farm_echo"}
+                        if task_name == "farm_echo"
+                        else restart_client_for_daily
+                        if task_name == "daily"
                         else None
                     ),
+                    workflow_started=workflow_started_monotonic,
                 )
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"
