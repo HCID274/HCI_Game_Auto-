@@ -4,11 +4,23 @@ from unittest.mock import ANY, patch
 
 from wuwa_auto.okww.recovery import FarmEchoRecoveryResult
 from wuwa_auto.okww.recovery_flow import (
-    MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
     _recover_safely,
     maybe_recover_farm_echo_death,
 )
 from wuwa_auto.okww.runner import OkRunResult
+
+
+class _FakeClock:
+    """Deterministic perf_counter stand-in that advances per call."""
+
+    def __init__(self, *, start: float = 0.0, step: float) -> None:
+        self._now = start
+        self._step = step
+
+    def __call__(self) -> float:
+        value = self._now
+        self._now += self._step
+        return value
 
 DEATH = """
 FarmEchoTask:raise_not_in_combat char dead
@@ -530,9 +542,6 @@ def test_recovery_retry_uses_a_full_no_progress_window(
     with patch(
         "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
     ), patch(
-        "wuwa_auto.okww.recovery_flow.time.monotonic",
-        side_effect=[0.0, 100.0, 200.0],
-    ), patch(
         "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
     ), patch(
         "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
@@ -543,7 +552,11 @@ def test_recovery_retry_uses_a_full_no_progress_window(
     ) as run_retry, patch(
         "wuwa_auto.okww.recovery_flow.stop_daily_workers"
     ):
-        result = maybe_recover_farm_echo_death(initial)
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=_FakeClock(step=100.0),
+            sleep_fn=lambda _seconds: None,
+        )
 
     assert result.status == "success"
     run_retry.assert_called_once_with(
@@ -568,15 +581,15 @@ def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
         {
             "target_count": 1,
             "farm_echo_runtime_limit_seconds": 3600,
-            "farm_echo_runtime_elapsed_seconds": 3600,
         }
     )
 
+    def clock() -> float:
+        values = iter([0.0, 3600.5, 3601.5])
+        return lambda: next(values)
+
     with patch(
         "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
-    ), patch(
-        "wuwa_auto.okww.recovery_flow.time.monotonic",
-        side_effect=[0.0, 3601.0],
     ), patch(
         "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
     ), patch(
@@ -584,7 +597,11 @@ def test_deadline_exhaustion_recovers_but_starts_no_more_battles(
     ) as run_retry, patch(
         "wuwa_auto.okww.recovery_flow.stop_daily_workers"
     ):
-        result = maybe_recover_farm_echo_death(initial)
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=clock(),
+            sleep_fn=lambda _seconds: None,
+        )
 
     assert result.status == "failed"
     assert "no-progress window exhausted" in result.config["farm_echo_recovery"]["retry_error"]
@@ -806,7 +823,11 @@ def test_client_restart_only_once_across_degraded_retries(
     assert recovery["progress_driven_retries"] is True
 
 
-def test_no_progress_budget_stops_after_three_new_workers(tmp_path: Path) -> None:
+def test_zero_progress_workers_continue_while_the_window_stays_open(
+    tmp_path: Path,
+) -> None:
+    """Dual-clock policy: no fixed count may abandon a run with budget left."""
+
     runs = tmp_path / "runs"
     initial = _result(
         runs,
@@ -815,16 +836,19 @@ def test_no_progress_budget_stops_after_three_new_workers(tmp_path: Path) -> Non
         status="failed",
         absorbed=0,
     )
-    retries = [
-        _result(
+    initial.config["farm_echo_no_progress_timeout_seconds"] = 600
+    worker_count = 0
+
+    def more_zero_progress_workers(**_kwargs: object) -> OkRunResult:
+        nonlocal worker_count
+        worker_count += 1
+        return _result(
             runs,
-            f"retry-{index}",
+            f"retry-{worker_count}",
             DEGRADATION + DEATH,
             status="failed",
             absorbed=0,
         )
-        for index in range(1, MAX_CONSECUTIVE_NO_PROGRESS_RETRIES + 1)
-    ]
 
     with patch(
         "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
@@ -836,22 +860,77 @@ def test_no_progress_budget_stops_after_three_new_workers(tmp_path: Path) -> Non
         side_effect=lambda count: nullcontext(),
     ), patch(
         "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
-        side_effect=retries,
+        side_effect=more_zero_progress_workers,
     ) as run_retry, patch(
         "wuwa_auto.okww.recovery_flow.stop_daily_workers"
     ):
         result = maybe_recover_farm_echo_death(
             initial,
             client_restart=lambda: True,
+            now_fn=_FakeClock(step=50.0),
+            sleep_fn=lambda _seconds: None,
         )
 
     recovery = result.config["farm_echo_recovery"]
     assert result.status == "failed"
-    assert recovery["retry_runs"] == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
-    assert "maximum consecutive FarmEcho no-progress" in recovery["retry_error"]
-    assert run_retry.call_count == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
-    # The final confirmed death is still returned to a safe world state.
-    assert recover.call_count == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES + 1
+    # Far beyond the abolished count cap of 3 while the window was open.
+    assert run_retry.call_count > 3
+    assert recover.call_count > 3
+    assert recovery["consecutive_no_progress_retries"] > 3
+    assert recovery["no_progress_window_seconds"] == 600
+    assert "no-progress window exhausted" in recovery["retry_error"]
+
+
+def test_window_open_and_recent_progress_survives_count_beyond_three(
+    tmp_path: Path,
+) -> None:
+    """The 0818 counterexample: 3 no-progress retries must not abandon."""
+
+    runs = tmp_path / "runs"
+    initial = _result(runs, "initial", DEATH, status="failed", absorbed=0)
+    outcomes = [
+        (2, "failed"),
+        (0, "failed"),
+        (0, "failed"),
+        (0, "failed"),
+        (3, "success"),
+    ]
+    retries = [
+        _result(
+            runs,
+            f"retry-{index}",
+            ABSORPTION * absorbed + (DEATH if status == "failed" else ""),
+            status=status,
+            absorbed=absorbed,
+        )
+        for index, (absorbed, status) in enumerate(outcomes, start=1)
+    ]
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=retries,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=_FakeClock(step=100.0),
+            sleep_fn=lambda _seconds: None,
+        )
+
+    recovery = result.config["farm_echo_recovery"]
+    assert result.status == "success"
+    assert run_retry.call_count == 5
+    assert recovery["total_completed"] == 5
+    assert recovery["consecutive_no_progress_retries"] == 0
+    assert recovery["no_progress_window_seconds"] == 3600.0
 
 
 def test_failed_safety_recovery_restarts_once_then_completes_remaining_target(
@@ -912,9 +991,12 @@ def test_failed_safety_recovery_restarts_once_then_completes_remaining_target(
     assert recovery["final_state_safe"] is True
 
 
-def test_failed_safety_recovery_uses_three_attempts_without_unsafe_worker(
+def test_failed_safety_recovery_never_starts_unsafe_worker_until_window_ends(
     tmp_path: Path,
 ) -> None:
+    """Without a restart adapter, failed recoveries retry inside the window
+    but never launch a Worker from an unconfirmed unsafe screen."""
+
     runs = tmp_path / "runs"
     initial = _result(
         runs,
@@ -934,17 +1016,100 @@ def test_failed_safety_recovery_uses_three_attempts_without_unsafe_worker(
     ) as run_retry, patch(
         "wuwa_auto.okww.recovery_flow.stop_daily_workers"
     ):
-        result = maybe_recover_farm_echo_death(initial)
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=_FakeClock(step=100.0),
+            sleep_fn=lambda _seconds: None,
+        )
 
     assert result.status == "failed"
     recoveries = result.config["farm_echo_recovery"]
-    assert recover.call_count == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+    # The abolished cap was 3; the window keeps retrying well past it.
+    assert recover.call_count > 3
     run_retry.assert_not_called()
     assert (
-        recoveries["consecutive_no_progress_retries"]
-        == MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
+        recoveries["consecutive_no_progress_retries"] == recover.call_count
     )
-    assert "during safety recovery" in recoveries["retry_error"]
+    assert "no-progress window exhausted" in recoveries["retry_error"]
+
+
+def test_frozen_recovery_clock_stops_the_ladder(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    initial = _result(runs, "initial", DEATH, status="failed", absorbed=0)
+    first_retry = _result(
+        runs,
+        "retry-1",
+        DEATH,
+        status="failed",
+        absorbed=0,
+    )
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=first_retry,
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=_FakeClock(step=0.0),
+            sleep_fn=lambda _seconds: None,
+        )
+
+    assert result.status == "failed"
+    assert (
+        result.config["farm_echo_recovery"]["retry_error"]
+        == "FarmEcho recovery clock stopped advancing"
+    )
+    assert run_retry.call_count == 1
+
+
+def test_workerless_fast_fail_iterations_are_paced(
+    tmp_path: Path,
+) -> None:
+    """A tight loop of instantly failing recoveries is paced so the window,
+    not the loop rate, bounds it; Worker iterations are never paced."""
+
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        PARTY_MEMBER_UNAVAILABLE,
+        status="failed",
+        absorbed=2,
+    )
+    initial.config["farm_echo_no_progress_timeout_seconds"] = 60
+    sleeps: list[float] = []
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        return_value=_failed_safe_recovery(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry"
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            now_fn=_FakeClock(step=5.0),
+            sleep_fn=sleeps.append,
+        )
+
+    assert result.status == "failed"
+    assert sleeps == [20.0, 20.0, 20.0]
+    assert run_retry.call_count == 0
+    assert "no-progress window exhausted" in (
+        result.config["farm_echo_recovery"]["retry_error"]
+    )
 
 
 def test_progress_allows_more_than_three_worker_retries_until_five(

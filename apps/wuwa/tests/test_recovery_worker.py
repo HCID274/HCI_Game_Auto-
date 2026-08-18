@@ -243,6 +243,77 @@ def test_unavailable_party_member_exits_active_realm_then_heals() -> None:
     assert task.wait_in_team_and_world.call_count == 2
 
 
+class _NotInCombatException(Exception):
+    """Stand-in for src.task.BaseCombatTask.NotInCombatException."""
+
+
+class _CombatGuardedTask:
+    """Replay the upstream BaseCombatTask sleep contract that killed the
+    2026-08-18 party-member recovery: send_key(after_sleep) sleeps through
+    sleep_check, which raises once the Esc menu hides the combat HUD."""
+
+    def __init__(self) -> None:
+        self.skip_combat_check = False
+        self.combat_hud_visible = True
+        self.esc_menu_open = False
+        self.exit_clicked = False
+        self.healed = False
+        self.messages: list[str] = []
+
+    def log_info(self, message: str) -> None:
+        self.messages.append(message)
+
+    def in_combat(self, *_args: object, **_kwargs: object) -> bool:
+        return self.combat_hud_visible
+
+    def wait_ocr(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def wait_feature(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def in_world(self) -> bool:
+        return self.esc_menu_open
+
+    def send_key(self, key: str, *, after_sleep: float = 0) -> None:
+        if key == "esc":
+            self.esc_menu_open = True
+            self.combat_hud_visible = False
+        if after_sleep > 0:
+            self.sleep(after_sleep)
+
+    def sleep(self, _seconds: float) -> None:
+        # BaseCombatTask.sleep_check: the guard fires only while the task
+        # believes it is in combat and the flag is not disabled.
+        if self.skip_combat_check:
+            return
+        if self.combat_hud_visible is False:
+            raise _NotInCombatException("sleep check not in combat")
+
+    def wait_click_feature(self, name: str, **_kwargs: object) -> object:
+        if name == "gray_confirm_exit_button":
+            self.exit_clicked = True
+        return object()
+
+    def wait_in_team_and_world(self, **_kwargs: object) -> bool:
+        return True
+
+    def revive_at_tower_and_heal(self) -> None:
+        self.healed = True
+
+
+def test_party_member_recovery_survives_combat_guarded_esc_sleep() -> None:
+    """Negative replay of the 0818 05:51 traceback (farm-echo-recovery-1.log)."""
+
+    task = _CombatGuardedTask()
+
+    marker = _heal_after_party_member_unavailable(task)
+
+    assert marker == PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER
+    assert task.exit_clicked is True
+    assert task.healed is True
+
+
 def test_unavailable_party_member_extends_upstream_waypoint_loading_wait() -> None:
     task = Mock()
     task.wait_click_feature.return_value = object()
