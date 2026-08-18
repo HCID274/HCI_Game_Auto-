@@ -241,6 +241,16 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
 - 单测 234 passed（新增：无进展 80 分钟才停、进展归零时钟、硬截止立即停、时钟停滞停、冷启动两次、resume 标志跨合成继承）；DeepSeek Worker 两轮只读审查均 pass（第一轮两个发现即上述守卫与继承，已修）。
 - 真机复验：2026-08-15 22:40–22:58 经生产任务 wuwa-daily 全链 exit=0（FarmEcho 5/5 + DailyTask success，`runtime/orchestrator/20260815_224000/`），确认改造未破坏生产路径。
 
+### 8.9 0818 晨 FarmEcho 恢复层双重死因：恢复自毁 + 次数上限早停（2026-08-18 晚修复）
+
+**事实链（0818 晨 05:30–05:56，`runtime/orchestrator/20260818_053002/`，wuwa=1、final=20）**：首 Worker `20260818_053810` 正常耗尽自身战斗预算退出（absorbed=3/5，无死亡标记，`confirmed_retry_worker.py:372` 有界退出路径）；重试 Worker `054912` 在 05:50:44 撞上 `HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED`；party_member 恢复 Worker 仅活 14 秒即死；客户端冷启动后重试 Worker `055104` 团灭（05:54:49 realm defeat）；realm_defeat 恢复 05:56:14 成功治疗；但 3 次无进展已凑满，链路在距 05:30 仅 26 分钟、时间窗还剩约 53 分钟时放弃，DailyTask 被跳过。
+
+**根因一（确定性，B1 修复）**：party_member 恢复的 active_challenge 分支自毁。`recovery_worker.py` 的 `_heal_after_party_member_unavailable` 先用 `in_combat()` 探测（置位战斗态），再 `send_key("esc", after_sleep=1)`——Esc 打开退出菜单后战斗 HUD 消失，`after_sleep` 走 `BaseCombatTask.sleep_check`（上游 `BaseCombatTask.py:782-785`）发现"not in combat"即抛 `NotInCombatException`，恢复 Task 被 OK-WW 执行器内部吞掉，`recovery_completion` 保持 None，`_require_recovery_completion` 报 "recovery task returned without a host completion marker"。完整 traceback 在 `runs/20260818_054912.../farm-echo-recovery-1.log:136-158`；失败截图显示屏幕正是「确认离开」对话框——恢复差一步点击就被战斗守卫杀死。**该分支从未成功过**：0815/0816 两晨（全绿日）同位置同一异常（`runs/20260815_053927.../farm-echo-recovery-1.log:127-147`、`runs/20260816_053832...`），当时被"客户端重启+重试 Worker 有进展"掩盖。修复：在 Esc 前设 `task.skip_combat_check = True`（上游 `BaseChar.py:354` 同款自设模式）——恢复的本意就是离开战斗，不应被战斗守卫终止。负向单测 `_CombatGuardedTask` 桩忠实重放上游 sleep 契约（修复前红、修复后绿）。
+
+**根因二（策略错位，B2 修复）**：FarmEcho 恢复层仍以"连续 3 次无进展"为主停止条件（`recovery_flow.py` 旧 `MAX_CONSECUTIVE_NO_PROGRESS_RETRIES=3`），与用户 0815 裁定的双时钟语义冲突。0818 的 3 次 = 054912 零进展(1) + party_member 恢复失败(2) + 055104 零进展(3)；恢复成功不归零计数（仅吸收进展归零）。对齐后：**无进展时间窗（3600s，有吸收进展即重置）为主停止条件**；次数不再终止（仅结构化记录 `consecutive_no_progress_retries`）；保留 worker 前时间检查与"截止前最后一次恢复留安全态"的既有语义；新增时钟停滞守卫（同 daily 阶梯）与 30s 节奏下限（仅对未启动 Worker 的快速失败迭代生效，防快转死循环）；时钟域从 `time.monotonic` 对齐到 `time.perf_counter`（§8.8 同域规则）；复合结果新增 `no_progress_window_seconds` 字段（旧 `no_progress_retry_limit` 移除，无外部消费者）。
+
+**验收**：单测 238 passed（+4：战斗守卫负向重放、时间窗内零进展远超 3 次仍续、0818 反例（进展后连 3 零进展不死）、时钟停滞停、快转节奏）；compileall OK；validate.ps1 exit 0。真机 2026-08-18 19:41–19:56 farm-echo 生产路径全绿（`runtime/orchestrator/20260818_194149/` wuwa=0、exit=0；复合恢复 run `20260818_194242_..._recovery` status=success：首 Worker 4/5 → 恢复 → 重试 1/5 → 5/5，零客户端重启，`no_progress_window_seconds=3600.0` 新字段生效）。本次真机未触发 party_member 分支（负向路径由 0815/16/18 三晨实况+桩测覆盖）。
+
 ## 9. 验证、发布与排障手册
 
 ### 9.1 常用命令
@@ -298,6 +308,10 @@ uv run --project apps/wuwa wuwa-auto elevate client prepare
 ### P0 更新（2026-08-15）：第四故障与策略转向
 
 8-15 晨死于 `TacetTask.walk_to_treasure` `WaitFailedException`（归因见 §8.5，加载时序竞态而非可枚举缺陷）。策略已从"枚举失败特征再补丁"转向"DailyTask 有界通用恢复"（§8.6），并以 8-15 晚双链真机验收（§8.7）。新观察哨：连续保持 05:30 绿色；若再现红色，先读该 run 的 `daily_state_recoveries` 记录确认恢复动作（世界态校验/冷启动/重跑）是否按预期执行与耗尽，而不是先新增 marker。
+
+### P0 更新（2026-08-18）：第五、六故障——party_member 恢复自毁 + FarmEcho 次数上限早停
+
+8-18 晨鸣潮段红（归因见 §8.9）：party_member 恢复的 active_challenge 分支被上游战斗守卫睡眠确定性杀死（0815 起就存在、被重启+进展掩盖），且恢复层"连续 3 次"上限在时间窗还剩 53 分钟时放弃。双修复（B1 `skip_combat_check` + B2 双时钟对齐）已真机验收（§8.9）。新观察哨：①若 farm_echo 复合结果再现 `recovery task returned without a host completion marker`，读对应 `farm-echo-recovery-*.log` 的内层 traceback——战斗守卫类自毁应已绝迹，出现即新根因；②party_member 恢复实战首秀仍未发生（0818 晚真机未触发该分支），首次实战时确认 `HOST_FARM_ECHO_RECOVERY_STATE ... active_challenge` 后能走到 `HOST_FARM_ECHO_PARTY_MEMBER_HEAL_RECOVERY_COMPLETED`；③双时钟下恢复循环可运行至多 1 小时无进展才停——晨间报告若显示长时间零进展续跑，属预期语义而非卡死。
 
 ### P1：稳定性与可观测性
 
