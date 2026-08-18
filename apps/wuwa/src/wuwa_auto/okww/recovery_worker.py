@@ -344,6 +344,13 @@ def _heal_after_party_member_unavailable(task: object) -> str:
         )
 
     _log_recovery_state(task, phase="worker_start", state="active_challenge")
+    # Opening the Esc menu hides the combat HUD, and BaseCombatTask.sleep_check
+    # then kills this task as NotInCombatException during the post-key sleep
+    # (observed 2026-08-15/16/18: the recovery died one click short of the
+    # exit button).  Upstream sets this same flag around its own combat-exiting
+    # sequences; a recovery whose purpose is to leave combat must not be
+    # terminated by the combat guard.
+    task.skip_combat_check = True  # type: ignore[attr-defined]
     task.send_key("esc", after_sleep=1)  # type: ignore[attr-defined]
     exited = task.wait_click_feature(  # type: ignore[attr-defined]
         "gray_confirm_exit_button",

@@ -40,7 +40,12 @@ from wuwa_auto.settings import RUNS_DIR
 
 log = logging.getLogger(__name__)
 
-MAX_CONSECUTIVE_NO_PROGRESS_RETRIES = 3
+# Dual-clock policy (user ruling 2026-08-15, HANDOFF §8.8): the no-progress
+# time window is the primary stop; no fixed failure count may abandon a run
+# that still has budget left.  The pacing floor below only prevents a tight
+# loop of instantly failing recoveries from spinning faster than the window
+# can measure, mirroring the DailyTask ladder's frozen-clock guard.
+MIN_RECOVERY_LOOP_ITERATION_SECONDS = 30.0
 DEGRADED_RUNS_BEFORE_CLIENT_RESTART = 2
 
 
@@ -121,6 +126,7 @@ def _write_composite(
     client_restart_triggered: bool = False,
     combat_rebind_attempts: int = 0,
     consecutive_no_progress_retries: int = 0,
+    no_progress_window_seconds: float = 0.0,
 ) -> OkRunResult:
     game_recoveries = [
         recovery for recovery in recoveries
@@ -152,7 +158,7 @@ def _write_composite(
         "client_restart_triggered": client_restart_triggered,
         "retry_limit": None,
         "progress_driven_retries": True,
-        "no_progress_retry_limit": MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+        "no_progress_window_seconds": no_progress_window_seconds,
         "consecutive_no_progress_retries": consecutive_no_progress_retries,
         "retry_runs": max(0, len(attempts) - 1),
         "recoveries": [
@@ -253,8 +259,16 @@ def maybe_recover_farm_echo_death(
     result: OkRunResult,
     *,
     client_restart: Callable[[], bool] | None = None,
+    now_fn: Callable[[], float] = time.perf_counter,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> OkRunResult:
-    """Recover until target, bounding consecutive retries that make no progress."""
+    """Recover until target under the dual-clock time budget.
+
+    The no-progress window (reset by any absorption progress) is the primary
+    stop; no fixed consecutive-failure count terminates the ladder while the
+    window is still open.  A pacing floor and a frozen-clock guard keep a
+    fast-failing recovery loop measurable instead of spinning.
+    """
     if result.status == "success":
         return result
     initial_text = _read_log(result)
@@ -300,7 +314,7 @@ def maybe_recover_farm_echo_death(
             or MAX_FARM_ECHO_RUNTIME_SECONDS
         ),
     )
-    retry_deadline = time.monotonic() + no_progress_window
+    retry_deadline = now_fn() + no_progress_window
 
     attempts = [result]
     attempt_counts = [initial_completed]
@@ -311,10 +325,40 @@ def maybe_recover_farm_echo_death(
     combat_rebind_attempts = 0
     consecutive_no_progress_retries = 0
     retry_error = ""
+    last_loop_tick: float | None = None
+    previous_iteration_ran_worker = True
     try:
         current = result
         resume_active_realm = False
         while sum(attempt_counts) < target:
+            now = now_fn()
+            deadline_reached = False
+            if last_loop_tick is not None:
+                if now <= last_loop_tick:
+                    # A frozen clock would defeat every time bound below and
+                    # spin the ladder forever (same guard as the DailyTask
+                    # ladder).
+                    retry_error = "FarmEcho recovery clock stopped advancing"
+                    break
+                deadline_reached = now >= retry_deadline
+                if (
+                    not deadline_reached
+                    and not previous_iteration_ran_worker
+                    and now < last_loop_tick + MIN_RECOVERY_LOOP_ITERATION_SECONDS
+                ):
+                    # Pace instantly failing worker-less iterations (failed
+                    # recoveries) so the no-progress window, not the loop
+                    # rate, bounds them.  Iterations that launched a Worker
+                    # already spent real minutes and are never paced.
+                    sleep_fn(
+                        last_loop_tick
+                        + MIN_RECOVERY_LOOP_ITERATION_SECONDS
+                        - now
+                    )
+                    now = now_fn()
+                    deadline_reached = now >= retry_deadline
+            last_loop_tick = now
+            previous_iteration_ran_worker = False
             current_text = _read_log(current)
             death_failure = is_recoverable_farm_echo_death(current_text)
             realm_defeat = is_recoverable_farm_echo_realm_defeat(current_text)
@@ -364,33 +408,28 @@ def maybe_recover_farm_echo_death(
                     consecutive_no_progress_retries += 1
                     log.warning(
                         "FarmEcho safety recovery made no progress: "
-                        "consecutive=%s/%s reason=%s",
+                        "consecutive=%s; %.0fs left in the no-progress window; "
+                        "reason=%s",
                         consecutive_no_progress_retries,
-                        MAX_CONSECUTIVE_NO_PROGRESS_RETRIES,
+                        max(
+                            0.0,
+                            retry_deadline - now_fn(),
+                        ),
                         recovery.reason,
                     )
-                    if (
-                        consecutive_no_progress_retries
-                        >= MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
-                    ):
-                        retry_error = (
-                            "maximum consecutive FarmEcho no-progress retries "
-                            "exhausted during safety recovery: "
-                            f"{MAX_CONSECUTIVE_NO_PROGRESS_RETRIES}"
-                        )
-                        break
                 elif sum(attempt_counts) >= target:
                     break
                 else:
                     resume_active_realm = recovery.resume_active_realm
 
-            if (
-                consecutive_no_progress_retries
-                >= MAX_CONSECUTIVE_NO_PROGRESS_RETRIES
-            ):
+            if deadline_reached:
+                # Terminate like the historical ladders: the recovery above
+                # (if the state was game-recoverable) has already left the
+                # game in a safe state, and no new worker may start.
                 retry_error = (
-                    "maximum consecutive FarmEcho no-progress retries exhausted: "
-                    f"{MAX_CONSECUTIVE_NO_PROGRESS_RETRIES}"
+                    "FarmEcho no-progress window exhausted after "
+                    f"{consecutive_no_progress_retries} consecutive "
+                    "no-progress retries"
                 )
                 break
 
@@ -459,15 +498,15 @@ def maybe_recover_farm_echo_death(
                 )
                 resume_active_realm = False
 
-            # A failed recovery may be retried up to the shared no-progress
-            # limit.  Never start a business Worker from an unconfirmed unsafe
-            # screen unless a clean OK-owned client restart just established a
-            # fresh-entry boundary.
+            # A failed recovery is retried inside the shared no-progress
+            # window.  Never start a business Worker from an unconfirmed
+            # unsafe screen unless a clean OK-owned client restart just
+            # established a fresh-entry boundary.
             if recovery_failed and not restart_for_failed_recovery:
                 continue
 
             remaining = target - sum(attempt_counts)
-            remaining_runtime = retry_deadline - time.monotonic()
+            remaining_runtime = retry_deadline - now_fn()
             if remaining_runtime <= 0:
                 raise RuntimeError(
                     "FarmEcho no-progress window exhausted during recovery"
@@ -483,6 +522,7 @@ def maybe_recover_farm_echo_death(
                 combat_rebind_attempts += 1
             resume_active_realm = False
             with temporary_farm_echo_repeat_count(attempt_limit):
+                previous_iteration_ran_worker = True
                 current = run_confirmed_farm_echo_retry(
                     **retry_kwargs,
                 )
@@ -498,7 +538,7 @@ def maybe_recover_farm_echo_death(
             if completed_this_run > 0:
                 consecutive_no_progress_retries = 0
                 degraded_runs = 0
-                retry_deadline = time.monotonic() + no_progress_window
+                retry_deadline = now_fn() + no_progress_window
                 log.info(
                     "FarmEcho total progress advanced to %s/%s; Worker recovery "
                     "remains unlimited and the no-progress window was reset",
@@ -526,4 +566,5 @@ def maybe_recover_farm_echo_death(
         client_restart_triggered=client_restart_done,
         combat_rebind_attempts=combat_rebind_attempts,
         consecutive_no_progress_retries=consecutive_no_progress_retries,
+        no_progress_window_seconds=no_progress_window,
     )
