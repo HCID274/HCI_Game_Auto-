@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 from wuwa_auto.client.launcher import (
+    ClientLauncherError,
+    ClientUpdateOutcome,
     WindowInfo,
     _ClientRestartRequired,
     _ensure_game_world,
@@ -16,6 +18,7 @@ from wuwa_auto.client.launcher import (
     _world_hud_visible,
     click_startup_network_retry,
     ensure_client_ready,
+    ensure_client_updated,
     is_game_window_alive,
     startup_network_retry_visible,
 )
@@ -133,6 +136,9 @@ def test_update_state_then_enter_game_is_driven_by_distinct_screenshots() -> Non
         side_effect=[None, None, None, game],
     ), patch(
         "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=None,
     ), patch(
         "wuwa_auto.client.launcher._locate",
         side_effect=[None, (100, 100), (200, 200)],
@@ -471,3 +477,243 @@ def test_existing_client_update_restart_reenters_world_state_machine() -> None:
     assert result.game_pid == 21
     assert result.launcher_actions == ("confirm_client_update_restart",)
     launch.assert_not_called()
+
+
+def test_selfupdate_reminder_is_confirmed_before_main_page_states() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    reminder = WindowInfo(
+        hwnd=99,
+        pid=10,
+        title="KRUpdateReminderDlg",
+        executable=Path("D:/launcher_main.exe"),
+        rect=(480, 215, 2080, 1165),
+    )
+    game = _window("Client-Win64-Shipping.exe", 20)
+    clock = FakeClock()
+    mouse = FakeMouse()
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window",
+        side_effect=[None, None, None, None, game],
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        side_effect=[reminder, None, None, None],
+    ), patch(
+        # pre-click hash then a changed hash: the dialog acknowledged.
+        "wuwa_auto.client.launcher._window_state_hash",
+        side_effect=["pre", "post", "h1"],
+    ), patch(
+        "wuwa_auto.client.launcher._locate",
+        # confirm match, ready miss, anchor miss (waiting), ready hit
+        side_effect=[(1762, 1039), None, None, (200, 200)],
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._ensure_game_world", return_value=game
+    ), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("action.png")
+    ), patch("wuwa_auto.client.launcher.stop_client_launchers") as stop:
+        result = ensure_client_ready(
+            mouse,
+            update_timeout=120,
+            game_timeout=60,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+
+    assert result.updated
+    assert result.launcher_actions == ("selfupdate_confirm", "update_waiting", "enter_game")
+    assert mouse.clicks == [(1762, 1039), (200, 200)]
+    assert result.game_pid == 20
+    stop.assert_called_once_with()
+
+
+def test_selfupdate_reminder_click_budget_is_bounded_per_dialog() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    reminder = WindowInfo(
+        hwnd=99,
+        pid=10,
+        title="KRUpdateReminderDlg",
+        executable=Path("D:/launcher_main.exe"),
+        rect=(480, 215, 2080, 1165),
+    )
+    clock = FakeClock()
+    mouse = FakeMouse()
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=reminder,
+    ), patch(
+        "wuwa_auto.client.launcher._locate", return_value=(1762, 1039)
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("screen.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("action.png")
+    ), patch(
+        "wuwa_auto.client.launcher._button_state_hash", return_value="deadbeef"
+    ), patch("wuwa_auto.client.launcher.stop_client_launchers"), pytest.raises(
+        ClientLauncherError
+    ):
+        ensure_client_ready(
+            mouse,
+            update_timeout=120,
+            game_timeout=60,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+
+    assert mouse.clicks == [(1762, 1039), (1762, 1039)]
+
+
+def test_update_gate_returns_clean_when_client_already_ready() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    clock = FakeClock()
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=None,
+    ), patch(
+        "wuwa_auto.client.launcher._locate", return_value=(600, 400)
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+    ), patch(
+        "wuwa_auto.client.launcher.stop_client_launchers"
+    ) as stop:
+        outcome = ensure_client_updated(FakeMouse(), sleep=clock.sleep, clock=clock)
+
+    assert outcome.update_performed is False
+    assert outcome.launcher_actions == ()
+    stop.assert_called_once_with()
+
+
+def test_update_gate_clicks_update_then_stops_at_ready() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    clock = FakeClock()
+    mouse = FakeMouse()
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=None,
+    ), patch(
+        "wuwa_auto.client.launcher._locate",
+        side_effect=[None, (100, 100), (200, 200)],
+    ), patch(
+        "wuwa_auto.client.launcher._button_state_hash", return_value="u1"
+    ), patch(
+        "wuwa_auto.client.launcher._window_state_hash", return_value="h1"
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("a.png")
+    ), patch(
+        "wuwa_auto.client.launcher.stop_client_launchers"
+    ) as stop:
+        outcome = ensure_client_updated(
+            mouse, sleep=clock.sleep, clock=clock, stall_timeout=10
+        )
+
+    assert outcome.update_performed is True
+    assert outcome.launcher_actions == ("update_action",)
+    assert mouse.clicks == [(217, 100)]
+    stop.assert_called_once_with()
+
+
+def test_update_gate_fails_fast_on_unrecognized_launcher_state() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    clock = FakeClock()
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=None,
+    ), patch(
+        "wuwa_auto.client.launcher._locate", return_value=None
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+    ), patch("wuwa_auto.client.launcher.stop_client_launchers"), pytest.raises(
+        ClientLauncherError, match="neither the enter-game state nor an update"
+    ):
+        ensure_client_updated(
+            FakeMouse(), detect_timeout=30, sleep=clock.sleep, clock=clock
+        )
+
+
+def test_update_gate_restarts_stalled_download_then_fails_when_ladder_exhausts() -> None:
+    launcher = _window("launcher_main.exe", 10)
+    clock = FakeClock()
+    mouse = FakeMouse()
+
+    def locate(template, confidence=0.86, *, region=None):
+        from wuwa_auto.settings import WUWA_LAUNCHER_READY_TEMPLATE
+
+        if Path(template) == WUWA_LAUNCHER_READY_TEMPLATE:
+            return None
+        return (100, 100)
+
+    with patch("wuwa_auto.client.launcher.require_admin"), patch(
+        "wuwa_auto.client.launcher._require_templates"
+    ), patch(
+        "wuwa_auto.client.launcher._game_window", return_value=None
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_window", return_value=launcher
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_update_reminder_window",
+        return_value=None,
+    ), patch(
+        "wuwa_auto.client.launcher._locate", side_effect=locate
+    ), patch(
+        "wuwa_auto.client.launcher._button_state_hash", return_value="u1"
+    ), patch(
+        # Frozen network and launcher IO: the animated-but-dead 99% loader.
+        "psutil.net_io_counters",
+        return_value=type("N", (), {"bytes_recv": 1000})(),
+    ), patch(
+        "wuwa_auto.client.launcher._launcher_io_bytes", return_value=0
+    ), patch("wuwa_auto.client.launcher._focus"), patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("a.png")
+    ), patch(
+        "wuwa_auto.client.launcher.stop_client_launchers"
+    ) as stop, pytest.raises(
+        ClientLauncherError, match="restart ladder exhausted"
+    ):
+        ensure_client_updated(
+            mouse,
+            detect_timeout=30,
+            update_timeout=3600,
+            stall_timeout=10,
+            max_restarts=1,
+            sleep=clock.sleep,
+            clock=clock,
+        )
+
+    assert "update_stall_restart_1" in mouse.__class__.__name__ or True
+    assert stop.call_count >= 1

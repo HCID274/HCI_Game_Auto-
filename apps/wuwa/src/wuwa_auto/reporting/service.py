@@ -10,6 +10,7 @@ from typing import Any
 
 from game_automation_core.reporting.agent import diagnostic_lines, redact_sensitive_data
 from game_automation_core.reporting.archive import write_json_archive
+from game_automation_core.reporting.feishu import build_sectioned_card
 
 from wuwa_auto.integrations.feishu import build_report_card, send_report_card
 from wuwa_auto.reporting.day_rollup import build_daily_rollup
@@ -60,6 +61,49 @@ def _archive_stem(result: Any, facts: RunFacts) -> str:
     if len([source for source in sources if source.strip()]) > 1:
         return f"{result.run_id}_daily_rollup"
     return str(result.run_id)
+
+
+def report_version_day_deferred(
+    outcome: Any,
+    rerun_at: datetime,
+    *,
+    allow_send: bool = True,
+) -> Path:
+    """Yellow card: version-day client updated, dailies deferred to evening."""
+    timestamp = datetime.now().strftime("%m-%d %H:%M")
+    card = build_sectioned_card(
+        title=f"🕒 鸣潮版本日已更新,日常改约 {rerun_at:%H:%M} {timestamp}",
+        template="orange",
+        lead="版本日客户端更新完成,未进入游戏;当日日常改约当晚自动重跑。",
+        sections=[
+            ("更新动作", list(outcome.launcher_actions) or ["无需更新"]),
+            (
+                "当晚重跑",
+                [f"{rerun_at:%Y-%m-%d %H:%M} wuwa-daily(一次性任务,触发后自删除)"],
+            ),
+        ],
+    )
+    sent = send_report_card(card) if allow_send else False
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = ".json" if allow_send else ".preview.json"
+    path = (
+        REPORTS_DIR
+        / f"version_day_deferred_{datetime.now():%Y%m%d_%H%M%S}{suffix}"
+    )
+    write_json_archive(
+        path,
+        {
+            "kind": "version_day_deferred",
+            "sent": sent,
+            "preview": not allow_send,
+            "rerun_at": rerun_at.isoformat(),
+            "launcher_actions": list(outcome.launcher_actions),
+            "evidence": list(outcome.evidence_paths),
+            "feishu_card": card,
+        },
+    )
+    log.info("Wuwa version-day deferral report archived: %s", path)
+    return path
 
 
 def report_run(

@@ -1,10 +1,12 @@
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from wuwa_auto.cleanup import CleanupResult
+from wuwa_auto.client.launcher import ClientUpdateOutcome
 from wuwa_auto.daily import (
     _maybe_recover_daily_state,
     _prepare_okww_cold_start,
@@ -125,6 +127,9 @@ def test_multiple_recovery_attempts_produce_one_final_report(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.cleanup_after_run",
         return_value=cleanup,
     ), patch(
@@ -180,6 +185,9 @@ def test_terminal_partial_result_produces_one_final_report(tmp_path: Path) -> No
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         return_value=terminal,
     ) as recover, patch(
@@ -213,6 +221,9 @@ def test_settlement_exception_cannot_report_a_stale_success(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=RuntimeError("recovery crashed"),
     ), patch(
@@ -267,6 +278,9 @@ def test_daily_and_weekly_are_independent_report_transactions(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.maybe_recover_farm_echo_death",
         side_effect=lambda result: result,
     ), patch(
@@ -316,6 +330,9 @@ def test_restored_tacet_challenge_is_exited_and_daily_retried_once(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.stop_daily_workers"
     ) as stop_worker, patch(
         "wuwa_auto.daily.run_world_state_recovery",
@@ -381,6 +398,9 @@ def test_tacet_death_waits_for_world_and_retries_daily_once(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.stop_daily_workers"
     ), patch(
         "wuwa_auto.daily.run_world_state_recovery",
@@ -512,6 +532,9 @@ def test_daily_workflow_runs_boss_before_daily_and_reports_once(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.temporary_farm_echo_repeat_count",
         side_effect=lambda count: nullcontext(),
     ), patch(
@@ -590,6 +613,9 @@ def test_daily_waits_for_five_absorptions_and_reports_skip_once(
         "wuwa_auto.daily.managed_virtual_mouse",
         return_value=nullcontext(),
     ), patch("wuwa_auto.daily.ensure_connected"), patch(
+        "wuwa_auto.daily.ensure_client_updated",
+        return_value=ClientUpdateOutcome(False, (), ()),
+    ), patch(
         "wuwa_auto.daily.temporary_farm_echo_repeat_count",
         side_effect=lambda count: nullcontext(),
     ), patch(
@@ -1132,3 +1158,42 @@ def test_generic_retry_preserves_daily_resume_semantics(
     record = result.config["daily_state_recoveries"][-1]
     assert record["kind"] == "generic-bounded-retry"
     assert record["retry_run_id"] == "resume-retry"
+
+
+def test_version_day_update_on_weekday_morning_defers_to_evening() -> None:
+    outcome = ClientUpdateOutcome(
+        True, ("selfupdate_confirm", "update_action"), ("e1.png",)
+    )
+
+    with patch("wuwa_auto.daily.require_admin"), patch(
+        "wuwa_auto.daily.managed_virtual_mouse", return_value=nullcontext()
+    ), patch(
+        "wuwa_auto.daily.ensure_client_updated", return_value=outcome
+    ) as gate, patch(
+        "wuwa_auto.daily.should_defer_daily_to_evening", return_value=True
+    ), patch(
+        "wuwa_auto.daily.register_evening_rerun",
+        return_value=datetime(2026, 8, 20, 20, 0),
+    ) as register, patch(
+        "wuwa_auto.daily.report_version_day_deferred"
+    ) as report_deferred, patch(
+        "wuwa_auto.daily.ensure_connected"
+    ) as uu, patch(
+        "wuwa_auto.daily.cleanup_after_run",
+        return_value=_cleanup(),
+    ):
+        exit_code = _run_workflow("daily", lambda: (_pytest_fail()))
+
+    assert exit_code == 0
+    gate.assert_called_once()
+    # The production call must pass the workflow's virtual mouse; a bare
+    # mock once hid this signature mismatch until a real run failed.
+    assert len(gate.call_args.args) == 1
+    register.assert_called_once()
+    report_deferred.assert_called_once()
+    # UU connects before the gate so a version-day download rides acceleration.
+    uu.assert_called_once()
+
+
+def _pytest_fail():
+    raise AssertionError("daily task must not run after a version-day deferral")

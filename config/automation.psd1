@@ -32,7 +32,9 @@
         Daily = @{
             Name = 'Game_Daily_0530'
             At = '05:30'
-            ExecutionLimitHours = 3
+            # 2026-08-20: a version-day Wuwa download may legally run for
+            # hours inside the chain; normal days still finish in ~2h.
+            ExecutionLimitHours = 6
             Description = '05:30 Star Rail -> safe cleanup -> Wuthering Waves daily chain'
         }
         WeeklyGarden = @{

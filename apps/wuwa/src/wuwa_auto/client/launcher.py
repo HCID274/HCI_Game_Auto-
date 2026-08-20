@@ -40,6 +40,7 @@ from wuwa_auto.settings import (
     WUWA_LAUNCHER_EXE,
     WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE,
     WUWA_LAUNCHER_READY_TEMPLATE,
+    WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE,
 )
 from wuwa_auto.uu.desktop import require_admin
 
@@ -47,13 +48,41 @@ log = logging.getLogger(__name__)
 
 LAUNCHER_WINDOW_TIMEOUT_SECONDS = 90.0
 GAME_WINDOW_TIMEOUT_SECONDS = 300.0
-CLIENT_UPDATE_TIMEOUT_SECONDS = 9000.0
+# 4h launcher-side budget agreed on 2026-08-20: a version-day download must
+# survive slow networks instead of failing at the previous 2.5h cap.
+CLIENT_UPDATE_TIMEOUT_SECONDS = 14400.0
 POLL_INTERVAL_SECONDS = 5.0
 READY_RETRY_SECONDS = 60.0
 CLIENT_RESTART_TIMEOUT_SECONDS = 180.0
 WORLD_STABLE_POLLS = 2
 MAX_CLICKS_PER_STATE = 2
 PRIMARY_ANCHOR_TO_BUTTON_CENTER = (117, 0)
+# Version-day gate budgets agreed on 2026-08-20: a normal night must reach a
+# recognizable launcher state quickly, while a version day may spend hours
+# downloading.  User rule (2026-08-21): a click that shows no visible
+# acknowledgment within 15s is a failed click and must be retried at once;
+# a frozen update UI is restarted (resume) after 120s instead of silently
+# waiting out the old 15-minute window.  Restarts are cheap and the CDN
+# stalls often, so the ladder is deep before giving up.
+VERSION_UPDATE_DETECT_TIMEOUT_SECONDS = 300.0
+SELFUPDATE_ACK_TIMEOUT_SECONDS = 15.0
+# A frozen UI is restarted after 5 minutes; 0820 live data showed legitimate
+# tails crawl at ~0.05%/min where sub-percent bar movement is invisible to a
+# coarse hash, so the window must stay generous and the hash fine-grained.
+VERSION_UPDATE_STALL_SECONDS = 300.0
+VERSION_UPDATE_MAX_RESTARTS = 6
+SELFUPDATE_MAX_CLICK_ATTEMPTS = 4
+# The launcher self-update reminder is a modal 1600x950 dialog (true pixels
+# on a 2560x1440 desktop at 125% scaling, top-left (480,215)).  Its big black
+# "更新" button sits at the dialog's bottom-RIGHT (center ≈ (1282,824)
+# dialog-relative); the left column carries an auto-downloading progress
+# strip and the 退出 link.  The template is a 170x110 crop centered on the
+# button, so the click point is the match center with no offset.  Calibrated
+# 2026-08-20 by pristine-state vision + on-screen template back-match after
+# the first template (built from a wrongly-scaled crop) clicked blank space
+# 1038px off all night.
+LAUNCHER_SELFUPDATE_REMINDER_TITLE = "KRUpdateReminderDlg"
+SELFUPDATE_CONFIRM_CLICK_OFFSET = (0, 0)
 
 SW_RESTORE = 9
 SW_MINIMIZE = 6
@@ -74,6 +103,15 @@ class ClientPreparationResult:
     launcher_actions: tuple[str, ...]
     evidence_paths: tuple[str, ...]
     game_pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClientUpdateOutcome:
+    """Launcher-side update result; the game itself is never launched."""
+
+    update_performed: bool
+    launcher_actions: tuple[str, ...]
+    evidence_paths: tuple[str, ...]
 
 
 class ClientLauncherError(RuntimeError):
@@ -174,6 +212,27 @@ def _launcher_window() -> WindowInfo | None:
         ),
         default=None,
     )
+
+
+def _launcher_update_reminder_window() -> WindowInfo | None:
+    """Find the modal launcher self-update reminder owned by the official launcher.
+
+    On version days (first seen 2026-08-20) the launcher opens with a modal
+    KRUpdateReminderDlg that blocks the main page.  The primary-anchor click
+    lands on the main page BEHIND the modal, so this dialog must be handled
+    before any main-page state.
+    """
+    for window in _top_level_windows():
+        if window.title != LAUNCHER_SELFUPDATE_REMINDER_TITLE:
+            continue
+        if window.executable.name.casefold() != "launcher_main.exe":
+            continue
+        if not _is_under(window.executable, WUWA_INSTALL_DIR):
+            continue
+        if not ctypes.windll.user32.IsWindowVisible(window.hwnd):
+            continue
+        return window
+    return None
 
 
 def _game_window() -> WindowInfo | None:
@@ -283,6 +342,7 @@ def _require_templates() -> None:
         for path in (
             WUWA_LAUNCHER_READY_TEMPLATE,
             WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE,
+            WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE,
             WUWA_CLIENT_LOGIN_TEMPLATE,
             WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
             WUWA_CLIENT_NETWORK_RETRY_TEMPLATE,
@@ -923,6 +983,55 @@ def _ensure_client_ready(
             continue
         launcher = current
 
+        # Version-day ordering: a modal self-update reminder shadows the main
+        # page, so it must be dismissed before any main-page template can be
+        # trusted (the anchor offset would click behind the modal otherwise).
+        reminder = _launcher_update_reminder_window()
+        if reminder is not None:
+            state_hash = f"selfupdate_reminder_{reminder.hwnd}"
+            count = clicks_for_hash.get(state_hash, 0)
+            if count >= MAX_CLICKS_PER_STATE:
+                if not waiting_captured:
+                    evidence.append(
+                        str(
+                            _save_screenshot(
+                                "wuwa_launcher_selfupdate_reminder_stuck"
+                            )
+                        )
+                    )
+                    actions.append("selfupdate_reminder_stuck")
+                    waiting_captured = True
+                sleep(POLL_INTERVAL_SECONDS)
+                continue
+            confirm = _locate(
+                WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE,
+                confidence=0.86,
+                region=_search_region(reminder),
+            )
+            if confirm is None:
+                if not waiting_captured:
+                    evidence.append(
+                        str(_save_screenshot("wuwa_launcher_selfupdate_waiting"))
+                    )
+                    actions.append("selfupdate_waiting")
+                    waiting_captured = True
+                sleep(POLL_INTERVAL_SECONDS)
+                continue
+            if count == 0 or clock() - last_click_at >= READY_RETRY_SECONDS:
+                _focus(reminder)
+                point = (
+                    confirm[0] + SELFUPDATE_CONFIRM_CLICK_OFFSET[0],
+                    confirm[1] + SELFUPDATE_CONFIRM_CLICK_OFFSET[1],
+                )
+                _click_state(mouse, reminder, point, "selfupdate_confirm", evidence)
+                actions.append("selfupdate_confirm")
+                updated = True
+                clicks_for_hash[state_hash] = count + 1
+                last_click_at = clock()
+                waiting_captured = False
+            sleep(POLL_INTERVAL_SECONDS)
+            continue
+
         ready = _locate(WUWA_LAUNCHER_READY_TEMPLATE, confidence=0.88)
         if ready is not None and _point_in_window(ready, launcher):
             if game_deadline is None:
@@ -983,6 +1092,274 @@ def _ensure_client_ready(
     )
 
 
+def _window_state_hash(window: WindowInfo) -> str:
+    """Hash the whole window at fine resolution to track download progress."""
+    left, top, width, height = _search_region(window)
+    screenshot = pyautogui.screenshot(region=(left, top, width, height))
+    crop = screenshot.convert("L").resize((96, 48))
+    return hashlib.sha256(crop.tobytes()).hexdigest()
+
+
+def _click_acknowledged(
+    window: WindowInfo,
+    pre_click_hash: str,
+    *,
+    timeout: float,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Return True when the window visibly reacts to a click within timeout.
+
+    User rule (2026-08-21): a click with no visible acknowledgment inside
+    15 seconds is a miss and must be retried immediately instead of burning
+    the retry interval.
+    """
+    deadline = clock() + timeout
+    while True:
+        if _window_state_hash(window) != pre_click_hash:
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(POLL_INTERVAL_SECONDS)
+
+
+def _launcher_io_bytes() -> int:
+    """Total disk IO of official launcher processes; real downloads move it."""
+    total = 0
+    for process in psutil.process_iter(["name"]):
+        try:
+            if (process.info["name"] or "").casefold() not in {
+                "launcher_main.exe",
+                "launcher_updater.exe",
+            }:
+                continue
+            counters = process.io_counters()
+            total += counters.read_bytes + counters.write_bytes
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return total
+
+
+def ensure_client_updated(
+    mouse: VirtualHidMouse,
+    *,
+    detect_timeout: float = VERSION_UPDATE_DETECT_TIMEOUT_SECONDS,
+    update_timeout: float = CLIENT_UPDATE_TIMEOUT_SECONDS,
+    stall_timeout: float = VERSION_UPDATE_STALL_SECONDS,
+    max_restarts: int = VERSION_UPDATE_MAX_RESTARTS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> ClientUpdateOutcome:
+    """Drive launcher-side updates without ever entering the game.
+
+    Version-day contract (agreed 2026-08-20): the nightly chain must be able
+    to download a new game version while login servers are still closed, so
+    this gate stops at the launcher's enter-game state and closes the
+    launcher.  The game launch itself always belongs to OK-WW afterwards.
+    A frozen update UI is recovered by relaunching the launcher (the CDN
+    download resumes) at most ``max_restarts`` times before failing.
+    """
+    require_admin()
+    _require_templates()
+    evidence: list[str] = []
+    actions: list[str] = []
+    update_performed = False
+    restarts = 0
+    update_budget_end: float | None = None
+
+    if _game_window() is not None:
+        # A live client cannot be outdated; the nightly cold start rebuilds
+        # the entry boundary anyway.
+        log.info("client window already present; launcher update gate skipped")
+        return ClientUpdateOutcome(False, (), ())
+
+    while True:
+        launcher = _launcher_window()
+        if launcher is None:
+            _launch_launcher()
+            launcher = _wait_for_window(
+                _launcher_window,
+                LAUNCHER_WINDOW_TIMEOUT_SECONDS,
+                sleep=sleep,
+                clock=clock,
+            )
+        if launcher is None:
+            evidence.append(str(_save_screenshot("wuwa_launcher_not_found")))
+            raise ClientLauncherError(
+                f"official launcher window did not appear; evidence={evidence[-1]}"
+            )
+
+        _focus(launcher)
+        evidence.append(str(_save_screenshot("wuwa_launcher_open")))
+        phase_deadline = clock() + detect_timeout
+        clicks_for_hash: dict[str, int] = {}
+        last_click_at = 0.0
+        last_state_hash = ""
+        stall_io_last = -1
+        stall_since = clock()
+        waiting_captured = False
+        click_not_acked = False
+
+        while True:
+            if _game_window() is not None:
+                stop_client_launchers()
+                return ClientUpdateOutcome(
+                    update_performed, tuple(actions), tuple(evidence)
+                )
+            current = _launcher_window()
+            if current is None:
+                if update_budget_end is not None and clock() >= update_budget_end:
+                    evidence.append(
+                        str(_save_screenshot("wuwa_launcher_update_timeout"))
+                    )
+                    raise ClientLauncherError(
+                        "launcher update did not finish within "
+                        f"{update_timeout:.0f}s; actions={actions}; "
+                        f"evidence={evidence[-1]}"
+                    )
+                sleep(POLL_INTERVAL_SECONDS)
+                continue
+            launcher = current
+
+            if update_budget_end is None and clock() >= phase_deadline:
+                evidence.append(str(_save_screenshot("wuwa_launcher_state_unknown")))
+                raise ClientLauncherError(
+                    "launcher showed neither the enter-game state nor an update "
+                    f"action within {detect_timeout:.0f}s; evidence={evidence[-1]}"
+                )
+            if update_budget_end is not None and clock() >= update_budget_end:
+                evidence.append(str(_save_screenshot("wuwa_launcher_update_timeout")))
+                raise ClientLauncherError(
+                    "launcher update did not finish within "
+                    f"{update_timeout:.0f}s; actions={actions}; "
+                    f"evidence={evidence[-1]}"
+                )
+
+            ready = _locate(WUWA_LAUNCHER_READY_TEMPLATE, confidence=0.88)
+            if ready is not None and _point_in_window(ready, launcher):
+                stop_client_launchers()
+                return ClientUpdateOutcome(
+                    update_performed, tuple(actions), tuple(evidence)
+                )
+
+            reminder = _launcher_update_reminder_window()
+            if reminder is not None:
+                update_performed = True
+                if update_budget_end is None:
+                    update_budget_end = clock() + update_timeout
+                state_hash = f"selfupdate_reminder_{reminder.hwnd}"
+                count = clicks_for_hash.get(state_hash, 0)
+                confirm = _locate(
+                    WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE,
+                    confidence=0.86,
+                    region=_search_region(reminder),
+                )
+                if (
+                    confirm is not None
+                    and count < SELFUPDATE_MAX_CLICK_ATTEMPTS
+                    and (
+                        count == 0
+                        or clock() - last_click_at >= READY_RETRY_SECONDS
+                        or click_not_acked
+                    )
+                ):
+                    _focus(reminder)
+                    point = (
+                        confirm[0] + SELFUPDATE_CONFIRM_CLICK_OFFSET[0],
+                        confirm[1] + SELFUPDATE_CONFIRM_CLICK_OFFSET[1],
+                    )
+                    pre_click_hash = _window_state_hash(reminder)
+                    _click_state(mouse, reminder, point, "selfupdate_confirm", evidence)
+                    actions.append("selfupdate_confirm")
+                    click_not_acked = not _click_acknowledged(
+                        reminder,
+                        pre_click_hash,
+                        timeout=SELFUPDATE_ACK_TIMEOUT_SECONDS,
+                        sleep=sleep,
+                        clock=clock,
+                    )
+                    if click_not_acked:
+                        log.warning(
+                            "selfupdate confirm click at %s showed no visible "
+                            "acknowledgment within %.0fs; retrying at once",
+                            point,
+                            SELFUPDATE_ACK_TIMEOUT_SECONDS,
+                        )
+                    else:
+                        clicks_for_hash[state_hash] = count + 1
+                        last_click_at = clock()
+                    waiting_captured = False
+                    stall_since = clock()
+            else:
+                anchor = _locate(
+                    WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE,
+                    confidence=0.84,
+                )
+                if anchor is not None and _point_in_window(anchor, launcher):
+                    update_performed = True
+                    if update_budget_end is None:
+                        update_budget_end = clock() + update_timeout
+                    state_hash = _button_state_hash(launcher)
+                    count = clicks_for_hash.get(state_hash, 0)
+                    changed = state_hash != last_state_hash
+                    if count < MAX_CLICKS_PER_STATE and (
+                        changed
+                        or count == 0
+                        or clock() - last_click_at >= READY_RETRY_SECONDS
+                    ):
+                        _focus(launcher)
+                        target = _primary_button_center(anchor)
+                        _click_state(mouse, launcher, target, "update_action", evidence)
+                        actions.append("update_action")
+                        clicks_for_hash[state_hash] = count + 1
+                        last_state_hash = state_hash
+                        last_click_at = clock()
+                        waiting_captured = False
+                        stall_since = clock()
+                else:
+                    if not waiting_captured:
+                        evidence.append(
+                            str(_save_screenshot("wuwa_launcher_update_waiting"))
+                        )
+                        actions.append("update_waiting")
+                        waiting_captured = True
+
+            if update_budget_end is not None:
+                # 0821 live data: a silently-dead download keeps an animated
+                # loader rendering while the launcher's own disk IO is frozen
+                # at 99%.  Watch ONLY the launcher processes' IO, quantized
+                # to 1MB buckets: system-wide network counters are moved by
+                # unrelated background traffic every second and would reset
+                # the stall clock forever.
+                io_bucket = _launcher_io_bytes() // (1024 * 1024)
+                if io_bucket != stall_io_last:
+                    stall_io_last = io_bucket
+                    stall_since = clock()
+                elif clock() - stall_since >= stall_timeout:
+                    evidence.append(
+                        str(_save_screenshot("wuwa_launcher_update_stalled"))
+                    )
+                    if restarts >= max_restarts:
+                        raise ClientLauncherError(
+                            "launcher update stalled for "
+                            f"{stall_timeout:.0f}s with frozen network and "
+                            f"launcher IO; restart ladder exhausted "
+                            f"({restarts}/{max_restarts}); "
+                            f"actions={actions}; evidence={evidence[-1]}"
+                        )
+                    restarts += 1
+                    actions.append(f"update_stall_restart_{restarts}")
+                    log.warning(
+                        "launcher update stalled; restart %d/%d to resume",
+                        restarts,
+                        max_restarts,
+                    )
+                    stop_client_launchers()
+                    break
+
+            sleep(POLL_INTERVAL_SECONDS)
+
+
 def ensure_client_ready(
     mouse: VirtualHidMouse,
     *,
@@ -1017,8 +1394,10 @@ def ensure_client_ready(
 __all__ = [
     "ClientLauncherError",
     "ClientPreparationResult",
+    "ClientUpdateOutcome",
     "WindowInfo",
     "ensure_client_ready",
+    "ensure_client_updated",
     "is_client_launcher_running",
     "stop_client_launchers",
 ]

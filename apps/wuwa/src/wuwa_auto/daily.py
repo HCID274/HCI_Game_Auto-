@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
-from wuwa_auto.client.launcher import stop_client_launchers
+from wuwa_auto.client.launcher import ensure_client_updated, stop_client_launchers
 from wuwa_auto.input.viiper import managed_virtual_mouse
 from wuwa_auto.okww.compatibility import validate_okww_compatibility
 from wuwa_auto.okww.config import (
@@ -33,10 +33,11 @@ from wuwa_auto.okww.runner import (
     write_result,
     write_workflow_failure,
 )
-from wuwa_auto.reporting.service import report_run
+from wuwa_auto.reporting.service import report_run, report_version_day_deferred
 from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
 from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
 from wuwa_auto.uu.service import ensure_connected
+from wuwa_auto.version_day import register_evening_rerun, should_defer_daily_to_evening
 
 log = logging.getLogger(__name__)
 
@@ -527,12 +528,33 @@ def _run_workflow(task_name: str, task_runner) -> int:
     try:
         validate_okww_compatibility()
         # Keep a real PnP HID mouse present for game UI input and UU cleanup.
-        with managed_virtual_mouse():
+        with managed_virtual_mouse() as workflow_mouse:
             try:
                 log.info("%s workflow: local virtual HID mouse is ready", task_name)
                 log.info("%s workflow: ensure Wuthering Waves acceleration", task_name)
+                # UU comes first so a version-day launcher download also rides
+                # the accelerated route instead of a stalling bare CDN link.
                 ensure_connected()
                 acceleration_connected = True
+                # Version-day gate (2026-08-20): make the client current via
+                # the official launcher before handing the cold start to
+                # OK-WW.  On a weekday morning a real update defers the daily
+                # rerun to the same evening; weekends and evenings continue
+                # directly.
+                update_outcome = ensure_client_updated(workflow_mouse)
+                if update_outcome.update_performed:
+                    log.info(
+                        "%s workflow: launcher update performed: %s",
+                        task_name,
+                        update_outcome.launcher_actions,
+                    )
+                    if should_defer_daily_to_evening(datetime.now()):
+                        rerun_at = register_evening_rerun(datetime.now())
+                        try:
+                            report_version_day_deferred(update_outcome, rerun_at)
+                        except Exception:
+                            log.exception("version-day deferral report failed")
+                        return 0
                 log.info("%s workflow: prepare OK-WW cold start", task_name)
                 _prepare_okww_cold_start()
                 log.info("%s workflow: start OK-WW task", task_name)

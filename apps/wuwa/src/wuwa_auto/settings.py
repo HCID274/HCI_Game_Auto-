@@ -37,6 +37,9 @@ WUWA_LAUNCHER_READY_TEMPLATE = TEMPLATES_DIR / "client_launcher_ready.png"
 WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE = (
     TEMPLATES_DIR / "client_launcher_primary_anchor.png"
 )
+WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_selfupdate_confirm.png"
+)
 WUWA_CLIENT_LOGIN_TEMPLATE = TEMPLATES_DIR / "client_login_connect.png"
 WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE = TEMPLATES_DIR / "client_monthly_reward.png"
 WUWA_CLIENT_REWARD_RESULT_TEMPLATE = TEMPLATES_DIR / "client_reward_result_close.png"
