@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from starrail_auto.settings import EVIDENCE_DIR
+from starrail_auto.settings import EVIDENCE_DIR, RUNTIME_DIR
 
 M7A_LAUNCHER = Path(
     r"D:\2_Software\4_Games\StarRail\Auto\March7thAssistant_full\March7th Launcher.exe"
@@ -12,6 +12,8 @@ M7A_LOG_DIR = Path(
     r"D:\2_Software\4_Games\StarRail\Auto\March7thAssistant_full\logs"
 )
 M7A_CONFIG_PATH = M7A_LAUNCHER.parent / "config.yaml"
+M7A_EXAMPLE_CONFIG_PATH = M7A_LAUNCHER.parent / "assets" / "config" / "config.example.yaml"
+M7A_CONFIG_BACKUP_DIR = RUNTIME_DIR / "m7a-config"
 DEBUG_DIR = EVIDENCE_DIR
 
 GRACE_PERIOD = 60
@@ -30,6 +32,11 @@ DEFAULT_TIMEOUTS = {"universe": 7200, "main": 1800}
 GAME_PROCESS_NAMES = {"starrail.exe"}
 GAME_WINDOW_KEYWORDS = ("崩坏：星穹铁道",)
 M7A_ASSISTANT_PROCESS_NAME = "march7th assistant.exe"
+M7A_LAUNCHER_PROCESS_NAME = "march7th launcher.exe"
+M7A_DISCLAIMER_TITLE_KEYWORD = "march7th assistant"
+M7A_DISCLAIMER_MIN_CONFIRM_SECONDS = 10.0
+M7A_DISCLAIMER_VERIFY_TIMEOUT = 8.0
+M7A_DISCLAIMER_DETECTION_TIMEOUT = 30.0
 M7A_RUNTIME_DISCOVERY_TIMEOUT = 15
 M7A_RUNTIME_DISCOVERY_INTERVAL = 0.5
 M7A_DAILY_COMPLETION_MARKER = "每日实训已完成"
@@ -56,6 +63,7 @@ EXIT_GAME_READY_TIMEOUT = 21
 EXIT_M7A_EXIT_NONZERO = 22
 EXIT_DAILY_VALIDATION_FAILED = 23
 EXIT_GAME_NETWORK_FAILED = 24
+EXIT_M7A_CONFIG_FAILED = 25
 EXIT_WATCHDOG_HARD_TIMEOUT = 30
 EXIT_WATCHDOG_CPU_IDLE = 31
 EXIT_WATCHDOG_LOG_STALLED = 32

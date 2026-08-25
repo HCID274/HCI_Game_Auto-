@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import socket
 import time
+from collections.abc import Callable
 
 import psutil
 
@@ -98,10 +99,12 @@ def wait_for_game_ready(
     *,
     process_check: object = is_game_process_running,
     window_check: object = is_game_window_present,
+    startup_check: Callable[[], bool] | None = None,
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if process_check() and window_check():
+        startup_ready = startup_check is None or startup_check()
+        if startup_ready and process_check() and window_check():
             log.info("game process and visible window are ready")
             return True
         time.sleep(GAME_READY_INTERVAL)
