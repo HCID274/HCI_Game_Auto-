@@ -1,27 +1,28 @@
+"""鸣潮日报：解析规则、失败原因翻译、同日合并、卡片和发送归档的回归测试。"""
+
 import json
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+from game_automation_core.reporting.feishu import card_text
+from game_automation_core.reporting.report import DONE
+
 from wuwa_auto.okww.runner import OkRunResult
-from wuwa_auto.reporting.day_rollup import build_daily_rollup
-from wuwa_auto.reporting.models import NarrativeReport, ReportItem, RunFacts
-from wuwa_auto.reporting.noise import known_upstream_noise_lines
-from wuwa_auto.reporting.parser import build_wuwa_agent_evidence, parse_run
-from wuwa_auto.reporting.prompting import compose_report_messages
+from wuwa_auto.reporting.boss_names import load_boss_names
+from wuwa_auto.reporting.day_rollup import _Candidate, build_daily_rollup
+from wuwa_auto.reporting.models import ReportItem, RunFacts
+from wuwa_auto.reporting.parser import parse_run
+from wuwa_auto.reporting.reasons import explain_failure
+from wuwa_auto.reporting.report import build_report
 from wuwa_auto.reporting.service import (
-    _archive_stem,
-    _redact_narrative,
-    _should_show_agent_diagnostics,
-)
-from wuwa_auto.reporting.summarizer import (
-    _consume_completion,
-    _parse_agent_report,
-    _safe_summary,
-    build_fallback_narrative,
-    summarize_report,
-    summarize_with_ai,
+    preview_archived_run,
+    report_run,
+    report_version_day_deferred,
 )
 
 
@@ -29,8 +30,10 @@ def _result(tmp_path: Path, text: str, **overrides: object) -> SimpleNamespace:
     log = tmp_path / "current.log"
     log.write_text(text, encoding="utf-8")
     values: dict[str, object] = {
+        "run_id": "20260809_053000",
         "status": "success",
         "reason": "Daily Task Completed",
+        "finished_at": "2026-08-09T06:10:00+09:00",
         "duration_seconds": 506,
         "log_slice_path": str(log),
         "config": {"boss_challenge_index": 2, "daily_farm_index": 6},
@@ -46,17 +49,20 @@ def _ok_result(
     workflow: str,
     status: str,
     log_text: str,
+    reason: str = "",
 ) -> OkRunResult:
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)
     log_path = run_dir / "ok-current-run.log"
     log_path.write_text(log_text, encoding="utf-8")
+    day = f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}"
+    clock = f"{run_id[9:11]}:{run_id[11:13]}"
     result = OkRunResult(
         run_id=run_id,
         status=status,
-        reason="completed" if status == "success" else "failed",
-        started_at=f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}T13:00:00+09:00",
-        finished_at=f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}T13:10:00+09:00",
+        reason=reason or ("completed" if status == "success" else "failed"),
+        started_at=f"{day}T{clock}:00+09:00",
+        finished_at=f"{day}T{clock}:30+09:00",
         duration_seconds=600,
         log_slice_path=str(log_path),
         evidence_path=None,
@@ -64,14 +70,32 @@ def _ok_result(
         exit_code=0 if status == "success" else 1,
     )
     (run_dir / "result.json").write_text(
-        json.dumps(asdict(result), ensure_ascii=False),
-        encoding="utf-8",
+        json.dumps(asdict(result), ensure_ascii=False), encoding="utf-8"
     )
     return result
 
 
-def test_only_executed_daily_and_followup_items_are_reported(tmp_path: Path) -> None:
-    text = """
+def _archive(reports: Path, result: OkRunResult, *, cleanup: dict | None = None) -> None:
+    reports.mkdir(exist_ok=True)
+    (reports / f"{result.run_id}.json").write_text(
+        json.dumps({"run_id": result.run_id, "facts": {"cleanup": cleanup or {}}}),
+        encoding="utf-8",
+    )
+
+
+def _lines(items: list[ReportItem]) -> list[str]:
+    return [item.line for item in items]
+
+
+def _card(facts: RunFacts) -> str:
+    return card_text(
+        build_report(facts, finished_at=datetime(2026, 8, 9, 6, 10)).to_card()
+    )
+
+
+class TestDailyTasks:
+    def test_only_executed_items_are_reported_and_mail_never_is(self, tmp_path: Path) -> None:
+        text = """
 DailyTask:info_set total daily points 120
 DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED {"points": 120, "target": 100}
 DailyTask:claim daily reward via  coordinate
@@ -85,1368 +109,886 @@ FarmEchoTask:start wait in combat
 FarmEchoTask:farm echo walk_find_echo True
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
-    narrative = build_fallback_narrative(facts)
+        facts = parse_run(_result(tmp_path, text), boss_names={2: "梦魇亚当·重锤"})
 
-    assert narrative.daily == [
-        "领取每日活跃度奖励（活跃度120点，已确认100%）",
-        "先约电台：已执行奖励领取操作",
-    ]
-    assert narrative.weekly == []
-    assert narrative.followup == ["讨伐强敌第2项 1次", "吸收声骸1次"]
-    assert "邮件" not in str(narrative)
-
-
-def test_parser_keeps_current_run_evidence_for_agent(tmp_path: Path) -> None:
-    facts = parse_run(_result(tmp_path, "DailyTask:Daily Task Completed\n"))
-
-    assert facts.evidence["game"] == "wuwa"
-    assert facts.evidence["line_refs"] == ["L1"]
-
-
-def test_wuwa_prompt_keeps_protocol_style_and_run_data_separate() -> None:
-    messages = compose_report_messages({"evidence": {"line_refs": ["L1"]}})
-
-    assert [item["role"] for item in messages] == ["system", "system", "user"]
-    assert "每日活跃度" in messages[0]["content"]
-    assert "日常、周常" in messages[1]["content"]
-    assert '"line_refs"' in messages[2]["content"]
-
-
-def test_prompt_uses_log_order_and_declares_filtered_startup_noise() -> None:
-    messages = compose_report_messages({"evidence": {"line_refs": ["L2", "L4"]}})
-
-    system_text = "\n".join(item["content"] for item in messages[:2])
-    assert "时间戳和证据行号" in system_text
-    assert "不要套用或硬编码" in system_text
-    assert "不能互相改名" in system_text
-    assert "summary只概括 confirmed_results" in system_text
-    assert "跨栏目移动、遗漏" in system_text
-    assert "相同项数和相同顺序" in system_text
-    assert "不得合并两项" in system_text
-    assert "不要求逐字照抄" in system_text
-    assert "过滤固定无害噪声" in system_text
-
-
-def test_same_day_successful_daily_and_followup_are_rolled_up(
-    tmp_path: Path,
-) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    daily_result = _ok_result(
-        tmp_path,
-        run_id="20260809_132616",
-        workflow="daily",
-        status="success",
-        log_text=(
-            "2026-08-09 13:30:00 DailyTask:TacetTask:start walk_to_treasure\n"
-            "2026-08-09 13:31:00 DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED "
-            '{"points": 140, "target": 100}\n'
-            "2026-08-09 13:32:00 DailyTask:Daily Task Completed\n"
-        ),
-    )
-    daily_facts = RunFacts(
-        overall_status="completed",
-        reason="Daily Task Completed",
-        duration_seconds=600,
-        workflow_task="daily",
-        daily=[ReportItem("daily-activity", "领取每日活跃度奖励（活跃度140点，已确认100%）")],
-    )
-    (reports / "20260809_132616.json").write_text(
-        json.dumps(
-            {"run_id": daily_result.run_id, "facts": daily_facts.to_dict()},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    followup_result = _ok_result(
-        tmp_path,
-        run_id="20260809_170403_farm_echo_confirmed_retry",
-        workflow="farm_echo_confirmed_retry",
-        status="success",
-        log_text=(
-            "2026-08-09 17:10:00 FarmEchoTask:start wait in combat\n"
-            "2026-08-09 17:14:00 FarmEchoTask:farm echo walk_find_echo True\n"
-        ),
-    )
-    followup_facts = RunFacts(
-        overall_status="completed",
-        reason="FarmEcho absorption confirmed 5/5 echoes",
-        duration_seconds=603,
-        workflow_task="farm_echo_confirmed_retry",
-        followup=[
-            ReportItem("boss-challenge", "讨伐强敌第2项 5次"),
-            ReportItem("echo-picked", "吸收声骸5次"),
-        ],
-    )
-
-    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
-        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
-    ):
-        rolled_up = build_daily_rollup(followup_result, None, followup_facts)
-
-    assert rolled_up.overall_status == "completed"
-    assert [item.text for item in rolled_up.daily] == [
-        "无音区清剿1场，消耗60结晶波片",
-        "每日活跃度已确认达到100（当前140点，奖励状态已结算）",
-    ]
-    assert [item.text for item in rolled_up.followup] == [
-        "讨伐强敌第2项 5次",
-        "吸收声骸5次",
-    ]
-    assert rolled_up.issues == []
-    assert rolled_up.evidence["source"] == (
-        "20260809_132616,20260809_170403_farm_echo_confirmed_retry"
-    )
-
-
-def test_latest_failed_followup_overrides_earlier_success(
-    tmp_path: Path,
-) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    daily_result = _ok_result(
-        tmp_path,
-        run_id="20260811_053000_daily",
-        workflow="daily",
-        status="success",
-        log_text="DailyTask:Daily Task Completed\n",
-    )
-    daily_facts = RunFacts(
-        overall_status="completed",
-        reason="Daily Task Completed",
-        duration_seconds=600,
-        workflow_task="daily",
-        daily=[ReportItem("daily", "今日任务已完成")],
-    )
-    (reports / f"{daily_result.run_id}.json").write_text(
-        json.dumps(
-            {"run_id": daily_result.run_id, "facts": daily_facts.to_dict()},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    earlier = _ok_result(
-        tmp_path,
-        run_id="20260811_060000_farm_echo_confirmed_retry",
-        workflow="farm_echo_confirmed_retry",
-        status="success",
-        log_text="FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
-    )
-    stale_rollup = RunFacts(
-        overall_status="completed",
-        reason="old success",
-        duration_seconds=600,
-        workflow_task="daily",
-        followup=[ReportItem("echo-picked", "吸收声骸1次")],
-        evidence={"source": f"{daily_result.run_id},{earlier.run_id}"},
-    )
-    (reports / f"{earlier.run_id}_daily_rollup.json").write_text(
-        json.dumps(
-            {"run_id": earlier.run_id, "facts": stale_rollup.to_dict()},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    latest = _ok_result(
-        tmp_path,
-        run_id="20260811_120000_farm_echo_confirmed_retry",
-        workflow="farm_echo_confirmed_retry",
-        status="failed",
-        log_text="FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
-    )
-    latest_facts = RunFacts(
-        overall_status="failed",
-        reason="absorbed 0/1",
-        duration_seconds=600,
-        workflow_task="farm_echo_confirmed_retry",
-        issues=[ReportItem("run-failure", "讨伐失败：吸收0/1")],
-    )
-
-    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
-        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
-    ):
-        rolled_up = build_daily_rollup(latest, None, latest_facts)
-
-    assert rolled_up.overall_status == "partial_success"
-    assert rolled_up.followup == []
-    assert [item.text for item in rolled_up.issues] == [
-        "讨伐后续阶段：讨伐失败：吸收0/1"
-    ]
-    assert rolled_up.evidence["source"] == (
-        "20260811_053000_daily,"
-        "20260811_120000_farm_echo_confirmed_retry"
-    )
-
-
-def test_daily_supplement_preserves_previous_work_but_not_stale_activity(tmp_path):
-    from wuwa_auto.reporting.day_rollup import _Candidate
-
-    earlier = _ok_result(tmp_path, run_id="20260912_083000", workflow="daily", status="success", log_text="TacetTask:start walk_to_treasure\n")
-    older_facts = RunFacts(
-        "completed", "completed", 60,
-        daily=[ReportItem("tacet-suppression", "无音区清剿2场"), ReportItem("daily-activity-reward", "旧活跃奖励")],
-        followup=[ReportItem("echo-picked", "吸收声骸5次")],
-    )
-    earlier.config["daily_sequence"] = {"daily_status": "success", "boss_status": "success"}
-    latest = _ok_result(tmp_path, run_id="20260912_092750", workflow="daily", status="success", log_text="NightmareNestTask:farm echo walk find true\n")
-    for state in ("success", "failed"):
-        from dataclasses import replace
-
-        current = replace(latest, status=state)
-        current_facts = RunFacts(
-            "completed" if state == "success" else "failed", state, 60,
-            daily_activity={"state": "verified" if state == "success" else "unverified"},
-            daily=[ReportItem("nightmare-nest-echo", "聚落吸收声骸4次")],
-            issues=[] if state == "success" else [ReportItem("run-failure", "本轮未验证活跃")],
-        )
-        with patch("wuwa_auto.reporting.day_rollup._archived_candidates", return_value=[_Candidate(earlier.run_id, earlier, older_facts)]):
-            combined = build_daily_rollup(current, None, current_facts)
-        assert [item.item_id for item in combined.daily] == ["tacet-suppression", "nightmare-nest-echo"]
-        assert combined.daily_activity == current_facts.daily_activity
-        assert combined.overall_status == ("completed" if state == "success" else "partial_success")
-        assert ("本轮未验证活跃" in str(combined.issues)) == (state == "failed")
-
-
-def test_standalone_followup_without_daily_stays_a_phase_report(tmp_path: Path) -> None:
-    result = _ok_result(
-        tmp_path,
-        run_id="20260810_170403_farm_echo_confirmed_retry",
-        workflow="farm_echo_confirmed_retry",
-        status="success",
-        log_text="FarmEchoTask:farm echo walk_find_echo True\n",
-    )
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        workflow_task="farm_echo_confirmed_retry",
-        followup=[ReportItem("echo-picked", "吸收声骸1次")],
-    )
-    reports = tmp_path / "reports"
-    reports.mkdir()
-
-    with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
-        "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
-    ):
-        assert build_daily_rollup(result, None, facts) is facts
-
-
-def test_rollup_preview_uses_a_distinct_archive_name() -> None:
-    result = SimpleNamespace(run_id="20260809_170403_farm_echo_confirmed_retry")
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        evidence={"source": "daily-run,farm-run"},
-    )
-
-    assert _archive_stem(result, facts).endswith("_daily_rollup")
-
-
-def test_known_upstream_noise_is_filtered_only_from_agent_evidence() -> None:
-    text = """TaskExecutor:install ocr translations error for zh_CN
-StartController:waiting for game to start error Selected capture method is not supported
-windows_graphics:update:use WGC capture
-StartController:NVIDIA RTX Dynamic Vibrance is enabled and may cause malfunctions!
-ERROR: real task failure"""
-
-    assert known_upstream_noise_lines(text) == frozenset({1, 2, 4})
-
-
-def test_parser_keeps_real_failure_while_filtering_startup_noise(
-    tmp_path: Path,
-) -> None:
-    text = """TaskExecutor:install ocr translations error for zh_CN
-StartController:NVIDIA RTX Dynamic Vibrance is enabled and may cause malfunctions!
-DailyTask:Daily Task exception stopped"""
-    facts = parse_run(
-        _result(tmp_path, text, status="failed", reason="Daily Task exception stopped")
-    )
-
-    assert facts.evidence["line_refs"] == ["L3"]
-    assert facts.issues[0].text == "主流程失败：Daily Task exception stopped"
-
-
-def test_capture_fallback_is_kept_when_no_recovery_is_observed() -> None:
-    text = "StartController:waiting for game to start error Selected capture method is not supported\n"
-
-    assert known_upstream_noise_lines(text) == frozenset()
-
-
-def test_capture_fallback_is_not_hidden_by_same_line_or_distant_wgc_text() -> None:
-    same_line = (
-        "StartController:error Selected capture method is not supported; "
-        "use WGC capture\n"
-    )
-    distant = "\n".join(
-        [
-            "StartController:error Selected capture method is not supported",
-            *(["DailyTask:progress"] * 21),
-            "windows_graphics:start WGC capture",
+        assert _lines(facts.daily) == [
+            "✅ 每日活跃度：120 点，奖励已领取",
+            "✅ 先约电台：已执行领取",
         ]
-    )
+        assert facts.weekly == []
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项（梦魇亚当·重锤）：吸收声骸 1 次"]
+        assert facts.overall_status == "completed"
+        assert "邮件" not in _card(facts)
 
-    assert known_upstream_noise_lines(same_line) == frozenset()
-    assert known_upstream_noise_lines(distant) == frozenset()
+    def test_tacet_counts_claimed_runs_with_fixed_waveplates(self, tmp_path: Path) -> None:
+        text = """
+TacetTask:start walk_to_treasure
+TacetTask:info_set current_stamina 144
+TacetTask:start walk_to_treasure
+TacetTask:is not claim treasure, restart challenge
+TacetTask:start walk_to_treasure
+BaseWWTask:current stamina: -36 must_use completed, no need to use back_up
+DailyTask:Daily Task Completed
+"""
+        facts = parse_run(_result(tmp_path, text))
 
+        assert _lines(facts.daily) == ["✅ 无音区第6项：清剿 2 场，消耗 120 结晶波片"]
 
-def test_failed_wgc_marker_does_not_hide_capture_failure() -> None:
-    text = """StartController:error Selected capture method is not supported
-ERROR: failed to start WGC capture"""
-
-    assert known_upstream_noise_lines(text) == frozenset()
-
-
-def test_verified_activity_filters_optional_capability_panel_from_ai() -> None:
-    text = """DailyTask:HOST_OKWW_DAILY_TRACE {"event": "capabilities"}
-DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+40", "完成1次日常任务", "0/1"]}
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED {"points": 140, "target": 100}
-DailyTask:Daily Task Completed"""
-
-    assert known_upstream_noise_lines(text) == frozenset({1, 2})
-
-
-def test_unverified_activity_keeps_capability_panel_for_failure_diagnosis() -> None:
-    text = """DailyTask:HOST_OKWW_DAILY_TRACE {"event": "capabilities"}
-DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+40", "完成1次日常任务", "0/1"]}
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 0, "target": 100}"""
-
-    assert known_upstream_noise_lines(text) == frozenset()
-
-
-def test_wuwa_agent_archives_provider_token_usage() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="Daily Task Completed",
-        duration_seconds=1,
-        issues=[ReportItem("run-failure", "主流程失败：测试异常")],
-        evidence={"line_refs": ["L1"]},
-    )
-    response = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    content='{"summary":"鸣潮日常完成",'
-                    '"daily":[],"weekly":[],"followup":[],'
-                    '"issues":["主流程失败：测试异常"]}'
-                )
-            )
-        ],
-        usage=SimpleNamespace(prompt_tokens=80, completion_tokens=20, total_tokens=100),
-    )
-
-    with patch("wuwa_auto.reporting.summarizer.get_secret") as secret, patch(
-        "wuwa_auto.reporting.summarizer.OpenAI"
-    ) as client_class:
-        secret.side_effect = lambda name: {
-            "DEEPSEEK_API_KEY": "test",
-            "DEEPSEEK_MODEL": "test-model",
-        }.get(name, "")
-        client_class.return_value.chat.completions.create.return_value = response
-        narrative = summarize_with_ai(facts)
-
-    assert narrative.token_usage["input_tokens"] == 80
-    assert narrative.token_usage["output_tokens"] == 20
-    assert narrative.token_usage["output_input_ratio"] == 0.25
-    assert narrative.issues == ["主流程失败：测试异常"]
-    create_kwargs = client_class.return_value.chat.completions.create.call_args.kwargs
-    assert create_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-
-
-def test_wuwa_agent_keeps_more_than_the_core_default_evidence_window() -> None:
-    lines = [f"DailyTask: progress {index}" for index in range(1, 501)]
-
-    evidence = build_wuwa_agent_evidence("\n".join(lines))
-
-    assert len(evidence["line_refs"]) == 500
-    assert "L500" in evidence["line_refs"]
-
-
-def test_deepseek_length_response_retries_with_larger_output_budget() -> None:
-    facts = RunFacts(
-        overall_status="failed",
-        reason="test failure",
-        duration_seconds=1,
-        issues=[ReportItem("failure", "程序确认失败")],
-        evidence={"line_refs": ["L1"]},
-    )
-    first = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=""),
-                finish_reason="length",
-            )
-        ],
-        usage=SimpleNamespace(
-            prompt_tokens=6_000,
-            completion_tokens=8_192,
-            total_tokens=14_192,
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=8_192),
-        ),
-    )
-    second = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    content='{"summary":"恢复生成","daily":[],"weekly":[],'
-                    '"followup":[],"issues":["任意模型措辞"]}'
-                ),
-                finish_reason="stop",
-            )
-        ],
-        usage=SimpleNamespace(
-            prompt_tokens=6_000,
-            completion_tokens=200,
-            total_tokens=6_200,
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
-        ),
-    )
-
-    with patch("wuwa_auto.reporting.summarizer.get_secret") as secret, patch(
-        "wuwa_auto.reporting.summarizer.OpenAI"
-    ) as client_class:
-        secret.side_effect = lambda name: {
-            "DEEPSEEK_API_KEY": "test",
-            "DEEPSEEK_MODEL": "test-model",
-        }.get(name, "")
-        create = client_class.return_value.chat.completions.create
-        create.side_effect = [first, second]
-        narrative = summarize_with_ai(facts)
-
-    assert create.call_count == 2
-    assert create.call_args_list[0].kwargs["max_tokens"] == 8_192
-    assert create.call_args_list[1].kwargs["max_tokens"] == 16_384
-    assert narrative.token_usage["input_tokens"] == 12_000
-    assert narrative.token_usage["output_tokens"] == 8_392
-    assert narrative.token_usage["attempts"] == 2
-    assert narrative.token_usage["finish_reason"] == "stop"
-    assert narrative.issues == ["程序确认失败"]
-
-
-def test_streamed_wuwa_response_is_joined_and_keeps_usage() -> None:
-    chunks = [
-        SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(content='{"summary":"完成",'),
-                    finish_reason=None,
-                )
-            ],
-            usage=None,
-        ),
-        SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    delta=SimpleNamespace(
-                        content='"daily":[],"weekly":[],"followup":[],"issues":[]}'
-                    ),
-                    finish_reason="stop",
-                )
-            ],
-            usage=None,
-        ),
-        SimpleNamespace(
-            choices=[],
-            usage=SimpleNamespace(
-                prompt_tokens=100,
-                completion_tokens=25,
-                total_tokens=125,
-            ),
-        ),
-    ]
-
-    content, usage = _consume_completion(iter(chunks), model="test-model")
-
-    assert json.loads(content)["summary"] == "完成"
-    assert usage["input_tokens"] == 100
-    assert usage["output_tokens"] == 25
-    assert usage["finish_reason"] == "stop"
-
-
-def test_agent_report_uses_full_sections_without_fact_id_wording_map() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        daily=[ReportItem("daily", "程序确认的日常事实")],
-        followup=[ReportItem("followup", "程序确认的后续事实")],
-    )
-
-    narrative = _parse_agent_report(
-        {
-            "summary": "鸣潮日常完成",
-            "daily": ["自然语言日常汇报"],
-            "weekly": [],
-            "followup": ["自然语言后续汇报"],
-            "issues": [],
-        },
-        facts,
-        token_usage={},
-    )
-
-    assert narrative.daily == ["自然语言日常汇报"]
-    assert narrative.followup == ["自然语言后续汇报"]
-
-
-def test_impacted_report_cannot_replace_program_facts_with_hallucinated_causes() -> None:
-    facts = RunFacts(
-        overall_status="failed",
-        reason="active character bind failed",
-        duration_seconds=61,
-        followup=[ReportItem("rebind", "Worker重绑定1次")],
-        issues=[ReportItem("failure", "当前角色绑定失败")],
-    )
-
-    narrative = _parse_agent_report(
-        {
-            "summary": "HUD不稳定且三次重试耗尽，任务失败",
-            "daily": [],
-            "weekly": [],
-            "followup": ["未进入HUD"],
-            "issues": ["三次重试耗尽"],
-        },
-        facts,
-        token_usage={},
-    )
-
-    assert narrative.summary == "鸣潮日常失败，耗时1分1秒"
-    assert narrative.followup == ["Worker重绑定1次"]
-    assert narrative.issues == ["当前角色绑定失败"]
-
-
-def test_clean_completed_run_discards_non_impacting_ai_diagnostics() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="Daily Task Completed",
-        duration_seconds=1,
-        evidence={"line_refs": ["L1"]},
-    )
-    response = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    content='{"summary":"鸣潮日常完成","daily":[],'
-                    '"weekly":[],"followup":[],"issues":["可选任务未执行"]}'
-                )
-            )
-        ],
-        usage=SimpleNamespace(prompt_tokens=80, completion_tokens=20, total_tokens=100),
-    )
-
-    with patch("wuwa_auto.reporting.summarizer.get_secret") as secret, patch(
-        "wuwa_auto.reporting.summarizer.OpenAI"
-    ) as client_class:
-        secret.side_effect = lambda name: {
-            "DEEPSEEK_API_KEY": "test",
-            "DEEPSEEK_MODEL": "test-model",
-        }.get(name, "")
-        client_class.return_value.chat.completions.create.return_value = response
-        narrative = summarize_with_ai(facts)
-
-    assert narrative.analysis == {}
-    assert narrative.issues == []
-
-
-def test_ai_summary_cannot_reverse_program_status() -> None:
-    failed = RunFacts(
-        overall_status="failed",
-        reason="failed",
-        duration_seconds=1,
-    )
-    completed = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-    )
-
-    assert _safe_summary("任务未失败", failed) == "鸣潮日常失败，耗时1秒"
-    assert _safe_summary("本轮完成但领取失败", completed) == "鸣潮日常完成，耗时1秒"
-    assert _safe_summary("鸣潮日常完成，耗时1秒", completed) == (
-        "鸣潮日常完成，耗时1秒"
-    )
-    for status, forbidden in (
-        ("unknown", "鸣潮日常状态未确认，耗时1秒"),
-        ("in_progress", "鸣潮日常仍在进行，耗时1秒"),
-        ("stalled", "鸣潮日常疑似卡住，耗时1秒"),
-    ):
-        facts = RunFacts(overall_status=status, reason=status, duration_seconds=1)
-        assert _safe_summary("鸣潮日常完成", facts) == forbidden
-
-
-def test_invalid_wuwa_ai_response_still_keeps_billed_usage() -> None:
-    facts = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-        evidence={"line_refs": ["L1"]},
-    )
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content='{"summary":"bad"}'))],
-        usage=SimpleNamespace(prompt_tokens=90, completion_tokens=10, total_tokens=100),
-    )
-
-    with patch("wuwa_auto.reporting.summarizer.get_secret") as secret, patch(
-        "wuwa_auto.reporting.summarizer.OpenAI"
-    ) as client_class:
-        secret.side_effect = lambda name: {
-            "DEEPSEEK_API_KEY": "test",
-            "DEEPSEEK_MODEL": "test-model",
-        }.get(name, "")
-        client_class.return_value.chat.completions.create.return_value = response
-        narrative, ai_used = summarize_report(facts)
-
-    assert ai_used is False
-    assert narrative.token_usage["input_tokens"] == 90
-    assert narrative.token_usage["output_tokens"] == 10
-
-
-def test_fallback_report_redacts_secret_fact_text() -> None:
-    facts = RunFacts(
-        overall_status="failed",
-        reason="failed",
-        duration_seconds=1,
-        issues=[ReportItem("run-failure", "主流程失败：token=SUPERSECRET123")],
-    )
-
-    narrative = build_fallback_narrative(facts)
-
-    assert "SUPERSECRET123" not in str(narrative)
-
-
-def test_card_narrative_redacts_ai_text() -> None:
-    narrative = _redact_narrative(
-        NarrativeReport(
-            summary="鸣潮完成",
-            daily=["token=SUPERSECRET123"],
-            weekly=[],
-            followup=[],
-            issues=["api_key=ANOTHERSECRET"],
-        )
-    )
-
-    assert "SUPERSECRET123" not in str(narrative)
-    assert "ANOTHERSECRET" not in str(narrative)
-
-
-def test_clean_success_cannot_render_agent_only_anomalies() -> None:
-    narrative = NarrativeReport(
-        summary="鸣潮日常完成",
-        daily=[],
-        weekly=[],
-        followup=[],
-        issues=[],
-        analysis={"anomalies": [{"message": "可选任务未执行"}]},
-    )
-    clean = RunFacts(
-        overall_status="completed",
-        reason="completed",
-        duration_seconds=1,
-    )
-    impacted = RunFacts(
-        overall_status="partial_success",
-        reason="partial",
-        duration_seconds=1,
-        issues=[ReportItem("issue", "真实异常")],
-    )
-
-    assert _should_show_agent_diagnostics(clean, narrative) is False
-    assert _should_show_agent_diagnostics(impacted, narrative) is True
-
-
-def test_unconfirmed_daily_points_are_only_reported_as_claim_action(
-    tmp_path: Path,
-) -> None:
-    text = """
+    def test_unconfirmed_points_are_only_reported_as_a_claim_click(self, tmp_path: Path) -> None:
+        text = """
 DailyTask:info_set total daily points 0
 DailyTask:claim daily reward via  coordinate
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
+        facts = parse_run(_result(tmp_path, text))
 
-    assert [item.item_id for item in facts.daily] == [
-        "daily-activity-claim-action"
-    ]
-    assert facts.daily[0].text == (
-        "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）"
-    )
+        assert _lines(facts.daily) == ["⚠️ 每日活跃度：点了领取，但没读到最终活跃度"]
 
-
-def test_verified_post_claim_total_does_not_report_optional_panel_tasks(
-    tmp_path: Path,
-) -> None:
-    text = """
+    def test_verified_total_does_not_report_optional_panel_tasks(self, tmp_path: Path) -> None:
+        text = """
 DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+40", "完成1次日常任务", "0/1", "140", "活跃度", "20", "40", "60", "80"]}
 DailyTask:HOST_DAILY_ACTIVITY_ALREADY_SETTLED {"source": "pre_claim_panel_labels"}
 DailyTask:HOST_DAILY_ACTIVITY_CLAIM_ACTION {"upstream_click": false, "host_clicks": 0}
 DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED {"points": 140, "target": 100, "complete": true}
 DailyTask:Daily Task Completed
 """
+        facts = parse_run(_result(tmp_path, text))
 
-    facts = parse_run(_result(tmp_path, text))
+        assert _lines(facts.daily) == ["✅ 每日活跃度：140 点，奖励已领取"]
+        assert facts.issues == []
 
-    assert facts.overall_status == "completed"
-    assert facts.issues == []
-    assert [item.text for item in facts.daily] == [
-        "每日活跃度已确认达到100（当前140点，奖励状态已结算）"
-    ]
-
-
-def test_unverified_daily_activity_is_reported_even_before_claim_click(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 20, "target": 100, "reason": "daily activity below threshold: points=20, target=100"}
+    def test_unverified_activity_is_reported_before_any_claim_click(self, tmp_path: Path) -> None:
+        text = """
+DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 20, "target": 100, "reason": "below threshold"}
 DailyTask:Daily Task exception stopped
 """
-    facts = parse_run(
-        _result(
-            tmp_path,
-            text,
-            status="failed",
-            reason="Daily Task exception stopped",
+        facts = parse_run(
+            _result(
+                tmp_path,
+                text,
+                status="failed",
+                reason="OK-WW failure marker: Daily Task exception stopped",
+            )
         )
-    )
 
-    assert [item.text for item in facts.issues] == [
-        "主流程失败：Daily Task exception stopped",
-        "每日活跃度奖励未确认：daily activity below threshold: points=20, target=100",
-    ]
+        assert _lines(facts.daily) == ["❌ 每日活跃度：20/100，没达标"]
+        assert facts.issues == ["OK-WW 日常任务异常中止"]
 
-
-def test_real_tacet_markers_report_claimed_runs_and_fixed_waveplates(
-    tmp_path: Path,
-) -> None:
-    text = """
-TacetTask:start walk_to_treasure
-TacetTask:info_set current_stamina 144
-TacetTask:start walk_to_treasure
-TacetTask:info_set current_stamina 24
-BaseWWTask:current stamina: -36 must_use completed, no need to use back_up
-DailyTask:Daily Task Completed
+    def test_unknown_panel_task_is_listed_without_a_false_upper_bound(self, tmp_path: Path) -> None:
+        text = """
+DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+100", "完成1个危行任务", "0/1"]}
+DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 0, "target": 100, "reason": "not settled"}
+DailyTask:Daily Task exception stopped
 """
-    facts = parse_run(_result(tmp_path, text))
+        facts = parse_run(
+            _result(tmp_path, text, status="failed", reason="Daily Task exception stopped")
+        )
 
-    assert facts.daily[0].text == "无音区第6项清剿2场，消耗120结晶波片"
+        assert "每日活跃度还差：完成1个危行任务(+100)" in facts.issues
+        assert all("最多只能做到" not in issue for issue in facts.issues)
 
-
-def test_unclaimed_tacet_restart_is_not_counted(tmp_path: Path) -> None:
-    text = """
-TacetTask:start walk_to_treasure
-TacetTask:is not claim treasure, restart challenge
-TacetTask:start walk_to_treasure
-DailyTask:Daily Task Completed
-"""
-    facts = parse_run(_result(tmp_path, text))
-
-    assert facts.daily[0].text == "无音区第6项清剿1场，消耗60结晶波片"
-
-
-def test_historical_nightmare_echo_and_unreachable_target_are_reported(
-    tmp_path: Path,
-) -> None:
-    text = """
+    def test_nightmare_skip_is_a_warning_and_downgrades_the_card(self, tmp_path: Path) -> None:
+        text = """
 NightmareNestTask:farm echo walk find true
 NightmareNestTask:nightmare nest unreachable, skip this run: go_nest:41:18
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
+        facts = parse_run(_result(tmp_path, text))
 
-    assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
-    assert [item.text for item in facts.issues] == [
-        "梦魇巢穴传送未确认生效，已跳过1处"
-    ]
-    assert facts.overall_status == "partial_success"
+        assert _lines(facts.daily) == ["⚠️ 梦魇巢穴：吸收声骸 1 次，1 处没传送过去，已跳过"]
+        assert _card(facts).startswith("⚠️ 鸣潮 部分完成")
 
-
-def test_host_nightmare_travel_marker_uses_precise_wording(tmp_path: Path) -> None:
-    text = """
+    def test_host_nightmare_marker_without_echoes_is_a_failure(self, tmp_path: Path) -> None:
+        text = """
 NightmareNestTask:HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED target=go_nest:48:28 reason=button_still_visible_after_retry
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
+        facts = parse_run(_result(tmp_path, text))
 
-    assert [item.text for item in facts.issues] == [
-        "梦魇巢穴传送未确认生效，已跳过1处"
-    ]
-    assert facts.overall_status == "partial_success"
+        assert _lines(facts.daily) == ["❌ 梦魇巢穴：1 处没传送过去，已跳过"]
 
-
-def test_nightmare_echo_does_not_inflate_farm_echo_pickup(tmp_path: Path) -> None:
-    text = """
+    def test_nightmare_echoes_do_not_inflate_the_boss_count(self, tmp_path: Path) -> None:
+        text = """
 NightmareNestTask:farm echo yolo find True
 FarmEchoTask:farm echo on the face
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
+        facts = parse_run(_result(tmp_path, text))
 
-    assert [item.text for item in facts.daily] == ["梦魇巢穴吸收声骸1次"]
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 1次",
-        "吸收声骸1次",
-    ]
+        assert _lines(facts.daily) == ["✅ 梦魇巢穴：吸收声骸 1 次"]
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项：吸收声骸 1 次"]
 
-
-def test_battle_pass_is_omitted_when_claim_branch_is_not_entered(
-    tmp_path: Path,
-) -> None:
-    text = """
+    def test_battle_pass_is_omitted_when_the_claim_branch_is_not_entered(
+        self, tmp_path: Path
+    ) -> None:
+        text = """
 DailyTask:battle pass
 DailyTask:can not battle pass, maybe ended
 DailyTask:info_set current task check weekly garden
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text))
-    assert all(item.item_id != "battle-pass" for item in facts.daily)
+        assert parse_run(_result(tmp_path, text)).daily == []
 
+    def test_weekly_garden_is_done_only_with_the_completion_marker(self, tmp_path: Path) -> None:
+        completed = parse_run(
+            _result(
+                tmp_path,
+                "DailyTask:weekly garden not completed, run GardenTask\n"
+                "GardenTask:乐园任务完成, 已达到上限\n",
+            )
+        )
+        unconfirmed = parse_run(
+            _result(tmp_path, "DailyTask:weekly garden not completed, run GardenTask\n")
+        )
 
-def test_weekly_is_reported_only_when_run_reaches_completion(tmp_path: Path) -> None:
-    text = """
-DailyTask:weekly garden not completed, run GardenTask
-GardenTask:乐园任务完成, 已达到上限
-DailyTask:Daily Task Completed
-"""
-    facts = parse_run(_result(tmp_path, text))
-    assert [item.text for item in facts.weekly] == ["完成幻梦游园本周目标"]
+        assert _lines(completed.weekly) == ["✅ 幻梦游园：本周目标已完成"]
+        assert _lines(unconfirmed.weekly) == ["⚠️ 幻梦游园：本轮没确认完成"]
 
-
-def test_standalone_weekly_garden_is_reported(tmp_path: Path) -> None:
-    text = """
+    def test_standalone_weekly_garden_has_its_own_title(self, tmp_path: Path) -> None:
+        text = """
 GardenTask:garden end [本周游历值, 已达到上限]
 GardenTask:乐园任务完成, 已达到上限
 TaskExecutor:Successfully Executed Task, Exiting Game and App!
 """
-    facts = parse_run(
-        _result(
-            tmp_path,
-            text,
-            config={"workflow_task": "weekly_garden"},
-        )
-    )
-    narrative = build_fallback_narrative(facts)
-    assert narrative.summary.startswith("鸣潮周常完成")
-    assert narrative.weekly == ["完成幻梦游园本周目标"]
+        facts = parse_run(_result(tmp_path, text, config={"workflow_task": "weekly_garden"}))
+
+        assert _card(facts).startswith("✅ 鸣潮周常 全部完成")
+        assert _lines(facts.weekly) == ["✅ 幻梦游园：本周目标已完成"]
 
 
-def test_historical_zero_based_boss_log_keeps_gui_item_number(
-    tmp_path: Path,
-) -> None:
-    text = """
+class TestBoss:
+    def test_zero_based_teleport_log_keeps_the_gui_item_number(self, tmp_path: Path) -> None:
+        text = """
 FarmEchoTask:info_set Teleport to Boss Boss Challenge 1
 FarmEchoTask:start wait in combat
 FarmEchoTask:farm echo walk_find_echo None
 FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text, config={}))
-    assert facts.followup[0].text == "讨伐强敌第2项 1次"
+        facts = parse_run(_result(tmp_path, text, config={}))
 
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项：击败 1 次"]
 
-def test_unconfirmed_farm_echo_result_is_not_reported_as_kill(
-    tmp_path: Path,
-) -> None:
-    text = """
+    def test_unconfirmed_result_is_not_reported_as_a_kill(self, tmp_path: Path) -> None:
+        text = """
 FarmEchoTask:info_set Teleport to Boss Boss Challenge 1
 FarmEchoTask:start wait in combat
 FarmEchoTask:farm echo walk_find_echo None
 DailyTask:Daily Task Completed
 """
-    facts = parse_run(_result(tmp_path, text, config={}))
-    assert all(item.item_id != "boss-challenge" for item in facts.followup)
+        assert parse_run(_result(tmp_path, text, config={})).boss == []
 
-
-def test_confirmed_retry_uses_structured_absorption_count(tmp_path: Path) -> None:
-    text = """
-FarmEchoTask:farm echo walk_find_echo True
-FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
-FarmEchoTask:farm echo walk_find_echo True
-"""
-    facts = parse_run(
-        _result(
-            tmp_path,
-            text,
-            config={
-                "boss_challenge_index": 2,
-                "workflow_task": "farm_echo_confirmed_retry",
-                "confirmed_farm_echo_absorption_count": 2,
-            },
-        )
-    )
-    narrative = build_fallback_narrative(facts)
-
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 2次",
-        "吸收声骸2次",
-    ]
-    assert narrative.summary.startswith("鸣潮后续任务完成")
-
-
-def test_confirmed_absorption_total_proves_matching_boss_clears(
-    tmp_path: Path,
-) -> None:
-    facts = parse_run(
-        _result(
-            tmp_path,
-            "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)\n",
-            config={
-                "boss_challenge_index": 2,
-                "workflow_task": "farm_echo_confirmed_retry",
-                "confirmed_farm_echo_absorption_count": 5,
-            },
-        )
-    )
-
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 5次",
-        "吸收声骸5次",
-    ]
-
-
-def test_recovered_farm_echo_reports_exact_total_and_recovery_event(
-    tmp_path: Path,
-) -> None:
-    text = "\n".join(
-        [
-            "FarmEchoTask:farm echo walk_find_echo True",
-            "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)",
-        ]
-        * 5
-    )
-    result = _result(
-        tmp_path,
-        text,
-        config={
-            "boss_challenge_index": 2,
-            "workflow_task": "daily",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "recovery_attempts": 2,
-                "retry_completed": 2,
-                "total_completed": 5,
-                "first_safe_recovery": True,
-                "final_safe_recovery": None,
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    assert facts.overall_status == "completed"
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 5次",
-        "讨伐中途倒地2次，已自动恢复并补吸收声骸2次",
-        "吸收声骸5次",
-    ]
-
-
-def test_recovered_realm_defeat_keeps_full_realm_label(
-    tmp_path: Path,
-) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
-        config={
-            "boss_challenge_index": 2,
-            "workflow_task": "daily",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "recovery_attempts": 1,
-                "retry_completed": 5,
-                "total_completed": 5,
-                "recoveries": [{"success": True, "realm_defeat": True}],
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 5次",
-        "讨伐副本团灭1次，已自动恢复并补吸收声骸5次",
-        "吸收声骸5次",
-    ]
-
-
-def test_incomplete_recovery_does_not_claim_exit_and_heal(tmp_path: Path) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED\n",
-        status="failed",
-        config={
-            "workflow_task": "farm_echo_confirmed_retry",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "recovery_attempts": 2,
-                "retry_completed": 0,
-                "total_completed": 0,
-                "first_safe_recovery": True,
-                "final_safe_recovery": True,
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    issue_text = [item.text for item in facts.issues]
-    assert "讨伐中途倒地2次，已自动恢复并重试；声骸累计吸收0/5次" in issue_text
-    assert all("退本回血" not in text for text in issue_text)
-
-
-def test_client_restart_is_not_reported_as_an_extra_death(tmp_path: Path) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
-        status="failed",
-        reason=(
-            "FarmEcho recovery incomplete: absorbed 0/1; "
-            "recoveries=2; retry=maximum retry count exhausted"
-        ),
-        config={
-            "workflow_task": "farm_echo_confirmed_retry",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 1,
-                "recovery_attempts": 2,
-                "retry_completed": 0,
-                "total_completed": 0,
-                "first_safe_recovery": True,
-                "final_safe_recovery": True,
-                "recoveries": [
-                    {
-                        "success": True,
-                        "realm_defeat": True,
-                        "kind": "death_recovery",
-                    },
-                    {
-                        "success": True,
-                        "realm_defeat": False,
-                        "kind": "client_restart",
-                        "reason": "client restarted once to restore upstream combat",
-                    },
-                ],
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    issue_text = [item.text for item in facts.issues]
-    assert (
-        "讨伐副本团灭1次，客户端重启1次，已自动恢复并重试；"
-        "声骸累计吸收0/1次"
-    ) in issue_text
-    assert all("中途倒地" not in text for text in issue_text)
-    assert "recoveries=1" in facts.reason
-    assert all("recoveries=2" not in text for text in issue_text)
-
-
-def test_worker_rebind_failure_is_reported_without_fabricating_death(
-    tmp_path: Path,
-) -> None:
-    result = _result(
-        tmp_path,
-        "FarmEchoTask:could not find char 0 please check current char\n",
-        status="failed",
-        reason="FarmEcho recovery incomplete: absorbed 0/1; recoveries=0",
-        config={
-            "workflow_task": "farm_echo_confirmed_retry",
-            "target_count": 1,
-            "confirmed_farm_echo_absorption_count": 0,
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 1,
-                "total_completed": 0,
-                "retry_completed": 0,
-                "recovery_attempts": 0,
-                "combat_rebind_attempts": 1,
-                "client_restart_triggered": False,
-                "retry_runs": 1,
-                "retry_limit": 3,
-                "recoveries": [],
-            },
-        },
-    )
-
-    facts = parse_run(result)
-    issue_text = [item.text for item in facts.issues]
-
-    assert (
-        "上游战斗劣化后Worker重绑定1次，已执行1/3次Worker重试，仍未恢复"
-        in issue_text
-    )
-    assert "worker_retries=1/3" in facts.reason
-    assert all("倒地" not in text and "团灭" not in text for text in issue_text)
-
-
-def test_progress_driven_worker_retries_do_not_report_a_false_total_cap(
-    tmp_path: Path,
-) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5\n",
-        status="success",
-        reason="FarmEcho recovered and completed 5/5",
-        config={
-            "workflow_task": "farm_echo_confirmed_retry",
-            "target_count": 5,
-            "confirmed_farm_echo_absorption_count": 5,
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "total_completed": 5,
-                "retry_completed": 5,
-                "recovery_attempts": 0,
-                "combat_rebind_attempts": 1,
-                "client_restart_triggered": False,
-                "retry_runs": 5,
-                "retry_limit": None,
-                "progress_driven_retries": True,
-                "recoveries": [],
-            },
-        },
-    )
-
-    facts = parse_run(result)
-    followup = [item.text for item in facts.followup]
-
-    assert (
-        "上游战斗劣化后Worker重绑定1次，已执行5次Worker重试"
-        "（有吸收进度不设总上限），任务已恢复"
-    ) in followup
-    assert "worker_retries=5 (progress-driven)" in facts.reason
-    assert all("5/3" not in text for text in followup)
-
-
-def test_progress_worker_boundary_is_preserved_after_success(tmp_path: Path) -> None:
-    result = _result(
-        tmp_path,
-        "RuntimeError: confirmed retry exhausted its bounded combat attempts: "
-        "absorbed=3/5\nHOST_FARM_ECHO_ABSORPTION_CONFIRMED 2/2\n",
-        status="success",
-        reason="FarmEcho recovered and completed 5/5",
-        config={
-            "workflow_task": "farm_echo_confirmed_retry",
-            "target_count": 5,
-            "confirmed_farm_echo_absorption_count": 5,
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "initial_completed": 3,
-                "retry_completed": 2,
-                "total_completed": 5,
-                "recovery_attempts": 0,
-                "combat_rebind_attempts": 0,
-                "client_restart_triggered": False,
-                "retry_runs": 1,
-                "retry_limit": None,
-                "progress_driven_retries": True,
-                "recoveries": [],
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    assert any(
-        item.text
-        == "首个Worker达到尝试上限时确认3/5，后续Worker续跑1次并补吸收2次，"
-        "累计5/5（有吸收进度不设总上限），任务已恢复"
-        for item in facts.followup
-    )
-    assert not facts.issues
-
-
-def test_daily_failure_does_not_reclassify_completed_farm_echo_recovery(
-    tmp_path: Path,
-) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n"
-        "DailyTask:Daily Task exception stopped\n",
-        status="failed",
-        reason="DailyTask failed: OK-WW failure marker: Daily Task exception stopped",
-        config={
-            "boss_challenge_index": 2,
-            "workflow_task": "daily",
-            "confirmed_farm_echo_absorption_count": 5,
-            "farm_echo_absorption_target": 5,
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "initial_completed": 4,
-                "retry_completed": 1,
-                "total_completed": 5,
-                "retry_runs": 1,
-                "progress_driven_retries": True,
-            },
-            "daily_sequence": {
-                "boss_status": "success",
-                "daily_status": "failed",
-                "settled": True,
-            },
-        },
-    )
-
-    facts = parse_run(result)
-    followup = [item.text for item in facts.followup]
-    issues = [item.text for item in facts.issues]
-
-    assert facts.overall_status == "partial_success"
-    assert (
-        "首个Worker结束时确认4/5，后续Worker续跑1次并补吸收1次，"
-        "累计5/5（有吸收进度不设总上限），任务已恢复"
-    ) in followup
-    assert any("DailyTask failed" in text for text in issues)
-    assert all("仍未恢复" not in text for text in issues)
-
-
-def test_recovery_total_proves_farm_echo_completion_despite_later_failure(
-    tmp_path: Path,
-) -> None:
-    result = _result(
-        tmp_path,
-        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
-        status="failed",
-        reason="later daily phase failed",
-        config={
-            "workflow_task": "daily",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "initial_completed": 4,
-                "retry_completed": 1,
-                "total_completed": 5,
-                "retry_runs": 1,
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    assert any("任务已恢复" in item.text for item in facts.followup)
-    assert all("仍未恢复" not in item.text for item in facts.issues)
-    assert any("later daily phase failed" in item.text for item in facts.issues)
-
-
-def test_entry_retry_does_not_claim_a_death_recovery(tmp_path: Path) -> None:
-    text = (
-        "HOST_FARM_ECHO_BOSS_PAGE_RESELECTED\n"
-        "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5"
-    )
-    result = _result(
-        tmp_path,
-        text,
-        config={
-            "boss_challenge_index": 2,
-            "workflow_task": "daily",
-            "farm_echo_recovery": {
-                "triggered": True,
-                "target_count": 5,
-                "recovery_attempts": 0,
-                "entry_retry_attempts": 1,
-                "retry_completed": 5,
-                "total_completed": 5,
-            },
-        },
-    )
-
-    facts = parse_run(result)
-
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 5次",
-        "吸收声骸5次",
-    ]
-    assert all("倒地" not in item.text for item in facts.followup)
-
-
-def test_absorption_timeout_reports_partial_target(tmp_path: Path) -> None:
-    text = """
-FarmEchoTask:farm echo walk_find_echo True
-FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
-FarmEchoTask:farm echo walk_find_echo True
-"""
-    facts = parse_run(
-        _result(
-            tmp_path,
-            text,
-            status="failed",
-            reason="FarmEcho absorption target timed out after 3600 seconds",
-            config={
-                "boss_challenge_index": 2,
-                "workflow_task": "farm_echo_confirmed_retry",
-                "target_count": 5,
-                "confirmed_farm_echo_absorption_count": 2,
-            },
-        )
-    )
-
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 2次",
-        "吸收声骸2次",
-    ]
-    assert facts.issues[-1].text == "声骸吸收目标仅完成2/5次"
-
-
-def test_pre_daily_boss_failure_and_daily_success_is_partial(
-    tmp_path: Path,
-) -> None:
-    text = """
-FarmEchoTask:farm echo walk_find_echo True
-FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
-FarmEchoTask:farm echo walk_find_echo True
-FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)
-DailyTask:Daily Task Completed
-"""
-    facts = parse_run(
-        _result(
-            tmp_path,
-            text,
-            status="failed",
-            reason="pre-daily FarmEcho failed; DailyTask completed",
-            config={
-                "boss_challenge_index": 2,
-                "workflow_task": "daily",
-                "confirmed_farm_echo_absorption_count": 2,
-                "farm_echo_absorption_target": 5,
-                "daily_sequence": {
-                    "boss_status": "failed",
-                    "daily_status": "success",
-                    "settled": True,
+    @pytest.mark.parametrize(("logged", "structured"), [(2, 2), (1, 5)])
+    def test_structured_absorption_count_is_authoritative(
+        self, tmp_path: Path, logged: int, structured: int
+    ) -> None:
+        text = "FarmEchoTask:farm echo walk_find_echo True\n" * logged
+        facts = parse_run(
+            _result(
+                tmp_path,
+                text,
+                config={
+                    "boss_challenge_index": 2,
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "confirmed_farm_echo_absorption_count": structured,
                 },
-            },
+            )
         )
+
+        assert _lines(facts.boss) == [f"✅ 讨伐强敌第2项：吸收声骸 {structured} 次"]
+        assert _card(facts).startswith("✅ 鸣潮讨伐 全部完成")
+
+    def test_recovered_deaths_are_summarised_on_the_boss_line(self, tmp_path: Path) -> None:
+        text = (
+            "FarmEchoTask:farm echo walk_find_echo True\n"
+            "FarmEchoTask:left_click claim_cancel_button_hcenter_vcenter (769, 900)\n"
+        ) * 5
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "recovery_attempts": 2,
+            "retry_completed": 2,
+            "total_completed": 5,
+            "first_safe_recovery": True,
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                text,
+                config={"boss_challenge_index": 2, "farm_echo_recovery": recovery},
+            )
+        )
+
+        assert facts.overall_status == "completed"
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项：吸收声骸 5/5；途中倒地 2 次，已自动恢复"]
+
+    def test_realm_defeat_is_not_reported_as_a_death(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "recovery_attempts": 1,
+            "total_completed": 5,
+            "recoveries": [{"success": True, "realm_defeat": True}],
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
+                config={"boss_challenge_index": 2, "farm_echo_recovery": recovery},
+            )
+        )
+
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项：吸收声骸 5/5；途中团灭 1 次，已自动恢复"]
+
+    def test_unfinished_recovery_is_partial_and_explained(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "recovery_attempts": 2,
+            "total_completed": 0,
+            "first_safe_recovery": True,
+            "final_safe_recovery": True,
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED\n",
+                status="failed",
+                reason="FarmEcho recovery incomplete: absorbed 0/5; recoveries=2",
+                config={
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "farm_echo_recovery": recovery,
+                },
+            )
+        )
+
+        assert facts.overall_status == "partial"
+        assert _lines(facts.boss) == ["❌ 讨伐强敌：吸收声骸 0/5；途中倒地 2 次"]
+        assert facts.issues == ["讨伐自动恢复后仍没打完（吸收声骸 0/5）"]
+
+    def test_client_restart_is_not_counted_as_a_death(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 1,
+            "recovery_attempts": 2,
+            "total_completed": 0,
+            "recoveries": [
+                {"success": True, "realm_defeat": True, "kind": "death_recovery"},
+                {
+                    "success": True,
+                    "realm_defeat": False,
+                    "kind": "client_restart",
+                    "reason": "client restarted once to restore upstream combat",
+                },
+            ],
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
+                status="failed",
+                reason=(
+                    "FarmEcho recovery incomplete: absorbed 0/1; recoveries=2; "
+                    "retry=maximum retry count exhausted"
+                ),
+                config={
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "farm_echo_recovery": recovery,
+                },
+            )
+        )
+
+        assert _lines(facts.boss) == ["❌ 讨伐强敌：吸收声骸 0/1；途中团灭 1 次、重启游戏 1 次"]
+        assert facts.issues == ["讨伐自动恢复后仍没打完（吸收声骸 0/1）"]
+
+    def test_character_rebind_is_not_reported_as_a_death(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 1,
+            "total_completed": 0,
+            "recovery_attempts": 0,
+            "combat_rebind_attempts": 1,
+            "retry_runs": 1,
+            "retry_limit": 3,
+            "recoveries": [],
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "FarmEchoTask:could not find char 0 please check current char\n",
+                status="failed",
+                reason="FarmEcho recovery incomplete: absorbed 0/1; recoveries=0",
+                config={
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "target_count": 1,
+                    "confirmed_farm_echo_absorption_count": 0,
+                    "farm_echo_recovery": recovery,
+                },
+            )
+        )
+
+        assert _lines(facts.boss) == [
+            "❌ 讨伐强敌：吸收声骸 0/1；途中重新识别角色 1 次、续跑 1 次"
+        ]
+
+    def test_progress_driven_retries_show_no_false_cap(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "total_completed": 5,
+            "combat_rebind_attempts": 1,
+            "retry_runs": 5,
+            "retry_limit": None,
+            "progress_driven_retries": True,
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5\n",
+                config={
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "target_count": 5,
+                    "confirmed_farm_echo_absorption_count": 5,
+                    "farm_echo_recovery": recovery,
+                },
+            )
+        )
+
+        assert _lines(facts.boss) == [
+            "✅ 讨伐强敌：吸收声骸 5/5；途中重新识别角色 1 次、续跑 5 次，已自动恢复"
+        ]
+        assert facts.issues == []
+
+    def test_entry_retry_is_not_reported_as_a_death(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "recovery_attempts": 0,
+            "entry_retry_attempts": 1,
+            "total_completed": 5,
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_BOSS_PAGE_RESELECTED\nHOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5",
+                config={"boss_challenge_index": 2, "farm_echo_recovery": recovery},
+            )
+        )
+
+        assert _lines(facts.boss) == ["✅ 讨伐强敌第2项：吸收声骸 5/5"]
+
+    def test_daily_failure_keeps_a_completed_boss_phase(self, tmp_path: Path) -> None:
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "total_completed": 5,
+            "retry_runs": 1,
+            "progress_driven_retries": True,
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\nDailyTask:Daily Task exception stopped\n",
+                status="failed",
+                reason="DailyTask failed: OK-WW failure marker: Daily Task exception stopped",
+                config={
+                    "boss_challenge_index": 2,
+                    "workflow_task": "daily",
+                    "confirmed_farm_echo_absorption_count": 5,
+                    "farm_echo_absorption_target": 5,
+                    "farm_echo_recovery": recovery,
+                    "daily_sequence": {"boss_status": "success", "daily_status": "failed"},
+                },
+            )
+        )
+
+        assert facts.overall_status == "partial"
+        assert facts.issues == ["日常：OK-WW 日常任务异常中止"]
+        assert _card(facts).splitlines()[-2:] == [
+            "❌ 日常任务：没完成",
+            "✅ 讨伐强敌第2项：吸收声骸 5/5；途中续跑 1 次，已自动恢复",
+        ]
+
+    def test_recovery_total_proves_the_boss_target_despite_later_failure(
+        self, tmp_path: Path
+    ) -> None:
+        recovery = {"triggered": True, "target_count": 5, "total_completed": 5, "retry_runs": 1}
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
+                status="failed",
+                reason="later daily phase failed",
+                config={"workflow_task": "daily", "farm_echo_recovery": recovery},
+            )
+        )
+
+        assert facts.boss[0].mark == DONE
+        assert facts.issues == ["later daily phase failed"]
+        assert facts.overall_status == "partial"
+
+    def test_absorption_timeout_reports_the_partial_target(self, tmp_path: Path) -> None:
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "FarmEchoTask:farm echo walk_find_echo True\n" * 2,
+                status="failed",
+                reason="FarmEcho absorption target timed out after 3600 seconds",
+                config={
+                    "boss_challenge_index": 2,
+                    "workflow_task": "farm_echo_confirmed_retry",
+                    "target_count": 5,
+                    "confirmed_farm_echo_absorption_count": 2,
+                },
+            )
+        )
+
+        assert _lines(facts.boss) == ["⚠️ 讨伐强敌第2项：吸收声骸 2/5"]
+        assert facts.issues == ["讨伐超过 3600 秒还没打完"]
+
+
+class TestFailureReasons:
+    @pytest.mark.parametrize(
+        ("reason", "expected"),
+        [
+            (
+                "pre-daily FarmEcho failed: OK-WW initialized but did not hand off to "
+                "FarmEcho within 600 seconds; DailyTask failed: DailyTask skipped until "
+                "FarmEcho reaches 5/5",
+                [
+                    "讨伐：OK-WW 启动后 600 秒内没有开始讨伐",
+                    "日常：要等讨伐打到 5/5 才开始，本轮跳过",
+                ],
+            ),
+            (
+                "DailyTask failed: OK-WW failure marker: Daily Task exception stopped; "
+                "worker_retries=12 (progress-driven); combat_rebinds=0; client_restarts=1",
+                ["日常：OK-WW 日常任务异常中止"],
+            ),
+            (
+                "daily workflow exception: UU startup failed after 3 restart(s): focus_uu: "
+                r"UU window not detected within 30s; screenshot=D:\evidence\uu.png",
+                ["UU 加速器启动失败（重启 3 次后放弃）"],
+            ),
+            (
+                "OK-WW daily activity unverified: daily activity below threshold after "
+                "claim: points=60, target=100",
+                ["每日活跃度没达标（60/100）"],
+            ),
+            (
+                "daily workflow exception: needle dimension(s) exceed the haystack image",
+                ["脚本异常：needle dimension(s) exceed the haystack image"],
+            ),
+            ("x" * 100, ["x" * 80 + "…"]),
+        ],
     )
-
-    assert facts.overall_status == "partial_success"
-    assert [item.text for item in facts.followup] == [
-        "讨伐强敌第2项 2次",
-        "吸收声骸2次",
-    ]
-    assert [item.text for item in facts.issues] == [
-        "主流程失败：pre-daily FarmEcho failed; DailyTask completed",
-        "声骸吸收目标仅完成2/5次",
-    ]
+    def test_reasons_become_short_chinese_lines(self, reason: str, expected: list[str]) -> None:
+        assert explain_failure(reason) == expected
 
 
-def test_unknown_activity_task_is_reported_without_false_zero_upper_bound(
-    tmp_path: Path,
-) -> None:
-    text = """
-DailyTask:HOST_DAILY_ACTIVITY_PANEL {"labels": ["+100", "完成1个危行任务", "0/1"]}
-DailyTask:HOST_DAILY_ACTIVITY_CLAIM_UNVERIFIED {"points": 0, "target": 100, "reason": "not settled"}
-DailyTask:Daily Task exception stopped
+class TestRollup:
+    def test_same_day_daily_and_boss_runs_become_one_report(self, tmp_path: Path) -> None:
+        reports = tmp_path / "reports"
+        daily = _ok_result(
+            tmp_path,
+            run_id="20260809_132616",
+            workflow="daily",
+            status="success",
+            log_text=(
+                "TacetTask:start walk_to_treasure\n"
+                'DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED {"points": 140, "target": 100}\n'
+                "DailyTask:Daily Task Completed\n"
+            ),
+        )
+        _archive(reports, daily)
+        boss = _ok_result(
+            tmp_path,
+            run_id="20260809_170403_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+        )
+
+        with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+        ):
+            rolled_up = build_daily_rollup(boss, parse_run(boss))
+
+        assert rolled_up.overall_status == "completed"
+        assert _lines(rolled_up.daily) == [
+            "✅ 无音区：清剿 1 场，消耗 60 结晶波片",
+            "✅ 每日活跃度：140 点，奖励已领取",
+        ]
+        assert _lines(rolled_up.boss) == ["✅ 讨伐强敌第2项：吸收声骸 1 次"]
+        assert rolled_up.issues == []
+        assert rolled_up.sources == [daily.run_id, boss.run_id]
+
+    def test_latest_failed_boss_run_overrides_an_earlier_success(self, tmp_path: Path) -> None:
+        reports = tmp_path / "reports"
+        daily = _ok_result(
+            tmp_path,
+            run_id="20260811_053000_daily",
+            workflow="daily",
+            status="success",
+            log_text="DailyTask:Daily Task Completed\n",
+        )
+        earlier = _ok_result(
+            tmp_path,
+            run_id="20260811_060000_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 1/1\n",
+        )
+        _archive(reports, daily)
+        _archive(reports, earlier)
+        latest = _ok_result(
+            tmp_path,
+            run_id="20260811_120000_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="failed",
+            log_text="FarmEchoTask:HOST_FARM_ECHO_REALM_DEFEAT_CONFIRMED\n",
+            reason="confirmed retry returned early: absorbed=0/1",
+        )
+
+        with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+        ):
+            rolled_up = build_daily_rollup(latest, parse_run(latest))
+
+        assert rolled_up.overall_status == "partial"
+        assert _lines(rolled_up.boss) == ["❌ 讨伐强敌第2项：没完成"]
+        assert rolled_up.issues == ["OK-WW 讨伐提前结束（吸收声骸 0/1）"]
+        assert rolled_up.sources == [daily.run_id, latest.run_id]
+
+    @pytest.mark.parametrize("state", ["success", "failed"])
+    def test_daily_supplement_keeps_earlier_work_but_not_stale_activity(
+        self, tmp_path: Path, state: str
+    ) -> None:
+        earlier = _ok_result(
+            tmp_path,
+            run_id="20260912_083000",
+            workflow="daily",
+            status="success",
+            log_text="",
+        )
+        earlier_facts = RunFacts(
+            "completed",
+            "daily",
+            "completed",
+            60,
+            daily_ok=True,
+            boss_ok=True,
+            daily=[
+                ReportItem("tacet", DONE, "无音区：清剿 2 场"),
+                ReportItem("daily-activity", DONE, "旧的活跃度结果"),
+                ReportItem("battle-pass", DONE, "先约电台：已执行领取"),
+            ],
+            boss=[ReportItem("boss", DONE, "讨伐强敌第2项：吸收声骸 5/5")],
+        )
+        latest = _ok_result(
+            tmp_path,
+            run_id="20260912_092750",
+            workflow="daily",
+            status=state,
+            log_text="",
+        )
+        latest_facts = RunFacts(
+            "completed" if state == "success" else "failed",
+            "daily",
+            state,
+            60,
+            daily_ok=state == "success",
+            daily=[ReportItem("nightmare-nest", DONE, "梦魇巢穴：吸收声骸 4 次")],
+            issues=[] if state == "success" else ["本轮没确认活跃度"],
+        )
+
+        with patch(
+            "wuwa_auto.reporting.day_rollup._archived_candidates",
+            return_value=[_Candidate(earlier.run_id, earlier.finished_at, earlier_facts)],
+        ):
+            combined = build_daily_rollup(latest, latest_facts)
+
+        # 早先的成果保留，按游戏执行顺序排；旧的活跃度结果不再沿用。
+        assert [item.item_id for item in combined.daily] == [
+            "tacet",
+            "nightmare-nest",
+            "battle-pass",
+        ]
+        assert _lines(combined.boss) == ["✅ 讨伐强敌第2项：吸收声骸 5/5"]
+        assert combined.overall_status == ("completed" if state == "success" else "partial")
+        assert combined.issues == ([] if state == "success" else ["本轮没确认活跃度"])
+
+    def test_replaying_an_earlier_run_ignores_later_same_day_runs(self, tmp_path: Path) -> None:
+        reports = tmp_path / "reports"
+        early = _ok_result(
+            tmp_path,
+            run_id="20260912_053309",
+            workflow="daily",
+            status="success",
+            log_text="DailyTask:Daily Task Completed\n",
+        )
+        later = _ok_result(
+            tmp_path,
+            run_id="20260912_092750_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+        )
+        _archive(reports, early)
+        _archive(reports, later)
+        facts = parse_run(early)
+
+        with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+        ):
+            assert build_daily_rollup(early, facts) is facts
+
+    def test_standalone_boss_run_stays_a_phase_report(self, tmp_path: Path) -> None:
+        result = _ok_result(
+            tmp_path,
+            run_id="20260810_170403_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+        )
+        facts = parse_run(result)
+
+        with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", tmp_path / "reports"), patch(
+            "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+        ):
+            assert build_daily_rollup(result, facts) is facts
+
+
+class TestCard:
+    def test_failed_morning_leads_with_plain_reasons(self, tmp_path: Path) -> None:
+        facts = parse_run(
+            _result(
+                tmp_path,
+                "start_controller:started window size stable for 2s: 2560x1440\n",
+                status="failed",
+                reason=(
+                    "pre-daily FarmEcho failed: OK-WW initialized but did not hand off to "
+                    "FarmEcho within 600 seconds; DailyTask failed: DailyTask skipped "
+                    "until FarmEcho reaches 5/5"
+                ),
+                duration_seconds=601,
+                config={
+                    "boss_challenge_index": 3,
+                    "workflow_task": "daily",
+                    "confirmed_farm_echo_absorption_count": 0,
+                    "farm_echo_absorption_target": 5,
+                    "daily_sequence": {"boss_status": "failed", "daily_status": "failed"},
+                },
+            )
+        )
+
+        assert _card(facts) == "\n".join(
+            [
+                "❌ 鸣潮 失败 · 08-09 06:10",
+                "用时 10分钟",
+                "",
+                "**异常记录**",
+                "1. 讨伐：OK-WW 启动后 600 秒内没有开始讨伐",
+                "2. 日常：要等讨伐打到 5/5 才开始，本轮跳过",
+                "",
+                "**今日任务**",
+                "❌ 日常任务：没完成",
+                "❌ 讨伐强敌第3项：吸收声骸 0/5",
+            ]
+        )
+
+    def test_successful_day_is_a_short_checklist(self, tmp_path: Path) -> None:
+        text = """
+TacetTask:start walk_to_treasure
+TacetTask:start walk_to_treasure
+NightmareNestTask:Captured echo during combat, skipping search.
+NightmareNestTask:farm echo yolo find True
+NightmareNestTask:farm echo walk find true
+NightmareNestTask:farm echo yolo find True
+DailyTask:HOST_DAILY_ACTIVITY_CLAIM_VERIFIED {"points": 160, "target": 100}
+FarmEchoTask:HOST_FARM_ECHO_KILL_CONFIRMED 9/9
+FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5
 """
-    facts = parse_run(
-        _result(tmp_path, text, status="failed", reason="Daily Task exception stopped")
+        recovery = {
+            "triggered": True,
+            "target_count": 5,
+            "total_completed": 5,
+            "retry_runs": 3,
+            "recoveries": [
+                {"success": True, "realm_defeat": False},
+                {"success": True, "kind": "client_restart"},
+            ],
+        }
+        facts = parse_run(
+            _result(
+                tmp_path,
+                text,
+                reason="pre-daily FarmEcho and DailyTask completed",
+                duration_seconds=2760,
+                config={
+                    "boss_challenge_index": 2,
+                    "daily_farm_index": 2,
+                    "workflow_task": "daily",
+                    "confirmed_farm_echo_absorption_count": 5,
+                    "farm_echo_absorption_target": 5,
+                    "farm_echo_recovery": recovery,
+                    "daily_sequence": {"boss_status": "success", "daily_status": "success"},
+                },
+            ),
+            {"completed": True, "issues": []},
+            boss_names={2: "梦魇亚当·重锤"},
+        )
+
+        assert _card(facts) == "\n".join(
+            [
+                "✅ 鸣潮 全部完成 · 08-09 06:10",
+                "用时 46分钟",
+                "",
+                "**今日任务**",
+                "✅ 无音区第2项：清剿 2 场，消耗 120 结晶波片",
+                "✅ 梦魇巢穴：吸收声骸 4 次",
+                "✅ 每日活跃度：160 点，奖励已领取",
+                "✅ 讨伐强敌第2项（梦魇亚当·重锤）：吸收声骸 5/5，击败 9 次；"
+                "途中倒地 1 次、重启游戏 1 次、续跑 3 次，已自动恢复",
+            ]
+        )
+
+    def test_cleanup_problems_downgrade_a_clean_run(self, tmp_path: Path) -> None:
+        facts = parse_run(
+            _result(tmp_path, "DailyTask:Daily Task Completed\n"),
+            {"completed": False, "issues": ["鸣潮客户端或启动器进程未完全退出"]},
+        )
+
+        text = _card(facts)
+        assert text.startswith("⚠️ 鸣潮 部分完成")
+        assert "1. 鸣潮客户端或启动器进程未完全退出" in text
+
+
+def test_boss_names_come_from_user_markdown(tmp_path: Path) -> None:
+    path = tmp_path / "讨伐Boss.md"
+    path.write_text(
+        "<!-- - 讨伐强敌第9项：示例Boss -->\n"
+        "- 讨伐强敌第2项：梦魇亚当·重锤\n"
+        "- 讨伐强敌第3项：待填写\n",
+        encoding="utf-8",
     )
 
-    assert any(item.item_id == "daily-activity-unknown-unknown-1" for item in facts.issues)
-    assert all(item.item_id != "daily-activity-capability-gap" for item in facts.issues)
-    unknown = next(
-        item for item in facts.issues
-        if item.item_id == "daily-activity-unknown-unknown-1"
-    )
-    assert unknown.text.startswith("每日活跃任务未完成")
+    assert load_boss_names(path) == {2: "梦魇亚当·重锤"}
+    assert load_boss_names(tmp_path / "missing.md") == {}
+
+
+class TestService:
+    def test_report_run_sends_one_card_and_archives_facts(self, tmp_path: Path) -> None:
+        result = _ok_result(
+            tmp_path,
+            run_id="20260809_053000",
+            workflow="daily",
+            status="success",
+            log_text="TacetTask:start walk_to_treasure\nDailyTask:Daily Task Completed\n",
+        )
+        reports = tmp_path / "reports"
+        cleanup = SimpleNamespace(to_dict=lambda: {"completed": True, "issues": []})
+        with patch("wuwa_auto.reporting.service.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports
+        ), patch("wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"), patch(
+            "wuwa_auto.reporting.service.load_boss_names", return_value={}
+        ), patch(
+            "wuwa_auto.reporting.service.send_report_card", return_value=True
+        ) as send:
+            path = report_run(result, cleanup)
+
+        send.assert_called_once()
+        assert path.name == "20260809_053000.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["sent"] is True
+        assert data["report"]["title"] == "✅ 鸣潮 全部完成 · 08-09 05:30"
+        assert data["facts"]["daily"][0]["text"] == "无音区：清剿 1 场，消耗 60 结晶波片"
+
+    def test_same_day_rollup_gets_its_own_archive_name(self, tmp_path: Path) -> None:
+        reports = tmp_path / "reports"
+        daily = _ok_result(
+            tmp_path,
+            run_id="20260809_132616",
+            workflow="daily",
+            status="success",
+            log_text="DailyTask:Daily Task Completed\n",
+        )
+        _archive(reports, daily)
+        boss = _ok_result(
+            tmp_path,
+            run_id="20260809_170403_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+        )
+        with patch("wuwa_auto.reporting.service.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports
+        ), patch("wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"), patch(
+            "wuwa_auto.reporting.service.load_boss_names", return_value={}
+        ), patch("wuwa_auto.reporting.service.send_report_card") as send:
+            path = report_run(boss, allow_send=False)
+
+        send.assert_not_called()
+        assert path.name == f"{boss.run_id}_daily_rollup.preview.json"
+
+    def test_preview_rebuilds_the_card_with_archived_cleanup_without_sending(
+        self, tmp_path: Path
+    ) -> None:
+        reports = tmp_path / "reports"
+        result = _ok_result(
+            tmp_path,
+            run_id="20260925_054239",
+            workflow="weekly_garden",
+            status="success",
+            log_text="GardenTask:乐园任务完成, 已达到上限\n",
+        )
+        _archive(reports, result, cleanup={"completed": False, "issues": ["UU进程未完全退出"]})
+        with patch("wuwa_auto.reporting.service.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.service.RUNS_DIR", tmp_path / "runs"
+        ), patch("wuwa_auto.reporting.service.load_boss_names", return_value={}), patch(
+            "wuwa_auto.reporting.service.send_report_card"
+        ) as send:
+            path, text = preview_archived_run("latest")
+
+        send.assert_not_called()
+        assert path.name == "20260925_054239.preview.json"
+        assert text.startswith("⚠️ 鸣潮周常 部分完成")
+        assert "1. UU进程未完全退出" in text
+
+    def test_secrets_in_failure_reasons_never_reach_the_card_or_archive(
+        self, tmp_path: Path
+    ) -> None:
+        result = _ok_result(
+            tmp_path,
+            run_id="20260809_053000",
+            workflow="daily",
+            status="failed",
+            log_text="",
+            reason="daily workflow exception: webhook refused token=SUPERSECRET123",
+        )
+        with patch("wuwa_auto.reporting.service.REPORTS_DIR", tmp_path / "reports"), patch(
+            "wuwa_auto.reporting.day_rollup.REPORTS_DIR", tmp_path / "reports"
+        ), patch("wuwa_auto.reporting.service.load_boss_names", return_value={}), patch(
+            "wuwa_auto.reporting.service.send_report_card", return_value=False
+        ):
+            path = report_run(result)
+
+        assert "SUPERSECRET123" not in path.read_text(encoding="utf-8")
+
+    def test_version_day_card_explains_the_evening_rerun(self, tmp_path: Path) -> None:
+        outcome = SimpleNamespace(
+            launcher_actions=("update_waiting", "update_downloading"),
+            evidence_paths=(),
+        )
+        with patch("wuwa_auto.reporting.service.REPORTS_DIR", tmp_path), patch(
+            "wuwa_auto.reporting.service.send_report_card"
+        ) as send:
+            path = report_version_day_deferred(
+                outcome, datetime(2026, 9, 30, 20, 0), allow_send=False
+            )
+
+        send.assert_not_called()
+        text = card_text(json.loads(path.read_text(encoding="utf-8"))["feishu_card"])
+        assert text.startswith("🕒 鸣潮 版本更新，日常改到 20:00")
+        assert "⏸️ 日常任务：客户端已更新到新版本，09-30 20:00 自动重跑" in text
+        assert "update_waiting" not in text

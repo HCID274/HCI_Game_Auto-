@@ -14,8 +14,8 @@ from wuwa_auto.daily import (
     run_daily_resume_workflow,
     run_weekly_garden_workflow,
 )
-from wuwa_auto.okww.runner import OkRunResult, preflight_daily_task, run_daily_task
-from wuwa_auto.settings import LOGS_DIR, RUNS_DIR
+from wuwa_auto.okww.runner import preflight_daily_task, run_daily_task
+from wuwa_auto.settings import LOGS_DIR
 from wuwa_auto.uu.service import execute_action
 from wuwa_auto.windows.elevation import relaunch_cli_elevated
 
@@ -67,7 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
     client = commands.add_parser("client", help="inspect or prepare official launcher")
     client.add_argument("action", choices=["prepare", "stop-launcher"])
 
-    report = commands.add_parser("report", help="rebuild a local report preview")
+    report = commands.add_parser(
+        "report", help="rebuild an archived run's card as a local preview (never sends)"
+    )
     report.add_argument(
         "run_id",
         nargs="?",
@@ -225,23 +227,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "report":
-        from wuwa_auto.reporting.service import report_run
+        from wuwa_auto.reporting.service import preview_archived_run
 
-        if args.run_id == "latest":
-            candidates = sorted(
-                path for path in RUNS_DIR.iterdir()
-                if path.is_dir() and (path / "result.json").is_file()
-            )
-            if not candidates:
-                raise SystemExit("no archived Wuwa run was found")
-            run_dir = candidates[-1]
-        else:
-            run_dir = RUNS_DIR / args.run_id
-        result_path = run_dir / "result.json"
-        if not result_path.is_file():
-            raise SystemExit(f"run result not found: {result_path}")
-        result = OkRunResult(**json.loads(result_path.read_text(encoding="utf-8")))
-        path = report_run(result, allow_send=False)
-        logging.getLogger(__name__).info("report preview written: %s", path)
+        path, text = preview_archived_run(args.run_id)
+        print(text)
+        print(f"\npreview written: {path}")
         return 0
     raise SystemExit(f"unsupported command: {args.command}")

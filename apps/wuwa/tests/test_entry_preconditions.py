@@ -11,7 +11,7 @@ from wuwa_auto.okww.logs import (
 )
 from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
 from wuwa_auto.okww.runner import OkRunResult
-from wuwa_auto.reporting.parser import parse_run
+from wuwa_auto.reporting.parser import WORLD_TEAM_BLOCKED, parse_run
 
 
 BLOCKED = (
@@ -55,11 +55,11 @@ def test_blocked_startup_preserves_evidence_without_input_or_retry(tmp_path, mon
     assert fixed.config["farm_echo_world_team_blocked"] is True
     assert "farm_echo_world_team_blocked" not in result.config
     assert (tmp_path / "result.json").is_file()
-    assert parse_run(fixed).reason == WORLD_TEAM_BLOCKED_REASON
-    # 历史日志重放也能正确说明问题；旧错误不得覆盖成功状态。
-    assert parse_run(result).reason == WORLD_TEAM_BLOCKED_REASON
+    assert parse_run(fixed).issues[0] == WORLD_TEAM_BLOCKED
+    # 历史日志重放也能正确说明问题；成功的运行不能被旧错误说明污染。
+    assert parse_run(result).issues[0] == WORLD_TEAM_BLOCKED
     successful = replace(result, status="success", reason="completed")
-    assert parse_run(successful).reason == "completed"
+    assert WORLD_TEAM_BLOCKED not in parse_run(successful).issues
     assert maybe_recover_farm_echo_death(successful) is successful
 
 

@@ -1,21 +1,14 @@
-from wuwa_auto.integrations.feishu import build_report_card
-from wuwa_auto.reporting.models import NarrativeReport
+from unittest.mock import patch
+
+from wuwa_auto.integrations.feishu import send_report_card
 
 
-def test_card_omits_empty_weekly_and_never_creates_mail_section() -> None:
-    card = build_report_card(
-        title="✅ 鸣潮完成",
-        template="green",
-        narrative=NarrativeReport(
-            summary="鸣潮日常完成",
-            daily=["先约电台：已执行奖励领取操作"],
-            weekly=[],
-            followup=["讨伐强敌第2项 5次"],
-            issues=[],
-        ),
-    )
-    rendered = str(card)
-    assert "'content': '**日常**" in rendered
-    assert "'content': '**后续事件**" in rendered
-    assert "**周常**" not in rendered
-    assert "邮件" not in rendered
+def test_real_sending_stays_off_until_explicitly_enabled() -> None:
+    secrets = {"WUWA_FEISHU_WEBHOOK_URL": "https://example.invalid/hook"}
+    with patch(
+        "wuwa_auto.integrations.feishu.get_secret",
+        side_effect=lambda name: secrets.get(name, ""),
+    ), patch("wuwa_auto.integrations.feishu.send_signed_payload") as send:
+        assert send_report_card({"msg_type": "interactive"}) is False
+
+    send.assert_not_called()

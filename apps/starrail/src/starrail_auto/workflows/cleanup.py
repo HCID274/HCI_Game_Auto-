@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psutil
 
-from starrail_auto.integrations.feishu import notify_starrail_failure
+from starrail_auto.reporting.service import send_short_report
 from starrail_auto.settings import LOGS_DIR
 from starrail_auto.uu.processes import kill_uu
 from starrail_auto.uu.service import stop_uu_acceleration
@@ -126,7 +126,7 @@ def execute_cleanup(delay: int = 0, log_file: Path | None = None) -> int:
     _setup_logging(log_file)
     exit_code = run(delay=delay)
     if exit_code == EXIT_PROCESS_CLOSE_FAILED:
-        notify_starrail_failure("清理", 0)
+        send_short_report(game="星铁收尾", problems=["游戏或三月七助手没能关闭"])
     elif exit_code == EXIT_UU_DISCONNECT_FAILED:
-        notify_starrail_failure("UU清理", 0)
+        send_short_report(game="星铁收尾", problems=["UU 加速器进程没能退出"])
     return exit_code

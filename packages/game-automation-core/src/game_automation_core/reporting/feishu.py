@@ -93,3 +93,16 @@ def build_sectioned_card(
             "elements": elements,
         },
     }
+
+
+def card_text(payload: dict[str, object]) -> str:
+    """Render a card as plain text for CLI previews and logs."""
+
+    card = payload["card"]
+    lines = [card["header"]["title"]["content"]]
+    for element in card["elements"]:
+        if element.get("tag") == "hr":
+            lines.append("")
+        else:
+            lines.append(element["text"]["content"])
+    return "\n".join(lines)

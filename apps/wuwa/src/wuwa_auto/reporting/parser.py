@@ -1,12 +1,17 @@
-"""Extract only reportable facts from one OK-WW current-run log slice."""
+"""把一次 OK-WW 运行的日志切片和结构化结果解析成任务清单。
+
+每个任务一个函数，只看本轮日志切片和 ``result.config``，不读其他运行的日志；
+同一天多次运行的合并在 ``day_rollup`` 里做。只写本轮真正执行过的任务。
+"""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from game_automation_core.reporting.agent import build_evidence_bundle
+from game_automation_core.reporting.report import DONE, FAILED, WARN
 
 from wuwa_auto.okww.daily_activity import (
     parse_activity_marker,
@@ -14,560 +19,317 @@ from wuwa_auto.okww.daily_activity import (
 )
 from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.logs import (
-    WORLD_TEAM_BLOCKED_REASON,
     count_farm_echo_absorptions,
     count_farm_echo_kill_confirmations,
     is_farm_echo_world_team_blocked,
 )
 from wuwa_auto.reporting.models import ReportItem, RunFacts
-from wuwa_auto.reporting.noise import known_upstream_noise_lines
-from wuwa_auto.reporting.user_context import load_reporting_context
+from wuwa_auto.reporting.reasons import explain_failure
 
+FARM_ECHO_WORKFLOWS = frozenset({"farm_echo", "farm_echo_confirmed_retry"})
+# 日常任务行按游戏里的执行顺序排列；同日合并后也按这个顺序。
+DAILY_ITEM_ORDER = ("tacet", "nightmare-nest", "daily-activity", "battle-pass")
 DAILY_POINTS = re.compile(r"total daily points (?P<points>\d+)")
+HOST_CLAIM_ACTION = re.compile(r'HOST_DAILY_ACTIVITY_CLAIM_ACTION .*"host_clicks":\s*[1-9]')
 BOSS_TELEPORT = re.compile(r"Teleport to Boss Boss Challenge (?P<index>\d+)")
-WUWA_AGENT_EVIDENCE_MAX_CHARS = 64_000
-WUWA_AGENT_EVIDENCE_MAX_LINES = 720
+# OCR 面板标签会把进度和档位数字粘在任务名后面，例如“击败1次怒涛级敌人0/1”。
+PANEL_PROGRESS_SUFFIX = re.compile(r"\s*\d+\s*/\s*\d+.*$")
+NIGHTMARE_ECHO_MARKERS = (
+    "NightmareNestTask:Captured echo during combat, skipping search.",
+    "NightmareNestTask:farm echo yolo find True",
+    "NightmareNestTask:farm echo walk find true",
+)
+# OK-WW v3.5.18 每次领取无音区奖励固定消耗 60 结晶波片；日志里的 current stamina
+# 是“必须用掉的预算”，可能为负，不能拿来相减。
+TACET_WAVEPLATES = 60
+ACTIVITY_TARGET = 100
+WORLD_TEAM_BLOCKED = (
+    "讨伐没进入战斗：游戏可能停在剧情、特殊模式或单人队伍里，需要手动切回常规队伍"
+)
 
 
-def build_wuwa_agent_evidence(
-    log_text: str,
-    *,
-    source: str = "",
-    ignored_line_numbers: set[int] | frozenset[int] = frozenset(),
-) -> dict[str, Any]:
-    """Use a large but still redacted and bounded DeepSeek evidence window."""
-    return build_evidence_bundle(
-        game="wuwa",
-        log_text=log_text,
-        source=source,
-        max_chars=WUWA_AGENT_EVIDENCE_MAX_CHARS,
-        max_lines=WUWA_AGENT_EVIDENCE_MAX_LINES,
-        ignored_line_numbers=ignored_line_numbers,
+def _phase_ok(result: Any, phase: str) -> bool | None:
+    """读取讨伐（boss）或日常（daily）阶段是否成功；本轮没跑该阶段返回 None。"""
+
+    sequence = result.config.get("daily_sequence")
+    if isinstance(sequence, dict) and sequence.get(f"{phase}_status"):
+        return sequence[f"{phase}_status"] == "success"
+    workflow = str(result.config.get("workflow_task", "daily"))
+    if (phase == "daily" and workflow == "daily") or (
+        phase == "boss" and workflow in FARM_ECHO_WORKFLOWS
+    ):
+        return result.status == "success"
+    return None
+
+
+def _tacet(text: str, config: Mapping[str, Any]) -> list[ReportItem]:
+    runs = text.count("TacetTask:start walk_to_treasure") - text.count(
+        "TacetTask:is not claim treasure, restart challenge"
+    )
+    if runs <= 0:
+        return []
+    index = config.get("daily_farm_index")
+    label = f"无音区第{index}项" if index else "无音区"
+    return [
+        ReportItem(
+            "tacet",
+            DONE,
+            f"{label}：清剿 {runs} 场，消耗 {runs * TACET_WAVEPLATES} 结晶波片",
+        )
+    ]
+
+
+def _nightmare(text: str) -> list[ReportItem]:
+    echoes = sum(text.count(marker) for marker in NIGHTMARE_ECHO_MARKERS)
+    skipped = text.count("HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED") or text.count(
+        "NightmareNestTask:nightmare nest unreachable, skip this run"
+    )
+    failed = "NightmareNestTask Failed" in text
+    if not (echoes or skipped or failed):
+        return []
+    parts = [f"吸收声骸 {echoes} 次"] if echoes else []
+    if skipped:
+        parts.append(f"{skipped} 处没传送过去，已跳过")
+    if failed:
+        parts.append("中途出错")
+    mark = DONE if not (skipped or failed) else WARN if echoes else FAILED
+    return [ReportItem("nightmare-nest", mark, f"梦魇巢穴：{'，'.join(parts)}")]
+
+
+def _panel_label(task: Mapping[str, Any]) -> str:
+    raw = str(task.get("label") or task.get("key") or "未知任务")
+    return PANEL_PROGRESS_SUFFIX.sub("", raw).strip(" :：") or raw
+
+
+def _activity(text: str) -> tuple[list[ReportItem], list[str]]:
+    """每日活跃度一行；没拿满时把面板上还差的任务列进异常。"""
+
+    marker = parse_activity_marker(text)
+    panel = parse_activity_panel_marker(text)
+    comparison = (
+        compare_activity_panel(panel.get("labels") or [], log_text=text) if panel else {}
+    )
+    verified = marker.get("state") == "verified"
+    points = marker.get("points")
+    claimed = "claim daily reward via  coordinate" in text or bool(
+        HOST_CLAIM_ACTION.search(text)
     )
 
+    items: list[ReportItem] = []
+    if verified:
+        detail = f"{points} 点，" if points is not None else ""
+        items.append(ReportItem("daily-activity", DONE, f"每日活跃度：{detail}奖励已领取"))
+    elif claimed:
+        if points is None and (matches := DAILY_POINTS.findall(text)):
+            points = int(matches[-1])
+        # 领取前读到的低分可能是旧值，只有已达标的分数才值得写出来。
+        detail = (
+            f"{points} 点，点了领取但没确认到账"
+            if points is not None and points >= ACTIVITY_TARGET
+            else "点了领取，但没读到最终活跃度"
+        )
+        items.append(ReportItem("daily-activity", WARN, f"每日活跃度：{detail}"))
+    else:
+        progress = points if points is not None else comparison.get("current_points_from_tasks")
+        if progress is not None and progress < ACTIVITY_TARGET:
+            items.append(
+                ReportItem("daily-activity", FAILED, f"每日活跃度：{progress}/100，没达标")
+            )
+        elif progress is not None:
+            items.append(
+                ReportItem("daily-activity", WARN, f"每日活跃度：{progress} 点，奖励没确认领取")
+            )
+        elif marker.get("state") == "unverified":
+            items.append(ReportItem("daily-activity", WARN, "每日活跃度：没确认"))
 
-def _battle_pass_claim_branch_completed(text: str) -> bool:
+    issues: list[str] = []
+    # 达标和领完奖励是两件事：领取后总分已确认达标时，面板上剩下的可选任务不算缺口。
+    total_reached = (
+        isinstance(points, int)
+        and points >= ACTIVITY_TARGET
+        and panel.get("active_panel_confirmed") is True
+        and str(marker.get("source", "")).startswith("post_claim_total_region")
+    )
+    if comparison and not verified and not total_reached:
+        tasks = [task for task in comparison.get("tasks") or [] if isinstance(task, dict)]
+        missing = [
+            f"{_panel_label(task)}(+{int(task.get('points') or 0)})"
+            for task in tasks
+            if not task.get("completed")
+        ]
+        if missing:
+            issues.append(f"每日活跃度还差：{'、'.join(missing)}")
+        # 面板上有没识别的任务时，不能只凭已知部分推出“最多只能到多少分”。
+        if (
+            tasks
+            and comparison.get("can_reach_target_now") is False
+            and not comparison.get("unknown_tasks")
+        ):
+            issues.append(
+                "按脚本现有功能，每日活跃度最多只能做到 "
+                f"{comparison.get('reachable_now_points')}/100"
+            )
+    return items, issues
+
+
+def _battle_pass(text: str) -> list[ReportItem]:
+    """先约电台只在真正进入领取分支时汇报。"""
+
     start = text.rfind("DailyTask:battle pass")
     if start < 0:
-        return False
+        return []
     tail = text[start:]
     boundaries = [
-        marker for marker in (
+        position
+        for position in (
             tail.find("current task check weekly garden"),
             tail.find("Daily task completed, start teleport"),
             tail.find("Daily Task Completed"),
         )
-        if marker > 0
+        if position > 0
     ]
-    if not boundaries:
-        return False
-    branch = tail[:min(boundaries)]
-    return "can not battle pass" not in branch
+    if not boundaries or "can not battle pass" in tail[: min(boundaries)]:
+        return []
+    return [ReportItem("battle-pass", DONE, "先约电台：已执行领取")]
 
 
-def _format_duration(seconds: int) -> str:
-    minutes, remainder = divmod(max(0, seconds), 60)
-    if minutes:
-        return f"{minutes}分{remainder}秒"
-    return f"{remainder}秒"
+def _garden(text: str) -> list[ReportItem]:
+    if "乐园任务完成, 已达到上限" in text:
+        return [ReportItem("weekly-garden", DONE, "幻梦游园：本周目标已完成")]
+    if "GardenTask Failed" in text:
+        return [ReportItem("weekly-garden", FAILED, "幻梦游园：执行出错")]
+    if "weekly garden not completed, run GardenTask" in text or "GardenTask:garden end" in text:
+        return [ReportItem("weekly-garden", WARN, "幻梦游园：本轮没确认完成")]
+    return []
 
 
-def _normalized_result_reason(result: Any) -> str:
-    """Keep legacy composite reasons aligned with structured recovery facts."""
-    reason = str(result.reason)
-    recovery = result.config.get("farm_echo_recovery") or {}
-    history = recovery.get("recoveries") or []
-    if history and "recoveries=" in reason:
-        game_recoveries = sum(
-            1
-            for item in history
-            if isinstance(item, dict)
-            and not (
-                item.get("kind") == "client_restart"
-                or "client restart" in str(item.get("reason", "")).casefold()
-            )
-        )
-        reason = re.sub(
-            r"recoveries=\d+",
-            f"recoveries={game_recoveries}",
-            reason,
-        )
-    if recovery.get("triggered") and "worker_retries=" not in reason:
-        retry_runs = int(recovery.get("retry_runs") or 0)
-        if recovery.get("progress_driven_retries") is True:
-            retry_text = f"{retry_runs} (progress-driven)"
-        else:
-            retry_text = f"{retry_runs}/{int(recovery.get('retry_limit') or 3)}"
-        reason += (
-            f"; worker_retries={retry_text}"
-            f"; combat_rebinds={int(recovery.get('combat_rebind_attempts') or 0)}"
-            "; client_restarts="
-            f"{int(bool(recovery.get('client_restart_triggered')))}"
-        )
-    return reason
+def _boss_label(text: str, config: Mapping[str, Any], boss_names: Mapping[int, str]) -> str:
+    index = config.get("boss_challenge_index")
+    if index is None:
+        index = config.get("which_boss_challenge")
+    if index is None and (teleports := BOSS_TELEPORT.findall(text)):
+        # OK-WW 日志里是从 0 开始的列表下标，游戏界面从 1 开始数。
+        index = int(teleports[-1]) + 1
+    if not index:
+        return "讨伐强敌"
+    name = boss_names.get(int(index))
+    return f"讨伐强敌第{index}项" + (f"（{name}）" if name else "")
 
 
-def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
-    """Parse a run result without consulting logs from any earlier run."""
+def _is_client_restart(item: Mapping[str, Any]) -> bool:
+    return (
+        item.get("kind") == "client_restart"
+        or "client restart" in str(item.get("reason", "")).casefold()
+    )
+
+
+def _recovery_events(recovery: Mapping[str, Any]) -> list[str]:
+    history = [item for item in recovery.get("recoveries") or [] if isinstance(item, dict)]
+    in_game = [item for item in history if not _is_client_restart(item)]
+    defeats = sum(1 for item in in_game if item.get("realm_defeat") is True)
+    # 旧结果没有逐次记录，只有恢复总次数，全部按中途倒地算。
+    deaths = len(in_game) - defeats if history else int(recovery.get("recovery_attempts") or 0)
+    restarts = max(
+        len(history) - len(in_game),
+        int(bool(recovery.get("client_restart_triggered"))),
+    )
+    counts = (
+        ("团灭", defeats),
+        ("倒地", deaths),
+        ("重启游戏", restarts),
+        ("重新识别角色", int(recovery.get("combat_rebind_attempts") or 0)),
+        ("续跑", int(recovery.get("retry_runs") or 0)),
+    )
+    return [f"{label} {count} 次" for label, count in counts if count]
+
+
+def _boss(
+    text: str,
+    config: Mapping[str, Any],
+    *,
+    boss_ok: bool | None,
+    boss_names: Mapping[int, str],
+) -> list[ReportItem]:
+    """讨伐强敌一行：吸收声骸进度为准，击败次数和自动恢复经过写在后面。"""
+
+    recovery = config.get("farm_echo_recovery") or {}
+    kills = count_farm_echo_kill_confirmations(text)
+    absorbed = count_farm_echo_absorptions(text)
+    structured = config.get("confirmed_farm_echo_absorption_count")
+    if structured is not None:
+        # 确认重试吸收完上一只的声骸才开下一场，结构化吸收数同时证明了击败次数。
+        absorbed = int(structured)
+        kills = max(kills, absorbed)
+    if recovery.get("triggered"):
+        total = int(recovery.get("total_completed") or 0)
+        absorbed = total or absorbed
+        kills = max(kills, total)
+    target = config.get("farm_echo_absorption_target")
+    if target is None and config.get("workflow_task") == "farm_echo_confirmed_retry":
+        target = config.get("target_count")
+    if target is None and recovery.get("triggered"):
+        target = recovery.get("target_count")
+    target = int(target or 0)
+    if not (kills or absorbed or target or boss_ok is not None):
+        return []
+
+    done = absorbed >= target if target else boss_ok is not False and (kills or absorbed) > 0
+    parts = []
+    if target:
+        parts.append(f"吸收声骸 {absorbed}/{target}")
+    elif absorbed:
+        parts.append(f"吸收声骸 {absorbed} 次")
+    if kills > absorbed:
+        parts.append(f"击败 {kills} 次")
+    line = f"{_boss_label(text, config, boss_names)}：{'，'.join(parts) or '没完成'}"
+    events = _recovery_events(recovery) if recovery.get("triggered") else []
+    if events:
+        line += f"；途中{'、'.join(events)}" + ("，已自动恢复" if done else "")
+    mark = DONE if done else WARN if kills or absorbed else FAILED
+    return [ReportItem("boss", mark, line)]
+
+
+def parse_run(
+    result: Any,
+    cleanup: Mapping[str, Any] | None = None,
+    *,
+    boss_names: Mapping[int, str] | None = None,
+) -> RunFacts:
+    """解析一次运行；``cleanup`` 是收尾结果的字典形式。"""
+
     path = Path(result.log_slice_path)
     text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-    cleanup_data = cleanup.to_dict() if cleanup is not None else {}
-    issues: list[ReportItem] = []
-    result_reason = _normalized_result_reason(result)
-    if result.status != "success" and (
-        result.config.get("farm_echo_world_team_blocked")
-        or is_farm_echo_world_team_blocked(text)
-    ):
-        result_reason = WORLD_TEAM_BLOCKED_REASON
+    config = result.config
+    daily_ok = _phase_ok(result, "daily")
+    boss_ok = _phase_ok(result, "boss")
+    activity, issues = _activity(text)
 
-    status = "completed" if result.status == "success" else "failed"
-    if result.status != "success":
-        issues.append(ReportItem("run-failure", f"主流程失败：{result_reason}"))
-
-    daily: list[ReportItem] = []
-    daily_activity = parse_activity_marker(text)
-    panel = parse_activity_panel_marker(text)
-    if panel:
-        labels = panel.get("labels") or []
-        panel["comparison"] = compare_activity_panel(labels, log_text=text)
-        daily_activity["panel"] = panel
-    if daily_activity.get("state") == "unverified":
-        reason = str(daily_activity.get("reason") or "状态未确认")
-        issues.append(
-            ReportItem(
-                "daily-activity-unverified",
-                f"每日活跃度奖励未确认：{reason}",
-            )
-        )
-    comparison = panel.get("comparison") if panel else None
-    if isinstance(comparison, dict):
-        tasks = comparison.get("tasks") or []
-        observed_points = daily_activity.get("points")
-        if observed_points is None:
-            observed_points = comparison.get("current_points_from_tasks")
-        if observed_points is not None and daily_activity.get("state") != "verified":
-            daily.append(
-                ReportItem(
-                    "daily-activity-progress",
-                    f"每日活跃度当前{observed_points}/{comparison.get('target', 100)}，仅记录取证结果",
-                )
-            )
-        # 达标和领完奖励是两个事实。总分已达标时，不能用领取后剩下的
-        # 可选任务反推“最多只能到 0 分”；奖励未确认的异常仍在上面保留。
-        activity_verified = daily_activity.get("state") == "verified"
-        total_points = daily_activity.get("points")
-        total_reached = (
-            isinstance(total_points, int)
-            and total_points >= 100
-            and panel.get("active_panel_confirmed") is True
-            and str(daily_activity.get("source", "")).startswith("post_claim_total_region")
-        )
-        if not activity_verified and not total_reached:
-            for task in tasks:
-                if not isinstance(task, dict) or task.get("completed"):
-                    continue
-                key = str(task.get("key") or "task")
-                points_value = int(task.get("points") or 0)
-                label = str(task.get("label") or key)
-                state = str(task.get("state") or "unknown")
-                reason = str(task.get("reason") or "")
-                if state == "unsupported":
-                    issues.append(
-                        ReportItem(
-                            f"daily-activity-unsupported-{key}",
-                            f"每日活跃任务未完成：{label}(+{points_value})；{reason}",
-                        )
-                    )
-                elif state == "unavailable":
-                    issues.append(
-                        ReportItem(
-                            f"daily-activity-unavailable-{key}",
-                            f"每日活跃任务未完成：{label}(+{points_value})；{reason}",
-                        )
-                    )
-                elif state == "unknown":
-                    issues.append(
-                        ReportItem(
-                            f"daily-activity-unknown-{key}",
-                            f"每日活跃任务未完成：{label}(+{points_value})；"
-                            "本地能力映射未覆盖，暂不判定可达上限",
-                        )
-                    )
-            # An unknown visible objective makes a global upper-bound claim
-            # unsound; report the objective itself instead of saying the
-            # known subset can reach only 0/100.
-            if (
-                tasks
-                and comparison.get("can_reach_target_now") is False
-                and not comparison.get("unknown_tasks")
-            ):
-                reachable = comparison.get("reachable_now_points")
-                issues.append(
-                    ReportItem(
-                        "daily-activity-capability-gap",
-                        f"按本次面板与日志，现有可用 OK-WW 入口最多可达{reachable}/100；"
-                        "剩余任务中存在上游未提供或本次资源不可用的项目",
-                    )
-                )
-    tacet_attempts = text.count("TacetTask:start walk_to_treasure")
-    tacet_unclaimed = text.count("TacetTask:is not claim treasure, restart challenge")
-    tacet_runs = max(0, tacet_attempts - tacet_unclaimed)
-    if tacet_runs:
-        index = result.config.get("daily_farm_index")
-        label = f"无音区第{index}项" if index else "无音区"
-        # OK-WW v3.5.18 fixes one Tacet claim at 60 waveplates. Its
-        # ``current stamina`` value is a must-use budget that may become
-        # negative, not the final in-game balance, so subtraction is unsafe.
-        details = f"{label}清剿{tacet_runs}场，消耗{tacet_runs * 60}结晶波片"
-        daily.append(ReportItem("tacet-suppression", details))
-
-    points = list(DAILY_POINTS.finditer(text))
-    claim_action = "claim daily reward via  coordinate" in text or bool(
-        re.search(r"HOST_DAILY_ACTIVITY_CLAIM_ACTION .*\"host_clicks\":\s*[1-9]", text)
-    )
-    if daily_activity.get("state") == "verified" and not claim_action:
-        verified_points = daily_activity.get("points")
-        daily.append(
-            ReportItem(
-                "daily-activity-verified",
-                f"每日活跃度已确认达到100（当前{verified_points}点，奖励状态已结算）"
-                if verified_points is not None
-                else "每日活跃度已确认达到100，奖励状态已结算",
-            )
-        )
-    if claim_action:
-        detected_points = daily_activity.get("points")
-        if detected_points is None and points:
-            detected_points = int(points[-1].group("points"))
-        if daily_activity.get("state") == "verified":
-            suffix = ""
-            if detected_points is not None:
-                suffix = f"（活跃度{detected_points}点，已确认100%）"
-            daily.append(
-                ReportItem(
-                    "daily-activity-reward",
-                    f"领取每日活跃度奖励{suffix}",
-                )
-            )
+    if result.status == "success":
+        status = "completed"
+    else:
+        if config.get("farm_echo_world_team_blocked") or is_farm_echo_world_team_blocked(text):
+            issues.insert(0, WORLD_TEAM_BLOCKED)
         else:
-            detail = (
-                f"当前活跃度{detected_points}点，档位奖励尚未确认"
-                if detected_points is not None and detected_points >= 100
-                else "最终活跃度未从日志确认"
-            )
-            daily.append(
-                ReportItem(
-                    "daily-activity-claim-action",
-                    f"每日活跃度：已执行奖励领取操作（{detail}）",
-                )
-            )
-
-    nightmare_echoes = sum(
-        text.count(marker)
-        for marker in (
-            "NightmareNestTask:Captured echo during combat, skipping search.",
-            "NightmareNestTask:farm echo yolo find True",
-            "NightmareNestTask:farm echo walk find true",
-        )
-    )
-    if nightmare_echoes:
-        daily.append(
-            ReportItem(
-                "nightmare-nest-echo",
-                f"梦魇巢穴吸收声骸{nightmare_echoes}次",
-            )
-        )
-
-    if _battle_pass_claim_branch_completed(text):
-        daily.append(ReportItem("battle-pass", "先约电台：已执行奖励领取操作"))
-
-    weekly: list[ReportItem] = []
-    garden_completed = "乐园任务完成, 已达到上限" in text
-    garden_started = (
-        "weekly garden not completed, run GardenTask" in text
-        or "GardenTask:garden end" in text
-    )
-    if garden_completed:
-        weekly.append(ReportItem("weekly-garden", "完成幻梦游园本周目标"))
-    elif garden_started and not garden_completed:
-        issues.append(ReportItem("weekly-garden-incomplete", "幻梦游园本轮未确认完成"))
-
-    followup: list[ReportItem] = []
-    recovery = result.config.get("farm_echo_recovery") or {}
-    boss_runs = count_farm_echo_kill_confirmations(text)
-    structured_absorptions = result.config.get(
-        "confirmed_farm_echo_absorption_count"
-    )
-    if structured_absorptions is not None:
-        # Confirmed-retry starts the next challenge only after the defeated
-        # boss's echo has been absorbed.  A structured 5/5 absorption result
-        # therefore proves five completed boss clears even if an upstream UI
-        # click marker was missed in the log.
-        boss_runs = max(boss_runs, int(structured_absorptions))
-    if recovery.get("triggered"):
-        boss_runs = max(boss_runs, int(recovery.get("total_completed") or 0))
-    if boss_runs:
-        boss_index = result.config.get("boss_challenge_index")
-        if boss_index is None:
-            boss_index = result.config.get("which_boss_challenge")
-        if boss_index is None:
-            teleports = list(BOSS_TELEPORT.finditer(text))
-            if teleports:
-                # OK logs its internal zero-based list index; the GUI is one-based.
-                boss_index = int(teleports[-1].group("index")) + 1
-        label = f"讨伐强敌第{boss_index}项" if boss_index else "讨伐强敌"
-        followup.append(ReportItem("boss-challenge", f"{label} {boss_runs}次"))
-
-    if recovery.get("triggered"):
-        retry_completed = int(recovery.get("retry_completed") or 0)
-        recovery_attempts = int(recovery.get("recovery_attempts") or 0)
-        combat_rebind_attempts = int(
-            recovery.get("combat_rebind_attempts") or 0
-        )
-        retry_runs = int(recovery.get("retry_runs") or 0)
-        progress_driven_retries = recovery.get("progress_driven_retries") is True
-        retry_limit = int(recovery.get("retry_limit") or 3)
-        total_completed = int(recovery.get("total_completed") or boss_runs)
-        structured_target = (
-            recovery.get("target_count")
-            or result.config.get("farm_echo_absorption_target")
-            or result.config.get("target_count")
-        )
-        target = int(structured_target or total_completed)
-        sequence = result.config.get("daily_sequence") or {}
-        farm_echo_completed = (
-            isinstance(sequence, dict)
-            and sequence.get("boss_status") == "success"
-        ) or (
-            structured_target is not None
-            and int(structured_target) > 0
-            and total_completed >= int(structured_target)
-        )
-        recovery_history = recovery.get("recoveries") or []
-        client_restart_attempts = sum(
-            1
-            for item in recovery_history
-            if isinstance(item, dict)
-            and (
-                item.get("kind") == "client_restart"
-                or "client restart" in str(item.get("reason", "")).casefold()
-            )
-        )
-        client_restart_attempts = max(
-            client_restart_attempts,
-            int(bool(recovery.get("client_restart_triggered"))),
-        )
-        game_recovery_history = [
-            item
-            for item in recovery_history
-            if isinstance(item, dict)
-            and not (
-                item.get("kind") == "client_restart"
-                or "client restart" in str(item.get("reason", "")).casefold()
-            )
-        ]
-        if recovery_history:
-            recovery_attempts = len(game_recovery_history)
-        realm_defeat_attempts = sum(
-            1
-            for item in game_recovery_history
-            if item.get("realm_defeat") is True
-        )
-        death_attempts = sum(
-            1
-            for item in game_recovery_history
-            if item.get("realm_defeat") is not True
-        )
-        if not recovery_history:
-            death_attempts = max(0, recovery_attempts - realm_defeat_attempts)
-
-        def recovery_summary(action: str) -> str:
-            events: list[str] = []
-            if realm_defeat_attempts:
-                events.append(f"讨伐副本团灭{realm_defeat_attempts}次")
-            if death_attempts:
-                events.append(f"讨伐中途倒地{death_attempts}次")
-            if client_restart_attempts:
-                events.append(f"客户端重启{client_restart_attempts}次")
-            events.append(action)
-            return "，".join(events)
-
-        if combat_rebind_attempts or client_restart_attempts:
-            actions: list[str] = []
-            if combat_rebind_attempts:
-                actions.append(f"Worker重绑定{combat_rebind_attempts}次")
-            if client_restart_attempts:
-                actions.append(f"客户端重启{client_restart_attempts}次")
-            action_text = "、".join(actions)
-            if progress_driven_retries:
-                retry_text = (
-                    f"已执行{retry_runs}次Worker重试（有吸收进度不设总上限）"
-                )
-            else:
-                retry_text = f"已执行{retry_runs}/{retry_limit}次Worker重试"
-            item = ReportItem(
-                "upstream-combat-recovery",
-                f"上游战斗劣化后{action_text}，{retry_text}"
-                + ("，任务已恢复" if farm_echo_completed else "，仍未恢复"),
-            )
-            if farm_echo_completed:
-                followup.append(item)
-            else:
-                issues.append(item)
-
-        if retry_runs and not (combat_rebind_attempts or client_restart_attempts):
-            initial_completed = int(recovery.get("initial_completed") or 0)
-            boundary = (
-                "首个Worker达到尝试上限"
-                if "bounded combat attempts" in text
-                else "首个Worker结束"
-            )
-            retry_policy = (
-                "（有吸收进度不设总上限）"
-                if progress_driven_retries
-                else f"（最多{retry_limit}次）"
-            )
-            item = ReportItem(
-                "worker-progress-recovery",
-                f"{boundary}时确认{initial_completed}/{target}，"
-                f"后续Worker续跑{retry_runs}次并补吸收{retry_completed}次，"
-                f"累计{total_completed}/{target}{retry_policy}，"
-                + ("任务已恢复" if farm_echo_completed else "仍未恢复"),
-            )
-            if farm_echo_completed:
-                followup.append(item)
-            else:
-                issues.append(item)
-
-        if recovery_attempts and farm_echo_completed:
-            if retry_completed:
-                recovery_wording = recovery_summary(
-                    f"已自动恢复并补吸收声骸{retry_completed}次"
-                )
-            else:
-                recovery_wording = recovery_summary(
-                    "已自动恢复并继续挑战"
-                )
-            followup.append(
-                ReportItem(
-                    "boss-death-recovered",
-                    recovery_wording,
-                )
-            )
-        elif recovery_attempts:
-            first_safe = recovery.get("first_safe_recovery") is True
-            final_safe = recovery.get("final_safe_recovery")
-            safe = first_safe and final_safe is not False
-            recovery_state = "已自动恢复并重试" if safe else "自动恢复未完成"
-            issues.append(
-                ReportItem(
-                    "boss-death-recovery-incomplete",
-                    f"{recovery_summary(recovery_state)}；"
-                    "声骸累计吸收"
-                    f"{total_completed}/{target}次",
-                )
-            )
-
-    echo_picked = count_farm_echo_absorptions(text)
-    if structured_absorptions is not None:
-        echo_picked = int(structured_absorptions)
-    if recovery.get("triggered"):
-        echo_picked = int(recovery.get("total_completed") or echo_picked)
-    if echo_picked:
-        followup.append(ReportItem("echo-picked", f"吸收声骸{echo_picked}次"))
-
-    absorption_target = result.config.get("farm_echo_absorption_target")
-    if absorption_target is None and (
-        result.config.get("workflow_task") == "farm_echo_confirmed_retry"
-    ):
-        absorption_target = result.config.get("target_count")
-    if (
-        absorption_target is not None
-        and echo_picked < int(absorption_target)
-    ):
-        issues.append(
-            ReportItem(
-                "echo-absorption-incomplete",
-                f"声骸吸收目标仅完成{echo_picked}/{int(absorption_target)}次",
-            )
-        )
-
-    optional_failures = {
-        "GardenTask Failed": "幻梦游园执行异常",
-        "NightmareNestTask Failed": "梦魇声骸任务执行异常",
-    }
-    for marker, wording in optional_failures.items():
-        if marker in text and not any(item.text == wording for item in issues):
-            issues.append(ReportItem(f"optional-{marker}", wording))
-
-    host_unconfirmed_travel = text.count("HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED")
-    legacy_unconfirmed_travel = text.count(
-        "NightmareNestTask:nightmare nest unreachable, skip this run"
-    )
-    unconfirmed_travel = host_unconfirmed_travel or legacy_unconfirmed_travel
-    if unconfirmed_travel:
-        issues.append(
-            ReportItem(
-                "nightmare-nest-travel-unconfirmed",
-                f"梦魇巢穴传送未确认生效，已跳过{unconfirmed_travel}处",
-            )
-        )
-
-    for index, issue in enumerate(cleanup_data.get("issues", []), start=1):
-        issues.append(ReportItem(f"cleanup-{index}", str(issue)))
-
-    if result.status == "success" and issues:
-        status = "partial_success"
-    elif result.status != "success":
-        sequence = result.config.get("daily_sequence") or {}
-        sequence_has_success = isinstance(sequence, dict) and any(
-            sequence.get(key) == "success"
-            for key in ("boss_status", "daily_status")
-        )
-        recovery_has_progress = recovery.get("triggered") and (
+            issues[:0] = explain_failure(result.reason)
+        recovery = config.get("farm_echo_recovery") or {}
+        recovered_some = recovery.get("triggered") and (
             int(recovery.get("total_completed") or 0) > 0
             or recovery.get("first_safe_recovery") is True
         )
-        if sequence_has_success or recovery_has_progress:
-            status = "partial_success"
-    if (
-        cleanup_data
-        and not cleanup_data.get("completed", False)
-        and status == "completed"
-    ):
-        status = "partial_success"
+        status = "partial" if daily_ok or boss_ok or recovered_some else "failed"
+    issues.extend(str(issue) for issue in (cleanup or {}).get("issues", []))
 
     return RunFacts(
         overall_status=status,
-        reason=result_reason,
-        duration_seconds=result.duration_seconds,
-        workflow_task=str(result.config.get("workflow_task", "daily")),
-        daily=daily,
-        weekly=weekly,
-        followup=followup,
+        workflow_task=str(config.get("workflow_task", "daily")),
+        reason=str(result.reason),
+        duration_seconds=int(result.duration_seconds or 0),
+        daily_ok=daily_ok,
+        boss_ok=boss_ok,
+        daily=[*_tacet(text, config), *_nightmare(text), *activity, *_battle_pass(text)],
+        weekly=_garden(text),
+        boss=_boss(text, config, boss_ok=boss_ok, boss_names=boss_names or {}),
         issues=issues,
-        daily_activity=daily_activity,
-        cleanup=cleanup_data,
-        user_context=load_reporting_context(),
-        evidence=build_wuwa_agent_evidence(
-            text,
-            source=str(path),
-            ignored_line_numbers=known_upstream_noise_lines(text),
-        ),
+        cleanup=dict(cleanup or {}),
+        sources=[str(getattr(result, "run_id", ""))],
     )
-
-
-def deterministic_summary(facts: RunFacts) -> str:
-    subject = {
-        "weekly_garden": "鸣潮周常",
-        "farm_echo": "鸣潮后续任务",
-        "farm_echo_confirmed_retry": "鸣潮后续任务",
-    }.get(facts.workflow_task, "鸣潮日常")
-    status = {
-        "completed": f"{subject}完成",
-        "partial_success": f"{subject}部分完成",
-        "failed": f"{subject}失败",
-        "in_progress": f"{subject}仍在进行",
-        "stalled": f"{subject}疑似卡住",
-    }.get(facts.overall_status, f"{subject}状态未确认")
-    return f"{status}，耗时{_format_duration(facts.duration_seconds)}"

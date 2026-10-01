@@ -17,10 +17,6 @@ def run_smoke() -> int:
     if missing:
         raise RuntimeError(f"Star Rail smoke preflight paths missing: {missing}")
     secrets = {
-        "DEEPSEEK_API_KEY": bool(
-            get_secret("DEEPSEEK_API_KEY")
-            or get_secret("OPENCODE_GO_API_KEY_FILE")
-        ),
         "FEISHU_WEBHOOK_URL": bool(get_secret("FEISHU_WEBHOOK_URL")),
         "FEISHU_WEBHOOK_SECRET": bool(get_secret("FEISHU_WEBHOOK_SECRET")),
     }

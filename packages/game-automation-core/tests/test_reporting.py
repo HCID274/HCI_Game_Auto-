@@ -1,17 +1,25 @@
 import json
-from types import SimpleNamespace
+from datetime import datetime
 
-from game_automation_core.reporting.agent import (
-    build_evidence_bundle,
-    diagnostic_lines,
-    diagnostics_match_status,
-    redact_sensitive_data,
-    token_usage_from_response,
-    validate_diagnostics,
-)
+import pytest
+
 from game_automation_core.reporting.archive import write_json_archive
 from game_automation_core.reporting.context import read_markdown
-from game_automation_core.reporting.feishu import build_sectioned_card, make_signature
+from game_automation_core.reporting.feishu import (
+    build_sectioned_card,
+    card_text,
+    make_signature,
+)
+from game_automation_core.reporting.redact import redact_sensitive_data
+from game_automation_core.reporting.report import (
+    DONE,
+    FAILED,
+    SKIPPED,
+    WARN,
+    GameReport,
+    format_duration,
+    settle_status,
+)
 
 
 def test_markdown_comments_are_not_active_context(tmp_path) -> None:
@@ -35,192 +43,83 @@ def test_card_omits_empty_sections_and_signature_is_stable() -> None:
     assert make_signature(123, "secret") == make_signature(123, "secret")
 
 
-def test_evidence_bundle_is_line_addressable_and_redacts_secrets() -> None:
-    bundle = build_evidence_bundle(
-        game="wuwa",
-        source="current.log",
-        log_text="""DailyTask: completed\n兑换码使用成功: secret-code (1/1)\nERROR: retry\n""",
-    )
-
-    assert bundle["schema_version"] == "report-agent-evidence.v1"
-    assert bundle["line_refs"] == ["L1", "L2", "L3"]
-    assert "secret-code" not in str(bundle)
-
-    generic = build_evidence_bundle(
-        game="wuwa",
-        log_text="FEISHU_WEBHOOK_SECRET=abc123 api_key:xyz token=tok123 Bearer abc.def",
-    )
-    generic_text = str(generic)
-    assert "abc123" not in generic_text
-    assert "xyz" not in generic_text
-    assert "tok123" not in generic_text
-    assert "abc.def" not in generic_text
-
-    structured = build_evidence_bundle(
-        game="wuwa",
-        log_text='{"api_key":"SUPERSECRET123","token":"TOK123"}',
-    )
-    structured_text = str(structured)
-    assert "SUPERSECRET123" not in structured_text
-    assert "TOK123" not in structured_text
-
-
-def test_evidence_bundle_bounds_a_single_oversized_line() -> None:
-    bundle = build_evidence_bundle(
-        game="wuwa",
-        log_text="ERROR: " + "x" * 20_000,
-        max_chars=100,
-    )
-
-    assert sum(len(str(item["text"])) + 14 for item in bundle["lines"]) <= 100
-
-
-def test_evidence_bundle_ignores_lines_without_renumbering_refs() -> None:
-    bundle = build_evidence_bundle(
-        game="wuwa",
-        log_text="""TaskExecutor:install ocr translations error for zh_CN
-DailyTask: open daily panel
-StartController:NVIDIA RTX Dynamic Vibrance is enabled and may cause malfunctions!
-ERROR: final failure marker""",
-        ignored_line_numbers={1, 3},
-    )
-
-    assert bundle["line_refs"] == ["L2", "L4"]
-    assert [entry["line"] for entry in bundle["lines"]] == [2, 4]
-
-
-def test_long_evidence_keeps_final_error_marker() -> None:
-    lines = [f"DailyTask: progress {index}" for index in range(1, 301)]
-    lines[-1] = "ERROR: final failure marker"
-    bundle = build_evidence_bundle(game="wuwa", log_text="\n".join(lines))
-
-    assert "L300" in bundle["line_refs"]
-
-
-def test_evidence_bundle_accepts_a_larger_caller_line_budget() -> None:
-    lines = [f"DailyTask: progress {index}" for index in range(1, 501)]
-    bundle = build_evidence_bundle(
-        game="wuwa",
-        log_text="\n".join(lines),
-        max_chars=100_000,
-        max_lines=400,
-    )
-
-    assert len(bundle["line_refs"]) == 400
-    assert "L1" in bundle["line_refs"]
-    assert "L500" in bundle["line_refs"]
-
-
-def test_evidence_budget_prioritizes_final_error_over_long_prefix() -> None:
-    lines = [f"DailyTask: {'x' * 1000} {index}" for index in range(1, 300)]
-    lines.append("ERROR: final failure marker")
-    bundle = build_evidence_bundle(game="wuwa", log_text="\n".join(lines))
-
-    assert "L300" in bundle["line_refs"]
-
-
-def test_evidence_budget_keeps_last_real_line_after_filtered_tail() -> None:
-    lines = [f"DailyTask: progress {index}" for index in range(1, 277)]
-    lines.append("ERROR: final real failure")
-    lines.extend(f"TaskExecutor: startup noise {index}" for index in range(277, 301))
-    bundle = build_evidence_bundle(
-        game="wuwa",
-        log_text="\n".join(lines),
-        max_chars=1_000,
-        ignored_line_numbers=set(range(278, 302)),
-    )
-
-    assert "L277" in bundle["line_refs"]
-
-
-def test_diagnostics_require_real_evidence_refs() -> None:
-    evidence = {"line_refs": ["L3"]}
-    analysis = validate_diagnostics(
+def test_redaction_covers_nested_credentials() -> None:
+    redacted = redact_sensitive_data(
         {
-            "root_cause": "重试由错误触发",
-            "root_cause_refs": ["L3", "L99"],
-            "anomalies": [
-                {
-                    "message": "发现重试",
-                    "evidence_refs": ["L3"],
-                    "confidence": "high",
-                },
-                {
-                    "message": "无证据的猜测",
-                    "evidence_refs": ["L99"],
-                    "confidence": "high",
-                },
+            "items": [
+                "FEISHU_WEBHOOK_SECRET=abc123",
+                ("api_key: xyz", "Bearer abc.def"),
+                'config {"token": "tok123"}',
+                "https://open.feishu.cn/open-apis/bot/v2/hook/zzz",
+                "sk-abcdefghijklmnopqrstuvwxyz",
             ],
-        },
-        evidence,
+        }
+    )
+    text = str(redacted)
+    for secret in ("abc123", "xyz", "abc.def", "tok123", "hook/zzz", "sk-abcdefghij"):
+        assert secret not in text
+
+
+def test_success_card_lists_tasks_without_problem_section() -> None:
+    report = GameReport(
+        game="星铁",
+        status="completed",
+        finished_at=datetime(2026, 10, 1, 6, 12),
+        tasks=[f"{DONE} 每日实训 500/500", f"{SKIPPED} 侵蚀隧洞：开拓力不足"],
+        notes=[("养成待办", ["远坂凛：遗器"])],
+        duration_seconds=2460,
     )
 
-    assert analysis["root_cause_refs"] == ["L3"]
-    assert len(analysis["anomalies"]) == 1
-    assert diagnostic_lines(analysis)[0].startswith("AI分析：")
+    card = report.to_card()
+    text = card_text(card)
+
+    assert card["card"]["header"]["template"] == "green"
+    assert report.title == "✅ 星铁 全部完成 · 10-01 06:12"
+    assert "用时 41分钟" in text
+    assert "异常记录" not in text
+    assert f"**今日任务**\n{DONE} 每日实训 500/500\n{SKIPPED} 侵蚀隧洞：开拓力不足" in text
+    assert "**养成待办**\n1. 远坂凛：遗器" in text
 
 
-def test_malformed_diagnostic_refs_are_ignored_without_raising() -> None:
-    assert validate_diagnostics(
-        {"anomalies": [{"message": "bad", "evidence_refs": None}]},
-        {"line_refs": ["L1"]},
-    ) == {}
-
-
-def test_token_usage_supports_openai_style_response() -> None:
-    response = SimpleNamespace(
-        usage=SimpleNamespace(
-            prompt_tokens=100,
-            completion_tokens=25,
-            total_tokens=125,
-        )
+def test_problems_lead_the_card_and_secrets_are_redacted() -> None:
+    report = GameReport(
+        game="鸣潮",
+        status="failed",
+        finished_at=datetime(2026, 10, 1, 5, 52),
+        tasks=[f"{FAILED} 讨伐强敌第3项：吸收声骸 0/5"],
+        problems=["讨伐：OK-WW 启动后 10 分钟没开始讨伐", "token=SECRET123"],
     )
 
-    usage = token_usage_from_response(response, model="test-model")
+    elements = report.to_card()["card"]["elements"]
 
-    assert usage.available is True
-    assert usage.input_tokens == 100
-    assert usage.output_tokens == 25
-    assert usage.output_input_ratio == 0.25
-    assert usage.to_dict()["model"] == "test-model"
-
-
-def test_token_usage_reads_nested_cache_and_reasoning_details() -> None:
-    response = SimpleNamespace(
-        usage=SimpleNamespace(
-            prompt_tokens=100,
-            completion_tokens=25,
-            total_tokens=125,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=40),
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
-        )
-    )
-
-    usage = token_usage_from_response(response)
-
-    assert usage.cached_input_tokens == 40
-    assert usage.reasoning_tokens == 5
+    assert elements[0]["text"]["content"].startswith("**异常记录**\n1. 讨伐")
+    assert elements[2]["text"]["content"].startswith("**今日任务**")
+    assert "SECRET123" not in str(report.to_card())
+    assert "SECRET123" not in str(report.to_dict())
+    assert report.to_dict()["title"].startswith("❌ 鸣潮 失败")
 
 
-def test_redact_sensitive_data_covers_nested_fact_strings() -> None:
-    value = redact_sensitive_data(
-        {"warnings": ["token=SUPERSECRET123"], "reason": "ok"}
-    )
-
-    assert "SUPERSECRET123" not in str(value)
-    assert value["reason"] == "ok"
+def test_unknown_status_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        GameReport(game="星铁", status="in_progress", finished_at=datetime(2026, 1, 1))
 
 
-def test_diagnostics_cannot_reverse_failed_or_unconfirmed_status() -> None:
-    assert not diagnostics_match_status(
-        {"root_cause": "奖励领取成功"},
-        "failed",
-    )
-    assert not diagnostics_match_status(
-        {"anomalies": [{"message": "任务成功"}]},
-        "unknown",
-    )
-    assert not diagnostics_match_status(
-        {"uncertainties": ["奖励已领取"]},
-        "unknown",
-    )
+@pytest.mark.parametrize(
+    ("status", "tasks", "problems", "expected"),
+    [
+        ("completed", [f"{DONE} 日常", f"{SKIPPED} 体力不足，计划保留"], [], "completed"),
+        ("completed", [f"{DONE} 日常", f"{WARN} 活跃度没确认"], [], "partial"),
+        ("completed", [f"{DONE} 日常"], ["收尾没关掉游戏"], "partial"),
+        ("failed", [f"{DONE} 日常"], [], "failed"),
+    ],
+)
+def test_completed_is_reserved_for_clean_runs(status, tasks, problems, expected) -> None:
+    assert settle_status(status, tasks, problems) == expected
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(45, "45秒"), (600, "10分钟"), (3610, "1小时"), (4920, "1小时22分钟")],
+)
+def test_duration_is_human_readable(seconds: int, text: str) -> None:
+    assert format_duration(seconds) == text

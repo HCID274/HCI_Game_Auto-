@@ -1,4 +1,4 @@
-"""Data structures shared by the report parser, AI writer and Feishu renderer."""
+"""Facts extracted from one M7A run; the report builder turns them into lines."""
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -8,27 +8,18 @@ from typing import Any
 @dataclass
 class StaminaRun:
     name: str
-    source: str = "plan"
+    source: str = "plan"  # plan | activity | default（计划外清体力）
     activity_name: str = ""
     activity_start_remaining: int | None = None
     activity_remaining_count: int | None = None
-    plan_index: int | None = None
-    plan_total: int | None = None
     planned_count: int | None = None
     rounds: int | None = None
     rewards_per_round: int | None = None
     completed_instances: int = 0
     remaining_plan_count: int | None = None
-    status: str = "started"
+    status: str = "started"  # started | completed | skipped | failed
     reason: str = ""
-    character_context: str = ""
-
-
-@dataclass
-class RunEvent:
-    kind: str
-    label: str = ""
-    stamina_index: int | None = None
+    trainee: str = ""  # 例如“远坂凛 行迹材料”，只来自养成计划或 M7A 培养目标
 
 
 @dataclass
@@ -36,40 +27,20 @@ class RunReport:
     overall_status: str = "unknown"
     daily_status: str = "unknown"
     daily_score: str = "未读取"
-    daily_initial_completed: list[str] = field(default_factory=list)
+    daily_already_settled: bool = False
     daily_completed_this_run: list[str] = field(default_factory=list)
     daily_unfinished: list[str] = field(default_factory=list)
     stamina_runs: list[StaminaRun] = field(default_factory=list)
-    stamina_start: int | None = None
-    stamina_end: int | None = None
-    daily_events: list[RunEvent] = field(default_factory=list)
-    rewards_completed: list[str] = field(default_factory=list)
+    rewards: list[str] = field(default_factory=list)
     other_tasks: list[str] = field(default_factory=list)
-    recovered_warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     current_task: str = ""
     current_reason: str = ""
-    detected_training_target: str = ""
-    detected_training_dungeons: list[str] = field(default_factory=list)
     stopped_normally: bool = False
     last_log_at: datetime | None = None
     run_stage: str = ""
-    retries: int = 0
-    custom_context: dict[str, Any] = field(default_factory=dict)
-    evidence: dict[str, Any] = field(default_factory=dict)
 
-    def to_prompt_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["last_log_at"] = self.last_log_at.isoformat() if self.last_log_at else None
         return data
-
-
-@dataclass(frozen=True)
-class NarrativeReport:
-    daily: str
-    routine_tasks: list[str] = field(default_factory=list)
-    other_tasks: list[str] = field(default_factory=list)
-    current_task: str = ""
-    issues: list[str] = field(default_factory=list)
-    training_todos: list[str] = field(default_factory=list)
-    analysis: dict[str, Any] = field(default_factory=dict)
-    token_usage: dict[str, Any] = field(default_factory=dict)

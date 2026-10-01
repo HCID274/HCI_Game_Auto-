@@ -32,15 +32,6 @@ class TrainingGoal:
     completed_at: str = ""
     evidence: str = ""
 
-    def to_context(self) -> dict[str, str | bool]:
-        return {
-            "id": self.goal_id,
-            "character": self.character,
-            "category": self.category,
-            "dungeon": self.dungeon,
-            "completed": self.completed,
-        }
-
 
 @dataclass(frozen=True)
 class TrainingPlan:
@@ -50,14 +41,6 @@ class TrainingPlan:
     @property
     def active_goals(self) -> tuple[TrainingGoal, ...]:
         return tuple(goal for goal in self.goals if not goal.completed)
-
-    def to_context(self) -> dict[str, list[dict[str, str | bool]]]:
-        return {
-            "active_goals": [goal.to_context() for goal in self.active_goals],
-            "completed_this_run": [
-                goal.to_context() for goal in self.completed_this_run
-            ],
-        }
 
 
 def load_training_plan(path: Path = DEFAULT_PLAN_PATH) -> TrainingPlan:
@@ -190,8 +173,12 @@ def reconcile_training_plan(
     *,
     completed_at: datetime,
     path: Path = DEFAULT_PLAN_PATH,
+    persist: bool = True,
 ) -> TrainingPlan:
-    """Complete active goals only when the run contains strong plan evidence."""
+    """Complete active goals only when the run contains strong plan evidence.
+
+    ``persist=False`` 用于回放历史运行生成预览，不改用户的计划文件。
+    """
     plan = load_training_plan(path)
     updated: list[TrainingGoal] = []
     completed_now: list[TrainingGoal] = []
@@ -216,7 +203,7 @@ def reconcile_training_plan(
         updated.append(replacement)
 
     result = TrainingPlan(tuple(updated), tuple(completed_now))
-    if completed_now:
+    if completed_now and persist:
         save_training_plan(result, path)
     return result
 

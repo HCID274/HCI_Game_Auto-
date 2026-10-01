@@ -1,87 +1,79 @@
-"""Summarize one completed M7A run and send one Feishu card."""
+"""Turn one finished M7A run into the final Feishu card and a local archive."""
 
+import json
 import logging
-from dataclasses import asdict, replace
+import re
 from datetime import datetime
 from pathlib import Path
 
-from game_automation_core.reporting.agent import diagnostic_lines, redact_sensitive_data
 from game_automation_core.reporting.archive import write_json_archive
+from game_automation_core.reporting.feishu import card_text
+from game_automation_core.reporting.report import GameReport
 
-from starrail_auto.integrations.feishu import send_starrail_report_card
+from starrail_auto.integrations.feishu import send_card
 from starrail_auto.m7a.power_plan import load_power_plan_remaining
-from starrail_auto.reporting.models import NarrativeReport, RunReport
+from starrail_auto.reporting.models import RunReport
 from starrail_auto.reporting.parser import parse_m7a_run
 from starrail_auto.reporting.reminders import format_active_reminders
-from starrail_auto.reporting.summarizer import summarize_report
-from starrail_auto.reporting.training_plan import reconcile_training_plan
-from starrail_auto.reporting.user_context import load_reporting_context
+from starrail_auto.reporting.report import build_report
+from starrail_auto.reporting.training_plan import (
+    load_training_plan,
+    reconcile_training_plan,
+)
 from starrail_auto.settings import REPORTS_DIR
 
-REPORT_ARCHIVE_DIR = REPORTS_DIR
+TIMESTAMP_PATTERN = re.compile(r"^(?P<value>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 
 log = logging.getLogger(__name__)
 
 
-def read_log_since(path: Path, offset: int) -> str:
+def read_log_slice(path: Path, offset: int, *, until: datetime | None = None) -> str:
+    """Read this run's bytes; ``until`` cuts off later same-day runs on replay."""
     if not path.exists():
         return ""
-    with path.open("rb") as handle:
-        current_size = path.stat().st_size
-        handle.seek(offset if current_size >= offset else 0)
-        return handle.read().decode("utf-8", errors="replace")
+    data = path.read_bytes()
+    content = data[offset if len(data) >= offset else 0 :].decode("utf-8", errors="replace")
+    if until is None:
+        return content
+    selected: list[str] = []
+    for line in content.splitlines():
+        match = TIMESTAMP_PATTERN.match(line)
+        if match and datetime.strptime(match.group("value"), "%Y-%m-%d %H:%M:%S,%f") > until:
+            break
+        selected.append(line)
+    return "\n".join(selected)
 
 
-def _archive_report(
-    report: RunReport,
+def build_main_report(
+    content: str,
     *,
-    narrative: object,
-    ai_used: bool,
-    log_path: Path,
-    offset: int,
-) -> None:
-    REPORT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    archive_path = REPORT_ARCHIVE_DIR / f"{log_path.stem}_{offset}.json"
-    payload = {
-        "source": {"path": str(log_path), "offset": offset},
-        "ai_used": ai_used,
-        "ai_token_usage": narrative.token_usage,
-        "agent_analysis": redact_sensitive_data(narrative.analysis),
-        "facts": redact_sensitive_data(report.to_prompt_dict()),
-        "narrative": redact_sensitive_data(asdict(narrative)),
-    }
-    write_json_archive(archive_path, payload)
-    log.info("report evidence archived: %s", archive_path)
-
-
-def _title_for(report: RunReport, finished_at: datetime) -> tuple[str, str]:
-    timestamp = finished_at.strftime("%m-%d %H:%M")
-    if report.overall_status not in {"failed", "stalled"} and report.daily_status == "completed":
-        return f"✅️ 星铁完成 {timestamp} 重试{report.retries}", (
-            "orange" if report.overall_status in {"stalled", "in_progress"} else "green"
-        )
-    return f"❌️ 星铁失败 {timestamp} 重试{report.retries}", "red"
-
-
-def _redact_narrative(narrative: NarrativeReport) -> NarrativeReport:
-    """Keep card, archive and preview text consistent with redacted evidence."""
-
-    return replace(
-        narrative,
-        daily=str(redact_sensitive_data(narrative.daily)),
-        routine_tasks=[
-            str(redact_sensitive_data(item)) for item in narrative.routine_tasks
-        ],
-        other_tasks=[
-            str(redact_sensitive_data(item)) for item in narrative.other_tasks
-        ],
-        current_task=str(redact_sensitive_data(narrative.current_task)),
-        issues=[str(redact_sensitive_data(item)) for item in narrative.issues],
-        training_todos=[
-            str(redact_sensitive_data(item)) for item in narrative.training_todos
-        ],
-        analysis=redact_sensitive_data(narrative.analysis),
+    exit_code: int,
+    stage: str,
+    finished_at: datetime,
+    duration_seconds: int | None,
+    persist_plan: bool = True,
+) -> tuple[RunReport, GameReport]:
+    run = parse_m7a_run(
+        content,
+        now=finished_at,
+        training_goals=load_training_plan().goals,
+        run_stage=stage,
+        force_failed=exit_code != 0,
+        power_plan_remaining=load_power_plan_remaining(),
     )
+    plan = reconcile_training_plan(
+        run.stamina_runs,
+        completed_at=finished_at,
+        persist=persist_plan,
+    )
+    report = build_report(
+        run,
+        plan=plan,
+        reminders=format_active_reminders(finished_at.date()),
+        finished_at=finished_at,
+        duration_seconds=duration_seconds,
+    )
+    return run, report
 
 
 def report_main_run(
@@ -91,64 +83,93 @@ def report_main_run(
     exit_code: int,
     stage: str,
     retries: int,
-) -> None:
-    """Send exactly one final main-run report without changing the run result."""
-    preferences = load_reporting_context()
-    content = ""
-    report_time = datetime.now()
-
-    if log_path is not None:
-        content = read_log_since(log_path, offset)
-
-    report = parse_m7a_run(
+    duration_seconds: int | None = None,
+) -> Path:
+    """Send exactly one final card without changing the run result."""
+    finished_at = datetime.now()
+    content = read_log_slice(log_path, offset) if log_path is not None else ""
+    run, report = build_main_report(
         content,
-        now=report_time,
-        preferences=preferences,
-        run_stage=stage,
-        retries=retries,
-        force_failed=(exit_code != 0),
-        power_plan_remaining=load_power_plan_remaining(),
+        exit_code=exit_code,
+        stage=stage,
+        finished_at=finished_at,
+        duration_seconds=duration_seconds,
     )
-    if log_path is not None:
-        report.evidence["source"] = str(log_path)
-        report.evidence["offset"] = offset
-    training_plan = reconcile_training_plan(
-        report.stamina_runs,
-        completed_at=report_time,
+    card = report.to_card()
+    sent = send_card(card)
+    stem = f"{log_path.stem}_{offset}" if log_path is not None else f"{finished_at:%Y-%m-%d}_preflight"
+    archive = write_json_archive(
+        REPORTS_DIR / f"{stem}.json",
+        {
+            "source": {"path": str(log_path) if log_path else None, "offset": offset},
+            "exit_code": exit_code,
+            "stage": stage,
+            "retries": retries,
+            "sent": sent,
+            "facts": run.to_dict(),
+            "report": report.to_dict(),
+            "feishu_card": card,
+        },
     )
-    report.custom_context["training_plan"] = training_plan.to_context()
-    narrative, ai_used = summarize_report(report)
-    narrative = _redact_narrative(narrative)
-    analysis_items = diagnostic_lines(narrative.analysis)
-    if analysis_items:
-        narrative = replace(
-            narrative,
-            issues=[*narrative.issues, *analysis_items],
+    log.info("final report handled: sent=%s status=%s archive=%s", sent, report.status, archive)
+    return archive
+
+
+def preview_archived_run(name: str = "latest") -> tuple[Path, str]:
+    """Rebuild the card of an archived run without sending or touching user plans."""
+    if name == "latest":
+        candidates = sorted(
+            (path for path in REPORTS_DIR.glob("*.json") if not path.name.endswith(".preview.json")),
+            key=lambda path: path.stat().st_mtime,
         )
-    title, template = _title_for(report, report_time)
-    reminders = format_active_reminders(report_time.date())
-    sent = send_starrail_report_card(
-        title=title,
-        template=template,
-        daily=narrative.daily,
-        routine_tasks=narrative.routine_tasks,
-        other_tasks=narrative.other_tasks,
-        current_task=narrative.current_task,
-        issues=narrative.issues,
-        training_todos=narrative.training_todos,
-        reminders=reminders,
-    )
-    log.info(
-        "final report handled: sent=%s ai_used=%s status=%s",
-        sent,
-        ai_used,
-        report.overall_status,
-    )
-    if log_path is not None:
-        _archive_report(
-            report,
-            narrative=narrative,
-            ai_used=ai_used,
-            log_path=log_path,
-            offset=offset,
+        if not candidates:
+            raise SystemExit("no archived Star Rail report was found")
+        archive_path = candidates[-1]
+    else:
+        archive_path = REPORTS_DIR / f"{name}.json"
+    data = json.loads(archive_path.read_text(encoding="utf-8"))
+    source = data.get("source") or {}
+    facts = data.get("facts") or {}
+    last_log_at = facts.get("last_log_at")
+    content = ""
+    if source.get("path"):
+        content = read_log_slice(
+            Path(source["path"]),
+            int(source.get("offset") or 0),
+            until=datetime.fromisoformat(last_log_at) if last_log_at else None,
         )
+    # 旧归档没有退出码和完成时间：以当时程序判定的整体状态还原成功/失败，
+    # 以归档文件的写入时间还原汇报时刻（卡住判定依赖它）。
+    exit_code = int(data.get("exit_code", 0 if facts.get("overall_status") == "completed" else 1))
+    stage = str(data.get("stage", facts.get("run_stage", "")))
+    archived = data.get("report") or {}
+    finished_at = (
+        datetime.fromisoformat(archived["finished_at"])
+        if archived.get("finished_at")
+        else datetime.fromtimestamp(archive_path.stat().st_mtime)
+    )
+    _, report = build_main_report(
+        content,
+        exit_code=exit_code,
+        stage=stage,
+        finished_at=finished_at,
+        duration_seconds=archived.get("duration_seconds"),
+        persist_plan=False,
+    )
+    card = report.to_card()
+    preview = write_json_archive(
+        archive_path.with_name(f"{archive_path.stem}.preview.json"),
+        {"source": source, "preview": True, "report": report.to_dict(), "feishu_card": card},
+    )
+    return preview, card_text(card)
+
+
+def send_short_report(*, game: str, problems: list[str]) -> bool:
+    """Card for paths that have no M7A log to describe; no problems means success."""
+    report = GameReport(
+        game=game,
+        status="failed" if problems else "completed",
+        finished_at=datetime.now(),
+        problems=problems,
+    )
+    return send_card(report.to_card())

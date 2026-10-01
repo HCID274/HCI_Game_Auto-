@@ -1,12 +1,9 @@
 """Top-level scheduled workflows for M7A-backed tasks."""
 
 import logging
+import time
 from datetime import datetime
 
-from starrail_auto.integrations.feishu import (
-    notify_starrail_failure,
-    notify_starrail_success,
-)
 from starrail_auto.m7a.config import (
     DEFAULT_TIMEOUTS,
     EXIT_DAILY_VALIDATION_FAILED,
@@ -17,7 +14,8 @@ from starrail_auto.m7a.config import (
 from starrail_auto.m7a.environment import check_game_network
 from starrail_auto.m7a.models import RunResult
 from starrail_auto.m7a.runner import run_m7a
-from starrail_auto.reporting.service import report_main_run
+from starrail_auto.reporting.report import describe_stage
+from starrail_auto.reporting.service import report_main_run, send_short_report
 from starrail_auto.settings import LOGS_DIR
 from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
 from starrail_auto.uu.service import ensure_uu_connected
@@ -66,6 +64,7 @@ def _run(task: str, timeout: int) -> RunResult:
 
 def execute_task(task: str, timeout: int | None = None) -> int:
     _setup_logging()
+    started = time.monotonic()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
     if task == "main":
         try:
@@ -75,21 +74,20 @@ def execute_task(task: str, timeout: int | None = None) -> int:
                 exit_code=result.exit_code,
                 stage=result.stage,
                 retries=result.retries,
+                duration_seconds=round(time.monotonic() - started),
             )
         except Exception:
             log.exception("final report service failed")
-            _send_short_notification(result)
+            _send_short_report(result, game="星铁")
     else:
-        _send_short_notification(result)
+        _send_short_report(result, game=f"星铁 {task}")
     log.info("workflow finished with code %d", result.exit_code)
     return result.exit_code
 
 
-def _send_short_notification(result: RunResult) -> None:
-    if result.exit_code == EXIT_OK:
-        notify_starrail_success(result.retries)
-    else:
-        notify_starrail_failure(result.stage or "未知", result.retries)
+def _send_short_report(result: RunResult, *, game: str) -> None:
+    problems = [] if result.exit_code == EXIT_OK else [describe_stage(result.stage)]
+    send_short_report(game=game, problems=problems)
 
 
 def _daily_reset_has_passed(now: datetime | None = None) -> bool:

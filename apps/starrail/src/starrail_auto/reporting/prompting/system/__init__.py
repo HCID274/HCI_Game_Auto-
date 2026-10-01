@@ -1,1 +1,0 @@
-"""Packaged immutable report prompts."""

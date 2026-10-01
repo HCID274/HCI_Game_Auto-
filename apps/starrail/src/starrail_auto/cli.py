@@ -37,6 +37,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     uu.add_argument("--log-file", type=Path)
 
+    report = commands.add_parser(
+        "report", help="rebuild an archived run's card as a local preview (never sends)"
+    )
+    report.add_argument(
+        "name",
+        nargs="?",
+        default="latest",
+        help="archive name under runtime/reports without .json, or latest",
+    )
+
     plan = commands.add_parser("plan", help="manage character training goals")
     plan_commands = plan.add_subparsers(dest="plan_command", required=True)
     plan_commands.add_parser("list")
@@ -71,6 +81,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return execute_cleanup(args.delay, args.log_file)
     if args.command == "uu":
         return execute_action(args.action, args.log_file)
+    if args.command == "report":
+        from starrail_auto.reporting.service import preview_archived_run
+
+        path, text = preview_archived_run(args.name)
+        print(text)
+        print(f"\npreview written: {path}")
+        return 0
     if args.command == "elevate":
         if not args.arguments:
             raise SystemExit("elevate requires a command")

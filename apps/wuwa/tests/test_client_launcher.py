@@ -37,6 +37,12 @@ from wuwa_auto.settings import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _keep_failure_snapshots_out_of_the_repo(tmp_path, monkeypatch):
+    # 用例把截图替换成相对路径，故障快照会在当前目录写 *.json；切到临时目录。
+    monkeypatch.chdir(tmp_path)
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
