@@ -191,16 +191,6 @@ def _active_challenge_visible(task: object) -> bool:
     return bool(in_combat(target=True) or in_combat())
 
 
-def _wait_for_active_challenge(task: object, *, time_out: float) -> bool:
-    return bool(
-        task.wait_until(  # type: ignore[attr-defined]
-            lambda: _active_challenge_visible(task),
-            time_out=time_out,
-            raise_if_not_found=False,
-        )
-    )
-
-
 def _recover_detected_death_state(task: object) -> str:
     """Recover from the visible UI, independent of exception ordering."""
     if realm_defeat_visible(task, time_out=2):

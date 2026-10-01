@@ -68,10 +68,6 @@ def require_supported_display() -> None:
     _controller.require_supported_display()
 
 
-def save_debug_screenshot(prefix: str) -> Path:
-    return _controller.save_screenshot(prefix)
-
-
 def startup_error(
     step_name: str,
     reason: str,

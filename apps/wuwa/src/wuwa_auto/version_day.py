@@ -18,7 +18,6 @@ from wuwa_auto.settings import PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 
-REPO_ROOT = PROJECT_ROOT.parent.parent
 EVENING_RERUN_TASK_NAME = "HCID274_GameAutomation_WuwaVersionDayEvening"
 EVENING_RERUN_SCRIPT = PROJECT_ROOT / "scripts" / "version_day_evening_rerun.ps1"
 EVENING_RERUN_HOUR = 20

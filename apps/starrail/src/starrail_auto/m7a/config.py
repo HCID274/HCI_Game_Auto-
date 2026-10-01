@@ -12,7 +12,6 @@ M7A_LOG_DIR = Path(
     r"D:\2_Software\4_Games\StarRail\Auto\March7thAssistant_full\logs"
 )
 M7A_CONFIG_PATH = M7A_LAUNCHER.parent / "config.yaml"
-M7A_EXAMPLE_CONFIG_PATH = M7A_LAUNCHER.parent / "assets" / "config" / "config.example.yaml"
 M7A_CONFIG_BACKUP_DIR = RUNTIME_DIR / "m7a-config"
 DEBUG_DIR = EVIDENCE_DIR
 

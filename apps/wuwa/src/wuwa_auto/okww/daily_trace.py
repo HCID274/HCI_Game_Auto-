@@ -19,7 +19,6 @@ from typing import Any
 from wuwa_auto.okww.daily_capabilities import capability_matrix
 
 TRACE_MARKER = "HOST_OKWW_DAILY_TRACE"
-CAPABILITIES_MARKER = "HOST_OKWW_DAILY_CAPABILITIES"
 STAMINA_OCR_REGION = (0.49, 0.0, 0.92, 0.10)
 STAMINA_MAX_SAMPLES = 3
 STAMINA_REQUIRED_AGREEMENT = 2

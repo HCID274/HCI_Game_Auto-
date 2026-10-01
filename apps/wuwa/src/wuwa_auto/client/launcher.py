@@ -89,7 +89,6 @@ LAUNCHER_SELFUPDATE_REMINDER_TITLE = "KRUpdateReminderDlg"
 SELFUPDATE_CONFIRM_CLICK_OFFSET = (0, 0)
 
 SW_RESTORE = 9
-SW_MINIMIZE = 6
 
 
 @dataclass(frozen=True, slots=True)

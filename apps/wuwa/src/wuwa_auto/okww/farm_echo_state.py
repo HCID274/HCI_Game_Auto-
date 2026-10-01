@@ -10,14 +10,8 @@ REVIVE_DIALOG_MARKER = "HOST_FARM_ECHO_REVIVE_DIALOG_CONFIRMED"
 PARTY_MEMBER_UNAVAILABLE_MARKER = (
     "HOST_FARM_ECHO_PARTY_MEMBER_UNAVAILABLE_CONFIRMED"
 )
-IN_PLACE_REVIVAL_COMPLETED_MARKER = (
-    "HOST_FARM_ECHO_IN_PLACE_REVIVAL_COMPLETED"
-)
 REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_REVIVE_DIALOG_HEAL_RECOVERY_COMPLETED"
-)
-REALM_DEFEAT_RETRY_COMPLETED_MARKER = (
-    "HOST_FARM_ECHO_REALM_DEFEAT_RETRY_COMPLETED"
 )
 REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER = (
     "HOST_FARM_ECHO_REALM_DEFEAT_HEAL_RECOVERY_COMPLETED"
@@ -163,44 +157,6 @@ def revive_dialog_visible(task: RealmStateTask, *, time_out: float = 1.5) -> boo
         raise_if_not_found=False,
     )
     return bool(confirm)
-
-
-def click_revive_confirm(task: RealmStateTask) -> None:
-    """Use the selected revival item and keep the current boss attempt alive."""
-    if not revive_dialog_visible(task, time_out=5):
-        raise RuntimeError("character revival dialog is no longer visible")
-    clicked = task.wait_click_ocr(
-        0.52,
-        0.62,
-        0.85,
-        0.90,
-        match=_CONFIRM_BUTTON,
-        time_out=5,
-        settle_time=0.2,
-        raise_if_not_found=False,
-        after_sleep=2,
-    )
-    if not clicked:
-        raise RuntimeError("could not confirm the selected revival item")
-
-
-def click_realm_defeat_retry(task: RealmStateTask) -> None:
-    """Retry a confirmed failed challenge without leaving the realm."""
-    if not realm_defeat_visible(task, time_out=5):
-        raise RuntimeError("realm defeat screen is no longer visible")
-    clicked = task.wait_click_ocr(
-        0.50,
-        0.75,
-        0.80,
-        0.93,
-        match=_RETRY_BUTTON,
-        time_out=5,
-        settle_time=0.2,
-        raise_if_not_found=False,
-        after_sleep=2,
-    )
-    if not clicked:
-        raise RuntimeError("could not click Retry on realm defeat screen")
 
 
 def click_realm_defeat_exit(task: RealmStateTask) -> None:
