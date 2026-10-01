@@ -56,8 +56,9 @@ def build_registration_script(rerun_at: datetime, user: str) -> str:
 def register_evening_rerun(now: datetime) -> datetime:
     """Register the one-shot evening rerun task and return its start time.
 
-    The task script deletes its own registration before starting the
-    orchestrator, so the trigger can never fire twice.
+    The ``-Once`` trigger fires a single time and the next version day
+    overwrites the registration with ``-Force``.  The task script must not
+    delete itself: deleting a running task terminates it (2026-09-30).
     """
     rerun_at = evening_rerun_at(now)
     script = build_registration_script(rerun_at, getpass.getuser())
