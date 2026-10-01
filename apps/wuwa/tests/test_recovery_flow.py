@@ -78,6 +78,31 @@ def _safe(reason: str = "healed") -> FarmEchoRecoveryResult:
     return FarmEchoRecoveryResult(True, reason, None, "recovery.json")
 
 
+def test_retry_stops_if_fresh_worker_reports_world_team_prerequisite(tmp_path):
+    initial = _result(tmp_path, "initial", DEATH, status="failed", absorbed=0)
+    retry = _result(
+        tmp_path, "retry",
+        "FarmEchoTask:info_set app Please start in game world and in team!\n"
+        "Exception: Please start in game world and in team!\n",
+        status="failed", absorbed=0,
+    )
+    with patch("wuwa_auto.okww.recovery_flow.RUNS_DIR", tmp_path), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely", return_value=_safe()
+    ), patch("wuwa_auto.okww.recovery_flow.stop_daily_workers"), patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda _: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        return_value=retry,
+    ) as run:
+        result = maybe_recover_farm_echo_death(
+            initial, now_fn=_FakeClock(step=1), sleep_fn=lambda _: None,
+        )
+    assert run.call_count == 1
+    assert result.status == "failed"
+    assert "常规队伍" in result.config["farm_echo_recovery"]["retry_error"]
+
+
 def _safe_in_place() -> FarmEchoRecoveryResult:
     return FarmEchoRecoveryResult(
         True,
@@ -991,11 +1016,69 @@ def test_failed_safety_recovery_restarts_once_then_completes_remaining_target(
     assert recovery["final_state_safe"] is True
 
 
-def test_failed_safety_recovery_never_starts_unsafe_worker_until_window_ends(
+def test_each_failed_safety_recovery_gets_a_fresh_worker_boundary(
     tmp_path: Path,
 ) -> None:
-    """Without a restart adapter, failed recoveries retry inside the window
-    but never launch a Worker from an unconfirmed unsafe screen."""
+    """Regression: 2026-09-03 repeatedly reused one stale defeat log."""
+
+    runs = tmp_path / "runs"
+    initial = _result(
+        runs,
+        "initial",
+        REALM_DEFEAT,
+        status="failed",
+        absorbed=1,
+    )
+    second_defeat = _result(
+        runs,
+        "retry-1",
+        REALM_DEFEAT,
+        status="failed",
+        absorbed=0,
+    )
+    completed = _result(
+        runs,
+        "retry-2",
+        ABSORPTION * 4,
+        status="success",
+        absorbed=4,
+    )
+    restarts: list[str] = []
+
+    with patch(
+        "wuwa_auto.okww.recovery_flow.RUNS_DIR", runs
+    ), patch(
+        "wuwa_auto.okww.recovery_flow._recover_safely",
+        side_effect=[_failed_safe_recovery(), _failed_safe_recovery()],
+    ) as recover, patch(
+        "wuwa_auto.okww.recovery_flow.temporary_farm_echo_repeat_count",
+        side_effect=lambda count: nullcontext(),
+    ), patch(
+        "wuwa_auto.okww.recovery_flow.run_confirmed_farm_echo_retry",
+        side_effect=[second_defeat, completed],
+    ) as run_retry, patch(
+        "wuwa_auto.okww.recovery_flow.stop_daily_workers"
+    ):
+        result = maybe_recover_farm_echo_death(
+            initial,
+            client_restart=lambda: restarts.append("restart") or True,
+        )
+
+    assert result.status == "success"
+    assert restarts == ["restart", "restart"]
+    assert recover.call_count == 2
+    assert run_retry.call_count == 2
+    recovery = result.config["farm_echo_recovery"]
+    assert recovery["total_completed"] == 5
+    assert recovery["client_restart_triggered"] is True
+    assert recovery["client_restart_count"] == 2
+    assert recovery["consecutive_no_progress_retries"] == 0
+
+
+def test_failed_safety_recovery_without_restart_adapter_fails_immediately(
+    tmp_path: Path,
+) -> None:
+    """Do not retry a changing live UI from the same stale Worker log."""
 
     runs = tmp_path / "runs"
     initial = _result(
@@ -1024,13 +1107,13 @@ def test_failed_safety_recovery_never_starts_unsafe_worker_until_window_ends(
 
     assert result.status == "failed"
     recoveries = result.config["farm_echo_recovery"]
-    # The abolished cap was 3; the window keeps retrying well past it.
-    assert recover.call_count > 3
+    recover.assert_called_once()
     run_retry.assert_not_called()
-    assert (
-        recoveries["consecutive_no_progress_retries"] == recover.call_count
+    assert recoveries["consecutive_no_progress_retries"] == 1
+    assert recoveries["retry_error"] == (
+        "FarmEcho requires a clean client restart but no restart adapter "
+        "is available"
     )
-    assert "no-progress window exhausted" in recoveries["retry_error"]
 
 
 def test_frozen_recovery_clock_stops_the_ladder(tmp_path: Path) -> None:
@@ -1071,11 +1154,10 @@ def test_frozen_recovery_clock_stops_the_ladder(tmp_path: Path) -> None:
     assert run_retry.call_count == 1
 
 
-def test_workerless_fast_fail_iterations_are_paced(
+def test_failed_recovery_without_restart_does_not_spin_or_sleep(
     tmp_path: Path,
 ) -> None:
-    """A tight loop of instantly failing recoveries is paced so the window,
-    not the loop rate, bounds it; Worker iterations are never paced."""
+    """Missing infrastructure is terminal, not a worker-less retry loop."""
 
     runs = tmp_path / "runs"
     initial = _result(
@@ -1105,10 +1187,11 @@ def test_workerless_fast_fail_iterations_are_paced(
         )
 
     assert result.status == "failed"
-    assert sleeps == [20.0, 20.0, 20.0]
+    assert sleeps == []
     assert run_retry.call_count == 0
-    assert "no-progress window exhausted" in (
-        result.config["farm_echo_recovery"]["retry_error"]
+    assert result.config["farm_echo_recovery"]["retry_error"] == (
+        "FarmEcho requires a clean client restart but no restart adapter "
+        "is available"
     )
 
 

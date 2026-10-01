@@ -236,6 +236,8 @@ class OkRunnerPreflightTests(unittest.TestCase):
             preflight_weekly_garden_task,
         )
         self.assertIsNone(run_task.call_args.kwargs["task_index"])
+        command = _build_task_command(11, "weekly_garden")
+        self.assertEqual(command[command.index("-t") + 1], "src.task.GardenTask.GardenTask")
 
 
 if __name__ == "__main__":

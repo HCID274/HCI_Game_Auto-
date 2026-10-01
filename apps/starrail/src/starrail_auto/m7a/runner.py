@@ -23,7 +23,9 @@ from starrail_auto.m7a.config_guard import (
 )
 from starrail_auto.m7a.disclaimer import M7ADisclaimerHandler
 from starrail_auto.m7a.environment import wait_for_game_ready
+from starrail_auto.m7a.launcher_update import launcher_update_maintenance
 from starrail_auto.m7a.logs import (
+    battle_in_progress,
     capture_failure_evidence,
     capture_log_checkpoint,
     daily_run_outcome,
@@ -32,6 +34,7 @@ from starrail_auto.m7a.logs import (
     wait_for_daily_completion,
 )
 from starrail_auto.m7a.models import M7ALogCheckpoint, RunResult
+from starrail_auto.m7a.tutorial_recovery import GluttonyTutorialRecovery
 from starrail_auto.m7a.watchdog import find_new_assistant, hard_timeout_for_task, watch
 
 log = logging.getLogger(__name__)
@@ -107,9 +110,11 @@ def run_m7a(task: str, timeout: int, *, uu_retries: int = 0) -> RunResult:
     log.info("M7A launcher started: pid=%d task=%s", launcher.pid, task)
 
     disclaimer = M7ADisclaimerHandler(started_at=launch_started_at)
+    maintenance_check = lambda: launcher_update_maintenance(checkpoint)
     try:
         game_ready = wait_for_game_ready(
-            startup_check=lambda: _startup_ready(disclaimer, config_session)
+            startup_check=lambda: _startup_ready(disclaimer, config_session),
+            maintenance_check=maintenance_check,
         )
     except M7AConfigProtectionError as exc:
         log.error("M7A stopped after unsafe config mutation: %s", exc)
@@ -134,11 +139,18 @@ def run_m7a(task: str, timeout: int, *, uu_retries: int = 0) -> RunResult:
     else:
         log.warning("Assistant was not discovered; watchdog uses launcher pid=%d", launcher.pid)
 
+    tutorial_recovery = GluttonyTutorialRecovery()
+    obstacle_recovery = lambda: (
+        tutorial_recovery.poll() if battle_in_progress(checkpoint) else False
+    )
+
     exit_code = watch(
         target,
         hard_timeout,
         checkpoint=checkpoint,
         stop_when_main_resolved=(task == "main"),
+        maintenance_in_progress=maintenance_check,
+        obstacle_recovery=obstacle_recovery,
     )
     if exit_code == EXIT_OK and task == "main":
         if daily_run_outcome(checkpoint) != "completed" and not wait_for_daily_completion(checkpoint):

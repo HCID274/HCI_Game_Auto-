@@ -2,6 +2,7 @@ from wuwa_auto.okww.farm_echo_state import (
     click_realm_defeat_exit,
     party_member_unavailable,
     realm_defeat_visible,
+    revival_item_unavailable_visible,
     revive_dialog_visible,
 )
 
@@ -58,4 +59,16 @@ def test_party_member_unavailable_requires_blocked_switch_and_party_hud() -> Non
     assert not party_member_unavailable(
         FakeRealmTask([], (True, 0, 3)),
         "sleep check not in combat",
+    )
+
+
+def test_revival_item_prompt_requires_prompt_and_party_hud() -> None:
+    assert revival_item_unavailable_visible(
+        FakeRealmTask([True], team_state=(True, 0, 3))
+    )
+    assert not revival_item_unavailable_visible(
+        FakeRealmTask([False], team_state=(True, 0, 3))
+    )
+    assert not revival_item_unavailable_visible(
+        FakeRealmTask([True], team_state=(False, 0, 3))
     )

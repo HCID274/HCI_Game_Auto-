@@ -33,6 +33,8 @@ Daily Task exception stopped
 def _validate_compatibility():
     with patch("wuwa_auto.daily.validate_okww_compatibility"), patch(
         "wuwa_auto.daily._prepare_okww_cold_start"
+    ), patch(
+        "wuwa_auto.daily.stop_stale_workflow_controllers"
     ):
         yield
 
@@ -773,6 +775,8 @@ def test_retry_ladder_stops_only_after_no_progress_window(
     assert result.status == "failed"
     assert result.exit_code == 1
     assert retry_daily.call_count == 2
+    assert result.config["daily_recovery_root_run_id"] == "initial"
+    assert result.run_id == "initial_daily_generic_retry_2"
     history = result.config["daily_state_recoveries"]
     retry_records = [record for record in history if record["triggered"]]
     assert [record["attempt"] for record in retry_records] == [1, 2]

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'wuwa-daily', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
+    [ValidateSet('auto', 'daily-chain', 'starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     $requestedMode = (Get-Content -LiteralPath $modeRequestPath -Raw).Trim()
-    if ($requestedMode -notin @('wuwa-daily', 'farm-echo', 'weekly-garden', 'wuwa-cleanup')) {
+    if ($requestedMode -notin @('starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup')) {
         throw "unsupported one-shot mode: $requestedMode"
     }
     $runMode = $requestedMode
@@ -184,10 +184,30 @@ try {
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName FarmEcho -Label 'Wuthering Waves farm echo'
             }
+            'starrail-daily' {
+                $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName Daily -Label 'Star Rail daily'
+                $starRailCleanupCode = Invoke-AppCommand -AppName StarRail -CommandName Cleanup -Label 'Star Rail cleanup'
+                $wuwaCode = 0
+            }
+            'starrail-cleanup' {
+                $starRailCode = 0
+                $starRailCleanupCode = Invoke-AppCommand -AppName StarRail -CommandName Cleanup -Label 'Star Rail cleanup only'
+                $wuwaCode = 0
+            }
+            'starrail-update-recovery' {
+                $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName UpdateRecovery -Label 'Star Rail launcher update recovery'
+                $starRailCleanupCode = 0
+                $wuwaCode = 0
+            }
             'wuwa-daily' {
                 $starRailCode = 0
                 $starRailCleanupCode = 0
                 $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Daily -Label 'Wuthering Waves daily'
+            }
+            'wuwa-daily-only' {
+                $starRailCode = 0
+                $starRailCleanupCode = 0
+                $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName DailyOnly -Label 'Wuthering Waves daily without boss replay'
             }
             'weekly-garden' {
                 $starRailCode = 0

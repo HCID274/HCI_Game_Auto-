@@ -8,7 +8,11 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from wuwa_auto.cleanup import CleanupResult, cleanup_after_run
+from wuwa_auto.cleanup import (
+    CleanupResult,
+    cleanup_after_run,
+    stop_stale_workflow_controllers,
+)
 from wuwa_auto.client.launcher import ensure_client_updated, stop_client_launchers
 from wuwa_auto.input.viiper import managed_virtual_mouse
 from wuwa_auto.okww.compatibility import validate_okww_compatibility
@@ -25,8 +29,8 @@ from wuwa_auto.okww.recovery import (
 from wuwa_auto.okww.recovery_flow import maybe_recover_farm_echo_death
 from wuwa_auto.okww.runner import (
     OkRunResult,
-    run_daily_task,
     run_daily_resume_task,
+    run_daily_task,
     run_weekly_garden_task,
     stop_daily_workers,
     stop_wuthering_game,
@@ -92,12 +96,14 @@ def _compose_recovery_result(
     record_extra: dict[str, object] | None = None,
 ) -> OkRunResult:
     base_dir = Path(initial.log_slice_path).parent.parent
-    run_id = f"{initial.run_id}_{run_suffix}"
+    # 重试关系放在元数据中，不把每一轮的完整名字递归塞进目录名。
+    root_run_id = str(initial.config.get("daily_recovery_root_run_id") or initial.run_id)
+    run_id = f"{root_run_id}_{run_suffix}"
     run_dir = base_dir / run_id
     suffix = 1
     while run_dir.exists():
         suffix += 1
-        run_id = f"{initial.run_id}_{run_suffix}_{suffix}"
+        run_id = f"{root_run_id}_{run_suffix}_{suffix}"
         run_dir = base_dir / run_id
     run_dir.mkdir(parents=True)
 
@@ -109,6 +115,7 @@ def _compose_recovery_result(
 
     final = retry or initial
     config = dict(final.config)
+    config["daily_recovery_root_run_id"] = root_run_id
     # Workflow-level flags must survive composes even if a future runner
     # change stops re-injecting them; losing daily_resume here would
     # silently degrade a resume ladder into a full daily re-run.
@@ -307,42 +314,46 @@ def _retry_daily_after_any_failure(
             )
         attempt += 1
         failure_reason = current.reason
-        stop_daily_workers()
-        recovery = run_world_state_recovery(
-            Path(current.log_slice_path).parent,
-            attempt=attempt,
-        )
-        client_restarted = False
-        if not recovery.success and client_restart is not None:
-            client_restarted = bool(client_restart())
-        runner = (
-            run_daily_resume_task
-            if current.config.get("daily_resume") == "after_nightmare"
-            else run_daily_task
-        )
-        retry = runner()
-        fingerprint = _daily_progress_fingerprint(retry)
-        progressed = fingerprint != previous
-        if progressed:
-            last_progress_at = now_fn()
-            previous = fingerprint
-        current = _compose_recovery_result(
-            current,
-            retry=retry,
-            recovery=recovery,
-            recovery_kind=DAILY_GENERIC_RETRY_KIND,
-            run_suffix=f"daily_generic_retry_{attempt}",
-            record_extra={
-                "attempt": attempt,
-                "failure_reason": failure_reason,
-                "client_restarted": client_restarted,
-                "retry_status": retry.status,
-                "progressed": progressed,
-                "minutes_since_progress": round(
-                    (now_fn() - last_progress_at) / 60.0
-                ),
-            },
-        )
+        try:
+            stop_daily_workers()
+            recovery = run_world_state_recovery(
+                Path(current.log_slice_path).parent,
+                attempt=attempt,
+            )
+            client_restarted = False
+            if not recovery.success and client_restart is not None:
+                client_restarted = bool(client_restart())
+            runner = (
+                run_daily_resume_task
+                if current.config.get("daily_resume") == "after_nightmare"
+                else run_daily_task
+            )
+            retry = runner()
+            fingerprint = _daily_progress_fingerprint(retry)
+            progressed = fingerprint != previous
+            if progressed:
+                last_progress_at = now_fn()
+                previous = fingerprint
+            current = _compose_recovery_result(
+                current,
+                retry=retry,
+                recovery=recovery,
+                recovery_kind=DAILY_GENERIC_RETRY_KIND,
+                run_suffix=f"daily_generic_retry_{attempt}",
+                record_extra={
+                    "attempt": attempt,
+                    "failure_reason": failure_reason,
+                    "client_restarted": client_restarted,
+                    "retry_status": retry.status,
+                    "progressed": progressed,
+                    "minutes_since_progress": round(
+                        (now_fn() - last_progress_at) / 60.0
+                    ),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 事务边界统一记录异常、截图和已完成进度
+            # 宿主异常也必须保留已完成阶段，失败不等于此前什么都没做。
+            return _record_transaction_failure(current, f"daily retry {attempt}: {exc}")
     return current
 
 
@@ -437,12 +448,14 @@ def _run_boss_then_daily_task(
             target_count=target,
             attempt_limit=attempt_limit,
         )
-    boss = maybe_recover_farm_echo_death(
-        boss,
-        client_restart=client_restart,
-    )
-
-    stop_daily_workers()
+    try:
+        boss = maybe_recover_farm_echo_death(
+            boss,
+            client_restart=client_restart,
+        )
+        stop_daily_workers()
+    except Exception as exc:  # noqa: BLE001 - 阶段边界保留上游结果，统一失败落盘
+        boss = _record_transaction_failure(boss, f"FarmEcho phase exception: {exc}")
     if boss.status != "success":
         skipped_log = Path(boss.log_slice_path).parent / "daily-skipped.log"
         skipped_log.write_text(
@@ -464,12 +477,37 @@ def _run_boss_then_daily_task(
             exit_code=1,
         )
         return _compose_ordered_daily_result(boss, daily)
-    daily = _maybe_recover_daily_state(
-        run_daily_task(),
-        client_restart=daily_client_restart,
-        workflow_started=workflow_started,
-    )
+    daily = None
+    try:
+        daily = run_daily_task()
+        daily = _maybe_recover_daily_state(
+            daily,
+            client_restart=daily_client_restart,
+            workflow_started=workflow_started,
+        )
+    except Exception as exc:  # noqa: BLE001 - 日常异常不能抹掉已经完成的讨伐
+        daily = _record_transaction_failure(
+            daily, f"DailyTask phase exception: {exc}"
+        )
     return _compose_ordered_daily_result(boss, daily)
+
+
+def _record_transaction_failure(
+    source: OkRunResult | None, reason: str,
+) -> OkRunResult:
+    log.exception(reason)
+    evidence = None
+    try:
+        evidence = save_step_screenshot("wuwa_transaction_settlement_failed")
+    except Exception:
+        log.exception("could not save transaction settlement failure screenshot")
+    return write_workflow_failure(
+        started=(datetime.fromisoformat(source.started_at) if source
+                 else datetime.now().astimezone()),
+        reason=reason,
+        evidence_path=evidence,
+        source_result=source,
+    )
 
 
 def _settle_business_transaction(
@@ -500,24 +538,14 @@ def _settle_business_transaction(
                 client_restart=client_restart,
             )
         return current
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 统一异常留证函数会记录完整 traceback
         reason = f"{task_name} business transaction settlement exception: {exc}"
-        log.exception(reason)
-        evidence = None
-        try:
-            evidence = save_step_screenshot("wuwa_transaction_settlement_failed")
-        except Exception:
-            log.exception("could not save transaction settlement failure screenshot")
-        return write_workflow_failure(
-            started=datetime.fromisoformat(current.started_at),
-            reason=reason,
-            evidence_path=evidence,
-            source_result=current,
-        )
+        return _record_transaction_failure(current, reason)
 
 
 def _run_workflow(task_name: str, task_runner) -> int:
     require_admin()
+    stop_stale_workflow_controllers()
     started = datetime.now().astimezone()
     result: OkRunResult | None = None
     cleanup: CleanupResult | None = None
@@ -559,11 +587,8 @@ def _run_workflow(task_name: str, task_runner) -> int:
                 _prepare_okww_cold_start()
                 log.info("%s workflow: start OK-WW task", task_name)
                 workflow_started_monotonic = time.perf_counter()
-                restart_state: dict[str, bool] = {"done": False}
 
-                def restart_client_once() -> bool:
-                    if restart_state["done"]:
-                        return False
+                def restart_client_for_farm_echo() -> bool:
                     log.info(
                         "%s workflow: close Wuthering Waves so the next "
                         "OK-WW worker can relaunch and rebind it",
@@ -572,7 +597,6 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     stop_daily_workers()
                     stop_wuthering_game()
                     stop_client_launchers()
-                    restart_state["done"] = True
                     return True
 
                 def restart_client_for_daily() -> bool:
@@ -591,7 +615,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
 
                 if task_runner is _run_boss_then_daily_task:
                     result = _run_boss_then_daily_task(
-                        client_restart=restart_client_once,
+                        client_restart=restart_client_for_farm_echo,
                         daily_client_restart=restart_client_for_daily,
                         workflow_started=workflow_started_monotonic,
                     )
@@ -604,7 +628,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
                     task_name,
                     result,
                     client_restart=(
-                        restart_client_once
+                        restart_client_for_farm_echo
                         if task_name == "farm_echo"
                         else restart_client_for_daily
                         if task_name == "daily"
@@ -615,9 +639,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
             except Exception as exc:
                 failure_reason = f"{task_name} workflow exception: {exc}"
                 log.exception(failure_reason)
-                # Never let a result captured before an exception cross the
-                # final notification boundary as if the workflow had settled.
-                result = None
+                # 保留此前的日志，但异常结果仍必须标为失败。
                 try:
                     failure_evidence = save_step_screenshot(
                         "wuwa_daily_workflow_failed"
@@ -633,11 +655,12 @@ def _run_workflow(task_name: str, task_runner) -> int:
             failure_reason = f"virtual HID or cleanup exception: {exc}"
             log.exception(failure_reason)
 
-    if result is None:
+    if failure_reason or result is None:
         result = write_workflow_failure(
             started=started,
             reason=failure_reason or "daily workflow ended without a result",
             evidence_path=failure_evidence,
+            source_result=result,
         )
     if cleanup is None:
         cleanup = cleanup_after_run(

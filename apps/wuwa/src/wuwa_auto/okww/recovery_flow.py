@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from wuwa_auto.okww.config import (
@@ -24,6 +25,9 @@ from wuwa_auto.okww.logs import (
     is_recoverable_farm_echo_entry_failure,
     is_recoverable_farm_echo_party_member_unavailable,
     is_recoverable_farm_echo_realm_defeat,
+    is_farm_echo_startup_handoff_timeout,
+    is_farm_echo_world_team_blocked,
+    WORLD_TEAM_BLOCKED_REASON,
 )
 from wuwa_auto.okww.recovery import (
     FarmEchoRecoveryResult,
@@ -128,6 +132,12 @@ def _write_composite(
     consecutive_no_progress_retries: int = 0,
     no_progress_window_seconds: float = 0.0,
 ) -> OkRunResult:
+    client_restart_count = sum(
+        recovery.kind == "client_restart" for recovery in recoveries
+    )
+    client_restart_triggered = bool(
+        client_restart_triggered or client_restart_count
+    )
     game_recoveries = [
         recovery for recovery in recoveries
         if recovery.kind != "client_restart"
@@ -156,6 +166,7 @@ def _write_composite(
         "entry_retry_attempts": entry_retry_attempts,
         "combat_rebind_attempts": combat_rebind_attempts,
         "client_restart_triggered": client_restart_triggered,
+        "client_restart_count": client_restart_count,
         "retry_limit": None,
         "progress_driven_retries": True,
         "no_progress_window_seconds": no_progress_window_seconds,
@@ -213,14 +224,14 @@ def _write_composite(
             f"FarmEcho recovered and completed {total_completed}/{target}; "
             f"worker_retries={retry_runs} (progress-driven); "
             f"combat_rebinds={combat_rebind_attempts}; "
-            f"client_restarts={int(client_restart_triggered)}"
+            f"client_restarts={client_restart_count}"
         )
     else:
         reason = (
             f"FarmEcho recovery incomplete: absorbed {total_completed}/{target}; "
             f"worker_retries={retry_runs} (progress-driven); "
             f"combat_rebinds={combat_rebind_attempts}; "
-            f"client_restarts={int(client_restart_triggered)}; "
+            f"client_restarts={client_restart_count}; "
             f"recoveries={len(game_recoveries)}"
         )
         if retry_error:
@@ -272,6 +283,22 @@ def maybe_recover_farm_echo_death(
     if result.status == "success":
         return result
     initial_text = _read_log(result)
+    world_team_blocked = is_farm_echo_world_team_blocked(initial_text)
+    startup_handoff_timeout = is_farm_echo_startup_handoff_timeout(result.reason)
+    if world_team_blocked or startup_handoff_timeout:
+        # 上游已等待主界面十分钟；不伪造队伍状态、不自动推进剧情。
+        result = replace(
+            result,
+            reason=WORLD_TEAM_BLOCKED_REASON if world_team_blocked else result.reason,
+            config={
+                **result.config,
+                "farm_echo_world_team_blocked": world_team_blocked,
+                "farm_echo_startup_handoff_timeout": startup_handoff_timeout,
+            },
+        )
+        write_result(result, Path(result.log_slice_path).parent)
+        log.error("FarmEcho startup prerequisite blocked: %s", result.reason)
+        return result
     confirmed_worker = result.config.get("workflow_task") == (
         "farm_echo_confirmed_retry"
     )
@@ -360,6 +387,9 @@ def maybe_recover_farm_echo_death(
             last_loop_tick = now
             previous_iteration_ran_worker = False
             current_text = _read_log(current)
+            if is_farm_echo_world_team_blocked(current_text):
+                retry_error = WORLD_TEAM_BLOCKED_REASON
+                break
             death_failure = is_recoverable_farm_echo_death(current_text)
             realm_defeat = is_recoverable_farm_echo_realm_defeat(current_text)
             party_member_unavailable = (
@@ -442,11 +472,14 @@ def maybe_recover_farm_echo_death(
                 resume_active_realm = True
 
             restart_for_network = startup_network_failure and not client_restart_done
-            restart_for_failed_recovery = bool(
-                recovery_failed
-                and client_restart is not None
-                and not client_restart_done
-            )
+            # A failed recovery may already have changed the live UI (for
+            # example, left the defeat screen or entered a loading screen).
+            # Never classify that changing UI again from the stale Worker
+            # log. Rebuild a clean OK-owned entry boundary, then let a fresh
+            # Worker produce the next classification. Unlike network and
+            # degradation recovery, this remains repeatable inside the
+            # shared no-progress time window.
+            restart_for_failed_recovery = recovery_failed
             restart_for_degradation = (
                 degraded
                 and degraded_runs >= DEGRADED_RUNS_BEFORE_CLIENT_RESTART
@@ -477,7 +510,10 @@ def maybe_recover_farm_echo_death(
                     if restart_for_failed_recovery
                     else "upstream combat degradation detected"
                 )
-                log.warning("FarmEcho %s; restarting the client once", restart_reason)
+                log.warning(
+                    "FarmEcho %s; rebuilding a clean client entry boundary",
+                    restart_reason,
+                )
                 try:
                     restarted = bool(client_restart())
                 except Exception as exc:
@@ -490,7 +526,7 @@ def maybe_recover_farm_echo_death(
                 recoveries.append(
                     FarmEchoRecoveryResult(
                         success=True,
-                        reason=f"client restarted once after {restart_reason}",
+                        reason=f"client restarted after {restart_reason}",
                         evidence_path=None,
                         worker_result_path="",
                         kind="client_restart",

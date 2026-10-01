@@ -41,7 +41,7 @@ def test_unsafe_startup_mutation_stops_only_new_m7a_processes() -> None:
     session.verify_live.side_effect = M7AConfigProtectionError("reset")
     launcher = Mock(pid=1234)
 
-    def wait_for_ready(*, startup_check: object) -> bool:
+    def wait_for_ready(*, startup_check: object, maintenance_check: object) -> bool:
         startup_check()
         return True
 

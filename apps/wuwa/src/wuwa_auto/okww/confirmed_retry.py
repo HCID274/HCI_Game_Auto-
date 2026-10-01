@@ -10,14 +10,17 @@ from datetime import datetime
 from pathlib import Path
 
 from wuwa_auto.client.launcher import (
+    click_startup_agreement,
     click_startup_network_retry,
     is_game_window_alive,
     startup_network_retry_visible,
 )
 from wuwa_auto.okww.logs import (
+    WORLD_TEAM_BLOCKED_REASON,
     LogCursor,
     count_farm_echo_absorptions,
     has_farm_echo_current_char_bind_failure,
+    is_farm_echo_world_team_blocked,
 )
 from wuwa_auto.okww.recovery import focus_game_window_for_ok_startup
 from wuwa_auto.okww.runner import (
@@ -45,11 +48,34 @@ MAX_FARM_ECHO_RUNTIME_SECONDS = 3600.0
 ACTIVE_REALM_BIND_FAILURE_REASON = (
     "fresh upstream worker could not bind the current active character"
 )
-OK_STARTUP_WINDOW_STABLE_MARKER = "StartController:started window size stable"
+# Upstream renamed the logger from ``StartController`` to
+# ``start_controller``.  The message body is the stable contract we need;
+# coupling startup focus to logger spelling left MouseResetTask at login.
+OK_STARTUP_WINDOW_STABLE_MARKER = "started window size stable"
 UPSTREAM_INTERACTION_MARKER = "HOST_FARM_ECHO_UPSTREAM_INTERACTION"
 GAMEPLAY_HANDOFF_MARKER = "HOST_FARM_ECHO_GAMEPLAY_HANDOFF"
 MAX_STARTUP_NETWORK_RETRIES = 3
 STARTUP_NETWORK_RETRY_COOLDOWN_SECONDS = 15.0
+# Framework initialization is noisy, so "some log exists" cannot prove that
+# the one-time task actually started. A cold launch normally hands control to
+# FarmEcho in a few minutes; keep a generous independent deadline without
+# shortening the 45-minute in-combat log-stall allowance.
+FARM_ECHO_HANDOFF_TIMEOUT_SECONDS = 600.0
+
+
+def _startup_handoff_timeout_reason(
+    text: str,
+    *,
+    elapsed_seconds: float,
+) -> str | None:
+    if UPSTREAM_INTERACTION_MARKER in text:
+        return None
+    if elapsed_seconds <= FARM_ECHO_HANDOFF_TIMEOUT_SECONDS:
+        return None
+    return (
+        "OK-WW initialized but did not hand off to FarmEcho within "
+        f"{FARM_ECHO_HANDOFF_TIMEOUT_SECONDS:.0f} seconds"
+    )
 
 
 def _live_combat_degradation_reason(
@@ -70,7 +96,7 @@ def _focus_ok_startup_window_if_needed(
     """Focus once after OK owns and binds a cold-started game window."""
     if already_focused:
         return True
-    if OK_STARTUP_WINDOW_STABLE_MARKER not in text:
+    if OK_STARTUP_WINDOW_STABLE_MARKER not in text.casefold():
         return False
     if UPSTREAM_INTERACTION_MARKER in text:
         return False
@@ -87,7 +113,7 @@ def _handle_startup_network_retry(
     now: float,
 ) -> tuple[int, float, str | None]:
     """Handle only the exact pre-gameplay network dialog with a three-click cap."""
-    if OK_STARTUP_WINDOW_STABLE_MARKER not in text:
+    if OK_STARTUP_WINDOW_STABLE_MARKER not in text.casefold():
         return retry_clicks, last_retry_at, None
     if GAMEPLAY_HANDOFF_MARKER in text:
         return retry_clicks, last_retry_at, None
@@ -196,6 +222,7 @@ def run_confirmed_farm_echo_retry(
     timeout_reason = ""
     live_combat_degradation = False
     startup_window_focused = False
+    startup_agreement_clicked = False
     startup_network_retry_clicks = 0
     last_startup_network_retry_at = 0.0
     startup_network_retry_exhausted = False
@@ -245,6 +272,9 @@ def run_confirmed_farm_echo_retry(
                     )
                     break
             text = "".join(collected)
+            # 协议弹窗可能先于 UnrealWindow 出现，不能等窗口稳定日志才处理。
+            if not startup_agreement_clicked and UPSTREAM_INTERACTION_MARKER not in text:
+                startup_agreement_clicked = click_startup_agreement()
             confirmed_absorptions = count_farm_echo_absorptions(text)
             if confirmed_absorptions > last_confirmed_absorptions:
                 last_confirmed_absorptions = confirmed_absorptions
@@ -285,8 +315,7 @@ def run_confirmed_farm_echo_retry(
             elif saw_game_window:
                 timeout_reason = (
                     "Wuthering Waves client window disappeared during confirmed "
-                    "FarmEcho retry; the startup network retry likely clicked "
-                    "退出 instead of 重试"
+                    "FarmEcho retry; inspect the saved startup action evidence"
                 )
                 log.error(timeout_reason)
                 try:
@@ -304,6 +333,13 @@ def run_confirmed_farm_echo_retry(
                 timeout_reason = (
                     "confirmed FarmEcho retry produced no log before startup deadline"
                 )
+                break
+            handoff_timeout = _startup_handoff_timeout_reason(
+                text,
+                elapsed_seconds=now - started_monotonic,
+            )
+            if handoff_timeout:
+                timeout_reason = handoff_timeout
                 break
             if saw_log_activity and now - last_log_activity > LOG_STALL_TIMEOUT:
                 timeout_reason = "confirmed FarmEcho retry log stalled for 45 minutes"
@@ -331,6 +367,7 @@ def run_confirmed_farm_echo_retry(
         absorbed_count = count_farm_echo_absorptions("".join(collected))
     facts["confirmed_farm_echo_absorption_count"] = absorbed_count
     facts["ok_cold_start_window_focused"] = startup_window_focused
+    facts["ok_startup_agreement_clicked"] = startup_agreement_clicked
     facts["farm_echo_startup_network_retry_clicks"] = startup_network_retry_clicks
     facts["farm_echo_startup_network_retry_exhausted"] = (
         startup_network_retry_exhausted
@@ -357,6 +394,10 @@ def run_confirmed_farm_echo_retry(
             or payload.get("reason")
             or f"confirmed FarmEcho retry worker exited with code {exit_code}"
         )
+        if is_farm_echo_world_team_blocked("".join(collected)):
+            reason = WORLD_TEAM_BLOCKED_REASON
+            facts["farm_echo_world_team_blocked"] = True
+            log.error("FarmEcho startup prerequisite blocked: %s", reason)
         evidence = save_step_screenshot("ok_farm_echo_confirmed_retry_failed")
 
     finished = datetime.now().astimezone()

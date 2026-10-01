@@ -1,5 +1,6 @@
 from wuwa_auto.okww.confirmed_retry import (
     ACTIVE_REALM_BIND_FAILURE_REASON,
+    FARM_ECHO_HANDOFF_TIMEOUT_SECONDS,
     GAMEPLAY_HANDOFF_MARKER,
     MAX_STARTUP_NETWORK_RETRIES,
     OK_STARTUP_WINDOW_STABLE_MARKER,
@@ -7,6 +8,7 @@ from wuwa_auto.okww.confirmed_retry import (
     _focus_ok_startup_window_if_needed,
     _handle_startup_network_retry,
     _live_combat_degradation_reason,
+    _startup_handoff_timeout_reason,
 )
 
 
@@ -49,6 +51,20 @@ def test_cold_start_focus_runs_once_before_upstream_task(monkeypatch) -> None:
     )
 
     assert focused is True
+    assert calls == [True]
+
+
+def test_cold_start_focus_accepts_upstream_snake_case_logger(monkeypatch) -> None:
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "wuwa_auto.okww.confirmed_retry.focus_game_window_for_ok_startup",
+        lambda: calls.append(True),
+    )
+
+    assert _focus_ok_startup_window_if_needed(
+        "start_controller:started window size stable for 2s: 2560x1440",
+        already_focused=False,
+    ) is True
     assert calls == [True]
 
 
@@ -113,3 +129,21 @@ def test_startup_network_retry_never_clicks_after_gameplay_handoff(
     )
 
     assert (retry_clicks, last_retry_at, reason) == (0, 0.0, None)
+
+
+def test_framework_logs_do_not_disable_business_handoff_timeout() -> None:
+    reason = _startup_handoff_timeout_reason(
+        "TaskExecutor:default ocr init end\n",
+        elapsed_seconds=FARM_ECHO_HANDOFF_TIMEOUT_SECONDS + 1,
+    )
+
+    assert reason == (
+        "OK-WW initialized but did not hand off to FarmEcho within 600 seconds"
+    )
+
+
+def test_business_handoff_disables_startup_phase_timeout() -> None:
+    assert _startup_handoff_timeout_reason(
+        f"TaskExecutor:default ocr init end\n{UPSTREAM_INTERACTION_MARKER}\n",
+        elapsed_seconds=FARM_ECHO_HANDOFF_TIMEOUT_SECONDS * 10,
+    ) is None

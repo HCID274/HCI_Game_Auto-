@@ -98,6 +98,24 @@ def main_run_outcome(checkpoint: M7ALogCheckpoint) -> str | None:
     return None
 
 
+def game_update_waiting(checkpoint: M7ALogCheckpoint) -> bool:
+    """Return whether this run most recently handed control to the game launcher."""
+    content = read_log_since(checkpoint)
+    return content.rfind("启动器启动：") > content.rfind("游戏启动：")
+
+
+def battle_in_progress(checkpoint: M7ALogCheckpoint) -> bool:
+    """Return whether the current M7A log slice is inside a combat wait."""
+    content = read_log_since(checkpoint)
+    started = content.rfind("进入战斗")
+    finished = max(
+        content.rfind("战斗完成"),
+        content.rfind("战斗超时"),
+        content.rfind("副本任务完成"),
+    )
+    return started >= 0 and started > finished
+
+
 def summarize_daily_failure(checkpoint: M7ALogCheckpoint) -> str:
     content = read_log_since(checkpoint)
     scores = M7A_DAILY_SCORE_PATTERN.findall(content)

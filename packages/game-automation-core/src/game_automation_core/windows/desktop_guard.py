@@ -7,6 +7,7 @@ import logging
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
+from pathlib import Path
 
 import psutil
 
@@ -216,12 +217,50 @@ def require_desktop_ready(
     blockers = desktop_blockers(windows)
     if blockers:
         raise DesktopBlockedError(blockers)
+    if windows is None:
+        dismiss_known_desktop_notifications()
     current = foreground_window() if windows is None else next(
         (window for window in windows if window.foreground),
         None,
     )
     log.info("desktop guard passed; foreground=%s", describe_window(current))
     return current
+
+
+def dismiss_known_desktop_notifications() -> None:
+    """只关闭已核实的热键冲突通知，保留 Flow Launcher 主程序和设置。"""
+    import pyautogui
+
+    # 使用独立 DLL 句柄，避免 RECT 参数类型污染 PyGetWindow 的同名结构体。
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    template = Path(__file__).with_name("flow_hotkey_error.png")
+    for window in visible_windows():
+        if window.process_name.casefold() != "flow.launcher.exe" or window.title != "Flow Launcher":
+            continue
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
+            continue
+        region = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        try:
+            match = pyautogui.locateOnScreen(str(template), region=region, confidence=0.95)
+        except pyautogui.ImageNotFoundException:
+            match = None
+        if match is None:
+            continue
+        # 截图证据与 HWND 身份同时成立后发送关闭，不点击含义不明的“更新”。
+        evidence = Path.cwd() / "runtime" / "evidence" / f"flow_hotkey_{window.pid}_{time.time_ns()}.png"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        pyautogui.screenshot(str(evidence))
+        user32.PostMessageW(window.hwnd, 0x0010, 0, 0)
+        deadline = time.monotonic() + 3
+        while user32.IsWindowVisible(window.hwnd) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if user32.IsWindowVisible(window.hwnd):
+            raise RuntimeError(f"Flow hotkey notification did not close; evidence={evidence}")
+        log.info("closed verified Flow hotkey notification pid=%s evidence=%s", window.pid, evidence)
 
 
 def _try_foreground(hwnd: int, *, synthesize_alt: bool) -> None:

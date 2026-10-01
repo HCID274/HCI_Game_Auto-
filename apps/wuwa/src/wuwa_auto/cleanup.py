@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 
 import psutil
@@ -25,6 +26,7 @@ from wuwa_auto.uu.processes import (
 from wuwa_auto.uu.service import disconnect
 
 log = logging.getLogger(__name__)
+_WORKFLOW_COMMANDS = {"daily", "farm-echo", "weekly-garden"}
 
 
 @dataclass
@@ -47,10 +49,50 @@ def _game_running() -> bool:
     )
 
 
+def _is_wuwa_workflow_controller(command_line: list[str] | None) -> bool:
+    if not command_line:
+        return False
+    tokens = [str(token).casefold() for token in command_line]
+    has_entrypoint = any("wuwa-auto" in token for token in tokens)
+    return has_entrypoint and any(token in _WORKFLOW_COMMANDS for token in tokens)
+
+
+def stop_stale_workflow_controllers() -> list[int]:
+    """Terminate orphaned Wuwa workflow controllers outside this process tree."""
+    protected = {os.getpid()}
+    current = psutil.Process()
+    protected.update(parent.pid for parent in current.parents())
+    stale: list[psutil.Process] = []
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        if process.pid in protected:
+            continue
+        try:
+            if _is_wuwa_workflow_controller(process.info.get("cmdline")):
+                stale.append(process)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+    for process in stale:
+        try:
+            process.terminate()
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            log.exception("could not terminate stale Wuwa controller pid=%s", process.pid)
+    _, alive = psutil.wait_procs(stale, timeout=5)
+    for process in alive:
+        try:
+            process.kill()
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            log.exception("could not kill stale Wuwa controller pid=%s", process.pid)
+    stopped = [process.pid for process in stale]
+    if stopped:
+        log.warning("stopped stale Wuwa workflow controllers: %s", stopped)
+    return stopped
+
+
 def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
     """Capture is done by the caller; this function then closes every owned leaf."""
     result = CleanupResult()
     try:
+        stop_stale_workflow_controllers()
         stop_daily_workers()
         stop_pyappify_launchers()
     except Exception as exc:

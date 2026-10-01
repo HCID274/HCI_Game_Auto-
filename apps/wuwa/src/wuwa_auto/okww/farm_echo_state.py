@@ -31,6 +31,10 @@ _EXIT_BUTTON = re.compile(r"(?:退出副本|Exit\s*(?:Domain|Challenge))", re.IG
 _RETRY_BUTTON = re.compile(r"(?:重新挑战|Retry|Challenge\s*Again)", re.IGNORECASE)
 _REVIVE_TITLE = re.compile(r"(?:选择复苏物品|Select\s*Revival)", re.IGNORECASE)
 _CONFIRM_BUTTON = re.compile(r"(?:确认|Confirm)", re.IGNORECASE)
+_NO_REVIVAL_ITEM = re.compile(
+    r"(?:暂无可用的意识恢复物品|No\s+available\s+revival)",
+    re.IGNORECASE,
+)
 
 
 class RealmStateTask(Protocol):
@@ -67,6 +71,34 @@ def party_member_unavailable(
         and isinstance(party_size, int)
         and party_size >= 2
     )
+
+
+def revival_item_unavailable_visible(
+    task: RealmStateTask,
+    *,
+    time_out: float = 1.5,
+) -> bool:
+    """Confirm the low-health/dead-party prompt inside an active challenge."""
+    prompt = task.wait_ocr(
+        0.25,
+        0.10,
+        0.75,
+        0.35,
+        match=_NO_REVIVAL_ITEM,
+        time_out=time_out,
+        settle_time=0.2,
+        raise_if_not_found=False,
+    )
+    if not prompt:
+        return False
+    try:
+        state = task.in_team()
+    except Exception:
+        return False
+    if not isinstance(state, (tuple, list)) or len(state) < 3:
+        return False
+    in_team, _, party_size = state[:3]
+    return bool(in_team and isinstance(party_size, int) and party_size >= 2)
 
 
 def realm_defeat_visible(task: RealmStateTask, *, time_out: float = 1.5) -> bool:

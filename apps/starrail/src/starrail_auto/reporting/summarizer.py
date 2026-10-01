@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from game_automation_core.reporting.agent import (
@@ -12,17 +13,31 @@ from game_automation_core.reporting.agent import (
     token_usage_from_response,
 )
 from openai import OpenAI
+from game_automation_core.reporting.provider import report_headers
 
 from starrail_auto.reporting.models import NarrativeReport, RunReport, StaminaRun
 from starrail_auto.reporting.prompting.composer import compose_report_messages
 from starrail_auto.settings import get_secret
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 AI_TIMEOUT_SECONDS = 45.0
 AI_MAX_TOKENS = 8192
 
 log = logging.getLogger(__name__)
+
+
+def _load_api_key() -> str:
+    """Prefer DEEPSEEK_API_KEY, then the OpenCode Go key file."""
+    api_key = get_secret("DEEPSEEK_API_KEY")
+    if api_key:
+        return api_key
+    key_file = get_secret("OPENCODE_GO_API_KEY_FILE")
+    if key_file:
+        path = Path(key_file).expanduser()
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    return ""
 
 
 class AISummaryError(RuntimeError):
@@ -321,15 +336,19 @@ def _build_ai_input(report: RunReport) -> dict[str, Any]:
 
 def summarize_with_ai(report: RunReport) -> NarrativeReport:
     """Use low-reasoning DeepSeek output to word deterministic facts."""
-    api_key = get_secret("DEEPSEEK_API_KEY")
+    api_key = _load_api_key()
     if not api_key:
-        raise AISummaryError("DEEPSEEK_API_KEY is not configured")
+        raise AISummaryError(
+            "DEEPSEEK_API_KEY is not configured and no OpenCode Go key file "
+            "(OPENCODE_GO_API_KEY_FILE) is readable"
+        )
 
     base_url = get_secret("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL
     model = get_secret("DEEPSEEK_MODEL") or DEFAULT_MODEL
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
+        default_headers=report_headers(base_url),
         timeout=AI_TIMEOUT_SECONDS,
         max_retries=1,
     )
@@ -353,7 +372,7 @@ def summarize_with_ai(report: RunReport) -> NarrativeReport:
     except Exception as exc:
         raise AISummaryError(str(exc), token_usage=usage.to_dict()) from exc
     log.info(
-        "DeepSeek StarRail report usage: input_tokens=%s output_tokens=%s "
+        "OpenCode DeepSeek StarRail report usage: input_tokens=%s output_tokens=%s "
         "total_tokens=%s ratio=%s available=%s",
         usage.input_tokens,
         usage.output_tokens,

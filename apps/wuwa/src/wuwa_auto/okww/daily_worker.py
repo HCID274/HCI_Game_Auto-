@@ -223,6 +223,33 @@ def install_nightmare_override(task_class: type[Any]) -> None:
     host_travel.__qualname__ = method.__qualname__
     setattr(task_class, "_travel_to_nest_or_skip", host_travel)
 
+    original_wait = getattr(task_class, "wait_feature", None)
+    if callable(original_wait) and not getattr(original_wait, "__wuwa_nest_entry__", False):
+        @wraps(original_wait)
+        def verified_entry(self: Any, feature: Any, *args: Any, **kwargs: Any) -> Any:
+            features = feature
+            feature = original_wait(self, features, *args, **kwargs)
+            entry_features = {"fast_travel_custom", "gray_teleport", "remove_custom", "team_close"}
+            if (
+                isinstance(features, (list, tuple))
+                and set(features) == entry_features
+                and getattr(feature, "name", None) == "team_close"
+                and not self.find_one("team_start_challenge")
+            ):
+                # 地图与组队面板的关闭图标相似，不能仅凭它选择挑战分支。
+                self.log_info("HOST_NIGHTMARE_AMBIGUOUS_CLOSE_WAIT_ENTRY_ACTION")
+                action = original_wait(
+                    self,
+                    ["fast_travel_custom", "gray_teleport", "remove_custom", "team_start_challenge"],
+                    *args,
+                    **kwargs,
+                )
+                return feature if getattr(action, "name", None) == "team_start_challenge" else action
+            return feature
+
+        verified_entry.__wuwa_nest_entry__ = True
+        task_class.wait_feature = verified_entry
+
 
 def install_daily_resume_after_nightmare(task_class: type[Any]) -> None:
     """Skip only already-settled Nightmare work in this worker process."""

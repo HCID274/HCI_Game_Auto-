@@ -6,18 +6,20 @@
         StarRail = @{
             RelativePath = 'apps\starrail'
             Commands = @{
-                Daily = @('run', 'starrail-auto', 'daily', '--timeout', '1800')
-                Cleanup = @('run', 'starrail-auto', 'cleanup')
-                UuStart = @('run', 'starrail-auto', 'uu', 'start')
-                UuStop = @('run', 'starrail-auto', 'uu', 'stop')
-                Smoke = @('run', 'starrail-auto', 'smoke')
-                Health = @('run', 'starrail-auto', '--help')
+                Daily = @('run', 'python', '-m', 'starrail_auto', 'daily', '--timeout', '1800')
+                UpdateRecovery = @('run', 'python', '-m', 'starrail_auto.m7a.launcher_update')
+                Cleanup = @('run', 'python', '-m', 'starrail_auto', 'cleanup')
+                UuStart = @('run', 'python', '-m', 'starrail_auto', 'uu', 'start')
+                UuStop = @('run', 'python', '-m', 'starrail_auto', 'uu', 'stop')
+                Smoke = @('run', 'python', '-m', 'starrail_auto', 'smoke')
+                Health = @('run', 'python', '-m', 'starrail_auto', '--help')
             }
         }
         Wuwa = @{
             RelativePath = 'apps\wuwa'
             Commands = @{
                 Daily = @('run', 'wuwa-auto', 'daily')
+                DailyOnly = @('run', 'wuwa-auto', 'daily-only')
                 FarmEcho = @('run', 'wuwa-auto', 'farm-echo')
                 WeeklyGarden = @('run', 'wuwa-auto', 'weekly-garden')
                 UuStart = @('run', 'wuwa-auto', 'uu', 'start')

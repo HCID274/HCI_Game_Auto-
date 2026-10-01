@@ -245,6 +245,7 @@ class DailyActivityVerifier:
             return None
 
         deadline = time.monotonic() + _SCREENSHOT_TIMEOUT_SECONDS
+        incomplete_reason = ""
         while time.monotonic() < deadline:
             candidates = [
                 path
@@ -252,8 +253,23 @@ class DailyActivityVerifier:
                 if path.resolve() not in before
             ]
             if candidates:
-                return str(max(candidates, key=lambda path: path.stat().st_mtime).resolve())
+                # 上游在后台线程直接写 PNG；出现文件名不等于像素已写完。
+                # 完整解码后才允许识别红点、裁剪和发布证据，不能放行截断图。
+                from PIL import Image
+
+                candidate = max(candidates, key=lambda path: path.stat().st_mtime)
+                try:
+                    with Image.open(candidate) as image:
+                        image.load()
+                    return str(candidate.resolve())
+                except (OSError, ValueError, SyntaxError) as exc:
+                    incomplete_reason = str(exc)
             time.sleep(0.05)
+        if incomplete_reason:
+            self._log(
+                f"daily activity screenshot incomplete stage={stage}: "
+                f"{incomplete_reason}; using synchronous fallback"
+            )
         # The headless OK worker may not start its Qt screenshot consumer, so
         # the signal emitted by ``task.screenshot`` can be dropped.  Keep the
         # evidence boundary host-owned and fall back to the same desktop

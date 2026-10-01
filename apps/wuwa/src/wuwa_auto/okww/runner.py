@@ -13,6 +13,7 @@ from pathlib import Path
 
 import psutil
 
+from wuwa_auto.client.launcher import click_startup_agreement, is_game_window_alive
 from wuwa_auto.input.viiper import (
     release_active_mouse_buttons,
     resume_active_mouse_control,
@@ -24,7 +25,6 @@ from wuwa_auto.okww.config import (
     validate_farm_echo_configuration,
     validate_weekly_garden_configuration,
 )
-from wuwa_auto.client.launcher import is_game_window_alive
 from wuwa_auto.okww.daily_activity import (
     parse_activity_marker,
     parse_activity_panel_marker,
@@ -263,7 +263,9 @@ def _build_task_command(
         str(OK_ENTRYPOINT),
         "--headless",
         "-t",
-        str(task_index),
+        # 上游按语言过滤任务后，配置表中的第 11 项可能变成运行时第 9 项。
+        # 使用上游支持的完整任务标识，保留数字仅作预检诊断。
+        "src.task.GardenTask.GardenTask" if task_label == "weekly_garden" else str(task_index),
         "-e",
     ]
 
@@ -320,6 +322,7 @@ def _run_task(
     reason = "unknown"
     evidence: Path | None = None
     captured_nightmare_transition = False
+    startup_agreement_clicked = False
 
     while True:
         now = time.monotonic()
@@ -355,6 +358,10 @@ def _run_task(
                     captured_nightmare_transition = True
 
         current_text = "".join(collected)
+        if not startup_agreement_clicked and not any(
+            marker in current_text for marker in ("DailyTask:", "GardenTask:", "FarmEchoTask:")
+        ):
+            startup_agreement_clicked = click_startup_agreement()
         failure = find_failure(current_text)
         if failure:
             if task_label == "daily":
@@ -424,6 +431,7 @@ def _run_task(
     finished = datetime.now().astimezone()
     if not slice_path.exists():
         slice_path.write_text("".join(collected), encoding="utf-8")
+    facts["ok_startup_agreement_clicked"] = startup_agreement_clicked
     if task_label == "daily":
         current_text = "".join(collected)
         daily_activity = parse_activity_marker(current_text)

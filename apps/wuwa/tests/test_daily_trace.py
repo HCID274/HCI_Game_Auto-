@@ -12,6 +12,44 @@ from wuwa_auto.okww.daily_trace import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_desktop_evidence(monkeypatch):
+    monkeypatch.setattr(daily_trace_module, "_capture_evidence", lambda *a, **kw: None)
+
+
+def test_nested_failure_reuses_evidence_and_preserves_exception(monkeypatch):
+    captured = []
+    failure = RuntimeError("entry did not become ready")
+
+    def capture(task, stage, **kwargs):
+        captured.append(stage)
+        return "evidence.png"
+
+    class Task:
+        def __init__(self):
+            self.messages = []
+
+        def log_info(self, message):
+            self.messages.append(message)
+
+        def inner(self):
+            raise failure
+
+        def outer(self):
+            self.inner()
+
+    monkeypatch.setattr(daily_trace_module, "_capture_evidence", capture)
+    daily_trace_module._wrap_method(Task, "inner", event="entry")
+    daily_trace_module._wrap_method(Task, "outer", event="daily")
+    task = Task()
+    with pytest.raises(RuntimeError) as caught:
+        task.outer()
+    assert caught.value is failure
+    assert captured == ["entry_error"]
+    errors = [json.loads(line.split(" ", 1)[1]) for line in task.messages if '"evidence_path"' in line]
+    assert [item["evidence_path"] for item in errors] == ["evidence.png", "evidence.png"]
+
+
 class _Box:
     def __init__(
         self,
@@ -167,7 +205,7 @@ def test_low_confidence_standalone_zero_is_not_treated_as_exhausted(
 
     monkeypatch.setattr(
         daily_trace_module,
-        "_capture_stamina_evidence",
+        "_capture_evidence",
         lambda *_args: "stamina.png",
     )
     install_daily_trace(SimpleNamespace, tacet_task_class=Tacet)
@@ -290,7 +328,7 @@ def test_updated_book_tab_requires_semantic_target_page_before_upstream(
 
     monkeypatch.setattr(
         daily_trace_module,
-        "_capture_stamina_evidence",
+        "_capture_evidence",
         lambda *_args: "book-before.png",
     )
     monkeypatch.setattr(
@@ -364,7 +402,7 @@ def test_wuyin_root_material_page_retries_three_times_then_fails_fast(
 
     monkeypatch.setattr(
         daily_trace_module,
-        "_capture_stamina_evidence",
+        "_capture_evidence",
         lambda *_args: "wuyin-unconfirmed.png",
     )
     monkeypatch.setattr(
@@ -428,7 +466,7 @@ def test_wuyin_semantic_check_error_after_hid_never_falls_back(
 
     monkeypatch.setattr(
         daily_trace_module,
-        "_capture_stamina_evidence",
+        "_capture_evidence",
         lambda *_args: "wuyin-check-error.png",
     )
     monkeypatch.setattr(

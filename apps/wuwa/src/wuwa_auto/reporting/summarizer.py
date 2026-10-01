@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,19 +15,35 @@ from game_automation_core.reporting.agent import (
     token_usage_from_response,
 )
 from openai import OpenAI
+from game_automation_core.reporting.provider import report_headers
 
 from wuwa_auto.reporting.models import NarrativeReport, RunFacts
 from wuwa_auto.reporting.parser import deterministic_summary
 from wuwa_auto.reporting.prompting import compose_report_messages
 from wuwa_auto.settings import get_secret
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 AI_READ_TIMEOUT_SECONDS = 180
 AI_SUCCESS_MAX_TOKENS = 2048
 AI_DIAGNOSTIC_MAX_TOKENS = 8192
 AI_LENGTH_RETRY_MAX_TOKENS = 16384
 log = logging.getLogger(__name__)
+
+
+def _load_api_key() -> str:
+    """Prefer DEEPSEEK_API_KEY, then the OpenCode Go key file."""
+    api_key = get_secret("DEEPSEEK_API_KEY")
+    if api_key:
+        return api_key
+    key_file = get_secret("OPENCODE_GO_API_KEY_FILE")
+    if key_file:
+        path = Path(key_file).expanduser()
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def _safe_summary(summary: str, facts: RunFacts) -> str:
     """Keep one minimal guard: the headline cannot reverse the run status."""
 
@@ -191,12 +208,17 @@ def _combined_attempt_usage(
 
 
 def summarize_with_ai(facts: RunFacts) -> NarrativeReport:
-    api_key = get_secret("DEEPSEEK_API_KEY")
+    api_key = _load_api_key()
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is not configured and no OpenCode Go key file "
+            "(OPENCODE_GO_API_KEY_FILE) is readable"
+        )
+    base_url = get_secret("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL
     client = OpenAI(
         api_key=api_key,
-        base_url=get_secret("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL,
+        base_url=base_url,
+        default_headers=report_headers(base_url),
         timeout=AI_READ_TIMEOUT_SECONDS,
         max_retries=1,
     )
@@ -264,7 +286,7 @@ def summarize_with_ai(facts: RunFacts) -> NarrativeReport:
     except Exception as exc:
         raise AgentResponseError(str(exc), token_usage=usage) from exc
     log.info(
-        "DeepSeek Wuwa report usage: input_tokens=%s output_tokens=%s "
+        "OpenCode DeepSeek Wuwa report usage: input_tokens=%s output_tokens=%s "
         "total_tokens=%s ratio=%s available=%s",
         usage.get("input_tokens"),
         usage.get("output_tokens"),

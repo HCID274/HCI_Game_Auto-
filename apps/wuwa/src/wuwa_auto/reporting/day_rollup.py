@@ -183,10 +183,28 @@ def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> Run
         return facts
 
     selected = list({item.run_id: item for item in (daily, followup)}.values())
+    # 补跑只更新本轮触及的项目，不能清空此前已确认的体力/聚落成果。
+    # 最终成功状态及活跃验证仍取最新一轮，历史成功不能掩盖新失败。
+    daily_history = [item for item in candidates if item.daily_succeeded]
+    evidence_sources = sorted(
+        {item.run_id: item for item in [*daily_history, *selected]}.values(),
+        key=lambda item: item.sort_key,
+    )
+    daily_items: dict[str, ReportItem] = {}
+    for candidate in evidence_sources:
+        if candidate is not daily and not candidate.daily_succeeded:
+            continue
+        for entry in candidate.facts.daily:
+            if candidate is not daily and entry.item_id.startswith("daily-activity"):
+                continue
+            daily_items[entry.item_id] = entry
     issues: list[ReportItem] = []
-    if not daily.daily_succeeded:
+    if daily is followup:
+        # 一个已合并事务只有一份异常，不再分别贴日常/讨伐标签重复上报。
+        issues.extend(daily.facts.issues)
+    elif not daily.daily_succeeded:
         issues.extend(_stage_items("daily", "日常", daily.facts.issues))
-    if not followup.followup_succeeded:
+    if daily is not followup and not followup.followup_succeeded:
         issues.extend(
             _stage_items("followup", "讨伐后续", followup.facts.issues)
         )
@@ -224,11 +242,11 @@ def build_daily_rollup(result: Any, cleanup: Any | None, facts: RunFacts) -> Run
         duration_seconds=sum(item.facts.duration_seconds for item in selected),
         workflow_task="daily",
         daily_activity=daily.facts.daily_activity,
-        daily=list(daily.facts.daily),
+        daily=list(daily_items.values()),
         weekly=[],
         followup=list(followup.facts.followup),
         issues=_dedupe_items(issues),
         cleanup=cleanup_data,
         user_context={},
-        evidence=_combined_evidence(selected),
+        evidence=_combined_evidence(evidence_sources),
     )

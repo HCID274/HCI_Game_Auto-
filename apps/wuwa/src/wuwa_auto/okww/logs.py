@@ -51,6 +51,15 @@ FARM_ECHO_LUCILLA_TRANSFORM_END_MARKER = (
 )
 FARM_ECHO_LUCILLA_LIBERATION_END_MARKER = "Lucilla:Lucilla perform lib end"
 FARM_ECHO_CURRENT_CHAR_BIND_FAILURE_MARKER = "FarmEchoTask:could not find char"
+WORLD_TEAM_REQUIRED = "Please start in game world and in team!"
+WORLD_TEAM_BLOCKED_REASON = (
+    "OK-WW 等待常规队伍/主界面超时，尚未进入强敌战斗；"
+    "请检查是否处于剧情、特殊模式或单人队伍。"
+    "需要先恢复常规队伍，不按倒地或客户端崩溃反复重跑"
+)
+FARM_ECHO_STARTUP_HANDOFF_TIMEOUT = (
+    "OK-WW initialized but did not hand off to FarmEcho within 600 seconds"
+)
 FARM_ECHO_PICKUP_CONFIRMATION_MARKERS = (
     "FarmEchoTask:farm echo on the face",
     "FarmEchoTask:farm echo yolo find True",
@@ -239,3 +248,17 @@ def is_recoverable_farm_echo_party_member_unavailable(text: str) -> bool:
 def is_recoverable_farm_echo_entry_failure(text: str) -> bool:
     """Recognize a pre-combat guidebook/teleport failure from this run."""
     return any(marker in text for marker in FARM_ECHO_ENTRY_FAILURE_MARKERS)
+
+
+def is_farm_echo_world_team_blocked(text: str) -> bool:
+    """只认启动阶段的明确异常，不能把加载提示或战斗中异常误作前置阻塞。"""
+    return (
+        f"FarmEchoTask:info_set app {WORLD_TEAM_REQUIRED}" in text
+        and f"Exception: {WORLD_TEAM_REQUIRED}" in text
+        and "HOST_FARM_ECHO_GAMEPLAY_HANDOFF" not in text
+    )
+
+
+def is_farm_echo_startup_handoff_timeout(reason: str) -> bool:
+    """识别登录/MouseReset 阶段未进入业务任务，避免整小时原样重跑。"""
+    return reason == FARM_ECHO_STARTUP_HANDOFF_TIMEOUT

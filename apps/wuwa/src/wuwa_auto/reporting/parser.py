@@ -14,8 +14,10 @@ from wuwa_auto.okww.daily_activity import (
 )
 from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.logs import (
+    WORLD_TEAM_BLOCKED_REASON,
     count_farm_echo_absorptions,
     count_farm_echo_kill_confirmations,
+    is_farm_echo_world_team_blocked,
 )
 from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.noise import known_upstream_noise_lines
@@ -112,6 +114,11 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
     cleanup_data = cleanup.to_dict() if cleanup is not None else {}
     issues: list[ReportItem] = []
     result_reason = _normalized_result_reason(result)
+    if result.status != "success" and (
+        result.config.get("farm_echo_world_team_blocked")
+        or is_farm_echo_world_team_blocked(text)
+    ):
+        result_reason = WORLD_TEAM_BLOCKED_REASON
 
     status = "completed" if result.status == "success" else "failed"
     if result.status != "success":
@@ -145,13 +152,17 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                     f"每日活跃度当前{observed_points}/{comparison.get('target', 100)}，仅记录取证结果",
                 )
             )
-        # Once the post-claim total is verified at/above 100, the game has
-        # settled the completed rows.  The panel may then intentionally show
-        # other optional “前往” tasks (for example +40 daily quest); those
-        # are not failures of today's reward and must not downgrade a real
-        # success to “部分完成”.
+        # 达标和领完奖励是两个事实。总分已达标时，不能用领取后剩下的
+        # 可选任务反推“最多只能到 0 分”；奖励未确认的异常仍在上面保留。
         activity_verified = daily_activity.get("state") == "verified"
-        if not activity_verified:
+        total_points = daily_activity.get("points")
+        total_reached = (
+            isinstance(total_points, int)
+            and total_points >= 100
+            and panel.get("active_panel_confirmed") is True
+            and str(daily_activity.get("source", "")).startswith("post_claim_total_region")
+        )
+        if not activity_verified and not total_reached:
             for task in tasks:
                 if not isinstance(task, dict) or task.get("completed"):
                     continue
@@ -186,7 +197,8 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
             # unsound; report the objective itself instead of saying the
             # known subset can reach only 0/100.
             if (
-                comparison.get("can_reach_target_now") is False
+                tasks
+                and comparison.get("can_reach_target_now") is False
                 and not comparison.get("unknown_tasks")
             ):
                 reachable = comparison.get("reachable_now_points")
@@ -238,10 +250,15 @@ def parse_run(result: Any, cleanup: Any | None = None) -> RunFacts:
                 )
             )
         else:
+            detail = (
+                f"当前活跃度{detected_points}点，档位奖励尚未确认"
+                if detected_points is not None and detected_points >= 100
+                else "最终活跃度未从日志确认"
+            )
             daily.append(
                 ReportItem(
                     "daily-activity-claim-action",
-                    "每日活跃度：已执行奖励领取操作（最终活跃度未从日志确认）",
+                    f"每日活跃度：已执行奖励领取操作（{detail}）",
                 )
             )
 

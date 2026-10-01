@@ -1,10 +1,26 @@
 from unittest.mock import patch
 
-from wuwa_auto.cleanup import cleanup_after_run
+from wuwa_auto.cleanup import (
+    _is_wuwa_workflow_controller,
+    cleanup_after_run,
+)
+
+
+def test_only_business_workflows_are_stale_controller_candidates() -> None:
+    assert _is_wuwa_workflow_controller(["uv", "run", "wuwa-auto", "daily"])
+    assert _is_wuwa_workflow_controller(
+        [r".venv\Scripts\wuwa-auto.exe", "farm-echo"]
+    )
+    assert not _is_wuwa_workflow_controller(
+        ["uv", "run", "wuwa-auto", "cleanup"]
+    )
+    assert not _is_wuwa_workflow_controller(["python", "some_other_app.py"])
 
 
 def test_cleanup_closes_every_owned_component() -> None:
-    with patch("wuwa_auto.cleanup.stop_daily_workers"), patch(
+    with patch("wuwa_auto.cleanup.stop_stale_workflow_controllers"), patch(
+        "wuwa_auto.cleanup.stop_daily_workers"
+    ), patch(
         "wuwa_auto.cleanup.stop_pyappify_launchers"
     ), patch("wuwa_auto.cleanup._running_ok_processes", return_value=[]), patch(
         "wuwa_auto.cleanup.stop_wuthering_game"
@@ -27,7 +43,9 @@ def test_cleanup_closes_every_owned_component() -> None:
 
 
 def test_disconnect_failure_is_preserved_but_uu_is_still_exited() -> None:
-    with patch("wuwa_auto.cleanup.stop_daily_workers"), patch(
+    with patch("wuwa_auto.cleanup.stop_stale_workflow_controllers"), patch(
+        "wuwa_auto.cleanup.stop_daily_workers"
+    ), patch(
         "wuwa_auto.cleanup.stop_pyappify_launchers"
     ), patch("wuwa_auto.cleanup._running_ok_processes", return_value=[]), patch(
         "wuwa_auto.cleanup.stop_wuthering_game"

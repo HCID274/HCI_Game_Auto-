@@ -54,10 +54,12 @@ class _FakeTask:
         self.messages.append(message)
 
     def screenshot(self, name: str) -> None:
+        from PIL import Image
+
         self.screenshots.append(name)
         path = self.root / "screenshots" / f"20260808_{name}_original.png"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"png")
+        Image.new("RGB", (2560, 1440)).save(path)
 
     def ocr(self, *_args: object, **_kwargs: object) -> list[object]:
         return [SimpleNamespace(name="100/100")]

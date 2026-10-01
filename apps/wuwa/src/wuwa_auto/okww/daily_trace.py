@@ -111,11 +111,18 @@ def _wrap_method(
         try:
             result = original(self, *args, **kwargs)
         except Exception as exc:
+            # 子任务被上游捕获并继续后，终场截图已不是故障现场。
+            # 同一异常跨多层包装传播时复用证据，不重复截取整个桌面。
+            evidence_path = getattr(exc, "__wuwa_host_evidence__", None)
+            if not hasattr(exc, "__wuwa_host_evidence__"):
+                evidence_path = _capture_evidence(self, f"{event}_error", prefix="ok_task")
+                exc.__wuwa_host_evidence__ = evidence_path
             _log(
                 self,
                 f"{event}_error",
                 error_type=type(exc).__name__,
                 error=str(exc),
+                evidence_path=evidence_path,
             )
             raise
         _log(
@@ -327,8 +334,8 @@ def _stamina_read_is_trustworthy(
     return bool(ratio_confidences) and max(ratio_confidences) >= STAMINA_ZERO_MIN_CONFIDENCE
 
 
-def _capture_stamina_evidence(task: Any, stage: str) -> str | None:
-    """Persist the exact desktop state when the bounded stamina OCR is doubtful."""
+def _capture_evidence(task: Any, stage: str, *, prefix: str = "ok_stamina") -> str | None:
+    """保留故障发生时的完整桌面；截图失败不能改变原任务结果。"""
 
     try:
         from PIL import ImageGrab
@@ -336,13 +343,13 @@ def _capture_stamina_evidence(task: Any, stage: str) -> str | None:
         evidence_dir = Path(__file__).resolve().parents[3] / "runtime" / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
-        path = evidence_dir / f"ok_stamina_{stage}_{timestamp}.png"
+        path = evidence_dir / f"{prefix}_{stage}_{timestamp}.png"
         ImageGrab.grab(all_screens=True).save(path)
         return str(path.resolve())
     except Exception as exc:  # noqa: BLE001 - evidence must not alter the task
         _log(
             task,
-            "stamina_evidence_error",
+            "evidence_error",
             stage=stage,
             error_type=type(exc).__name__,
             error=str(exc),
@@ -447,7 +454,7 @@ def _refresh_stamina_panel_with_hid(task: Any) -> bool:
         from wuwa_auto.okww.virtual_hid import _virtual_hid_click
 
         absolute_x, absolute_y = get_abs_cords(*point)
-        evidence_before = _capture_stamina_evidence(task, "panel_before_refresh")
+        evidence_before = _capture_evidence(task, "panel_before_refresh")
         _virtual_hid_click(
             int(absolute_x),
             int(absolute_y),
@@ -542,7 +549,7 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
                         attempts = BOOK_TAB_MAX_ATTEMPTS if name == "wuyin" else 1
                         last_state: dict[str, Any] | None = None
                         for attempt in range(1, attempts + 1):
-                            evidence_before = _capture_stamina_evidence(
+                            evidence_before = _capture_evidence(
                                 self,
                                 f"book_tab_{name}_before_attempt_{attempt}",
                             )
@@ -595,7 +602,7 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
                                 )
                                 return None
 
-                        evidence_after = _capture_stamina_evidence(
+                        evidence_after = _capture_evidence(
                             self,
                             "book_tab_wuyin_unconfirmed",
                         )
@@ -622,7 +629,7 @@ def _install_book_tab_hid_override(task_class: type[Any]) -> None:
                     error=str(exc),
                 )
                 if name == "wuyin" and selection_started:
-                    evidence_after = _capture_stamina_evidence(
+                    evidence_after = _capture_evidence(
                         self,
                         "book_tab_wuyin_check_error",
                     )
@@ -690,7 +697,7 @@ def _install_stamina_guard(task_class: type[Any]) -> None:
             ):
                 break
 
-        evidence_path = _capture_stamina_evidence(self, "ocr_unverified")
+        evidence_path = _capture_evidence(self, "ocr_unverified")
         _log(
             self,
             "stamina_read_unverified",

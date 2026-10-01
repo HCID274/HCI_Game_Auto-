@@ -279,6 +279,35 @@ def test_latest_failed_followup_overrides_earlier_success(
     )
 
 
+def test_daily_supplement_preserves_previous_work_but_not_stale_activity(tmp_path):
+    from wuwa_auto.reporting.day_rollup import _Candidate
+
+    earlier = _ok_result(tmp_path, run_id="20260912_083000", workflow="daily", status="success", log_text="TacetTask:start walk_to_treasure\n")
+    older_facts = RunFacts(
+        "completed", "completed", 60,
+        daily=[ReportItem("tacet-suppression", "无音区清剿2场"), ReportItem("daily-activity-reward", "旧活跃奖励")],
+        followup=[ReportItem("echo-picked", "吸收声骸5次")],
+    )
+    earlier.config["daily_sequence"] = {"daily_status": "success", "boss_status": "success"}
+    latest = _ok_result(tmp_path, run_id="20260912_092750", workflow="daily", status="success", log_text="NightmareNestTask:farm echo walk find true\n")
+    for state in ("success", "failed"):
+        from dataclasses import replace
+
+        current = replace(latest, status=state)
+        current_facts = RunFacts(
+            "completed" if state == "success" else "failed", state, 60,
+            daily_activity={"state": "verified" if state == "success" else "unverified"},
+            daily=[ReportItem("nightmare-nest-echo", "聚落吸收声骸4次")],
+            issues=[] if state == "success" else [ReportItem("run-failure", "本轮未验证活跃")],
+        )
+        with patch("wuwa_auto.reporting.day_rollup._archived_candidates", return_value=[_Candidate(earlier.run_id, earlier, older_facts)]):
+            combined = build_daily_rollup(current, None, current_facts)
+        assert [item.item_id for item in combined.daily] == ["tacet-suppression", "nightmare-nest-echo"]
+        assert combined.daily_activity == current_facts.daily_activity
+        assert combined.overall_status == ("completed" if state == "success" else "partial_success")
+        assert ("本轮未验证活跃" in str(combined.issues)) == (state == "failed")
+
+
 def test_standalone_followup_without_daily_stays_a_phase_report(tmp_path: Path) -> None:
     result = _ok_result(
         tmp_path,

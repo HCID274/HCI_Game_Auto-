@@ -25,6 +25,7 @@ try:
         REVIVE_DIALOG_MARKER,
         party_member_unavailable,
         realm_defeat_visible,
+        revival_item_unavailable_visible,
         revive_dialog_visible,
     )
 except ImportError:  # executed directly by OK-WW's bundled Python
@@ -34,6 +35,7 @@ except ImportError:  # executed directly by OK-WW's bundled Python
         REVIVE_DIALOG_MARKER,
         party_member_unavailable,
         realm_defeat_visible,
+        revival_item_unavailable_visible,
         revive_dialog_visible,
     )
 
@@ -368,6 +370,24 @@ def main(argv: list[str] | None = None) -> int:
                 except TargetReached:
                     self.log_info(COMPLETED_MARKER)
                     return
+                # Upstream can return early after losing its target while the
+                # current character is still alive at critical HP and the
+                # other party members are down. Confirm the visible revival-
+                # item prompt only after upstream combat has stopped; the
+                # parent then owns exit-and-heal recovery.
+                if self._in_realm and revival_item_unavailable_visible(self):
+                    self.log_info(PARTY_MEMBER_UNAVAILABLE_MARKER)
+                    try:
+                        self.screenshot(
+                            "host_farm_echo_revival_item_unavailable"
+                        )
+                    except Exception as exc:
+                        self.log_info(
+                            f"HOST_FARM_ECHO_STATE_SCREENSHOT_FAILED {exc}"
+                        )
+                    raise RuntimeError(
+                        "FarmEcho party has no available revival item"
+                    )
                 if self.host_absorbed < target:
                     raise RuntimeError(
                         "confirmed retry exhausted its bounded combat attempts: "

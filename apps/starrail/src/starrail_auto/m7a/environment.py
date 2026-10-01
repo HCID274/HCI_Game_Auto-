@@ -6,8 +6,10 @@ import logging
 import socket
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import psutil
+import yaml
 
 from starrail_auto.m7a.config import (
     GAME_NETWORK_HOST,
@@ -17,6 +19,7 @@ from starrail_auto.m7a.config import (
     GAME_READY_INTERVAL,
     GAME_READY_TIMEOUT,
     GAME_WINDOW_KEYWORDS,
+    M7A_CONFIG_PATH,
 )
 
 log = logging.getLogger(__name__)
@@ -54,6 +57,33 @@ def is_game_window_present() -> bool:
         any(keyword.casefold() in title.casefold() for keyword in GAME_WINDOW_KEYWORDS)
         for title in visible_window_titles()
     )
+
+
+def game_launcher_process_ids() -> set[int]:
+    """PIDs of the configured HoYo launcher, matched by executable location."""
+    try:
+        data = yaml.safe_load(M7A_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        launcher_root = Path(data["launcher_path"]).resolve().parent
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        return set()
+    pids: set[int] = set()
+    for proc in psutil.process_iter(["name", "exe"]):
+        if (proc.info["name"] or "").casefold() != "hyp.exe":
+            continue
+        executable = proc.info["exe"]
+        if not executable:
+            continue
+        try:
+            Path(executable).resolve().relative_to(launcher_root)
+        except (OSError, ValueError):
+            continue
+        pids.add(proc.pid)
+    return pids
+
+
+def is_game_launcher_running() -> bool:
+    """Match the configured HoYo launcher by executable location, not title."""
+    return bool(game_launcher_process_ids())
 
 
 def is_game_network_ready(*, resolver: object = socket.getaddrinfo) -> bool:
@@ -100,12 +130,16 @@ def wait_for_game_ready(
     process_check: object = is_game_process_running,
     window_check: object = is_game_window_present,
     startup_check: Callable[[], bool] | None = None,
+    maintenance_check: Callable[[], bool] | None = None,
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         startup_ready = startup_check is None or startup_check()
         if startup_ready and process_check() and window_check():
             log.info("game process and visible window are ready")
+            return True
+        if startup_ready and maintenance_check is not None and maintenance_check():
+            log.info("game launcher update is active; startup handed to watchdog")
             return True
         time.sleep(GAME_READY_INTERVAL)
     return False

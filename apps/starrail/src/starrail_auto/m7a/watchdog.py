@@ -3,6 +3,7 @@
 import logging
 import subprocess
 import time
+from collections.abc import Callable
 
 import psutil
 
@@ -89,10 +90,17 @@ def watch(
     *,
     checkpoint: M7ALogCheckpoint | None = None,
     stop_when_main_resolved: bool = False,
+    maintenance_in_progress: Callable[[], bool] | None = None,
+    obstacle_recovery: Callable[[], object] | None = None,
 ) -> int:
     start = time.monotonic()
     cpu_idle_since: float | None = None
     while True:
+        if obstacle_recovery is not None:
+            try:
+                obstacle_recovery()
+            except Exception:
+                log.exception("Star Rail obstacle recovery failed")
         if stop_when_main_resolved and checkpoint is not None:
             outcome = main_run_outcome(checkpoint)
             if outcome == "completed":
@@ -111,11 +119,17 @@ def watch(
             return EXIT_WATCHDOG_HARD_TIMEOUT
 
         if elapsed >= GRACE_PERIOD:
+            if maintenance_in_progress is not None and maintenance_in_progress():
+                cpu_idle_since = None
+                time.sleep(DAILY_RESULT_POLL_INTERVAL)
+                continue
+            cpu_idle_duration = 0.0
             try:
                 cpu = psutil.Process(proc.pid).cpu_percent(interval=1)
                 if cpu < CPU_IDLE_THRESHOLD:
                     cpu_idle_since = cpu_idle_since or time.monotonic()
-                    if time.monotonic() - cpu_idle_since >= CPU_IDLE_WINDOW:
+                    cpu_idle_duration = time.monotonic() - cpu_idle_since
+                    if cpu_idle_duration >= CPU_IDLE_WINDOW:
                         capture_failure_evidence("cpu_idle", checkpoint)
                         stop_assistant_for_evidence(proc)
                         return EXIT_WATCHDOG_CPU_IDLE
@@ -125,7 +139,11 @@ def watch(
                 continue
 
             latest_log = get_latest_m7a_log()
-            if latest_log and time.time() - latest_log.stat().st_mtime > LOG_HEARTBEAT_TIMEOUT:
+            if (
+                cpu_idle_duration >= LOG_HEARTBEAT_TIMEOUT
+                and latest_log
+                and time.time() - latest_log.stat().st_mtime > LOG_HEARTBEAT_TIMEOUT
+            ):
                 capture_failure_evidence("log_stalled", checkpoint)
                 stop_assistant_for_evidence(proc)
                 return EXIT_WATCHDOG_LOG_STALLED

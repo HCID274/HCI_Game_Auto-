@@ -40,7 +40,21 @@ WUWA_LAUNCHER_PRIMARY_ANCHOR_TEMPLATE = (
 WUWA_LAUNCHER_SELFUPDATE_CONFIRM_TEMPLATE = (
     TEMPLATES_DIR / "client_launcher_selfupdate_confirm.png"
 )
+WUWA_LAUNCHER_SELFUPDATE_NOTICE_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_selfupdate_notice.png"
+)
+WUWA_LAUNCHER_UPDATE_ACTION_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_update_action.png"
+)
+WUWA_LAUNCHER_DOWNLOADING_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_downloading.png"
+)
+WUWA_LAUNCHER_DOWNLOAD_PAUSED_TEMPLATE = (
+    TEMPLATES_DIR / "client_launcher_download_paused.png"
+)
 WUWA_CLIENT_LOGIN_TEMPLATE = TEMPLATES_DIR / "client_login_connect.png"
+WUWA_CLIENT_AGREEMENT_NOTICE_TEMPLATE = TEMPLATES_DIR / "client_agreement_notice.png"
+WUWA_CLIENT_AGREEMENT_CONFIRM_TEMPLATE = TEMPLATES_DIR / "client_agreement_confirm.png"
 WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE = TEMPLATES_DIR / "client_monthly_reward.png"
 WUWA_CLIENT_REWARD_RESULT_TEMPLATE = TEMPLATES_DIR / "client_reward_result_close.png"
 WUWA_CLIENT_NETWORK_RETRY_TEMPLATE = TEMPLATES_DIR / "client_network_retry.png"
