@@ -893,7 +893,7 @@ class TestService:
         ), patch("wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"), patch(
             "wuwa_auto.reporting.service.load_boss_names", return_value={}
         ), patch(
-            "wuwa_auto.reporting.service.send_report_card", return_value=True
+            "wuwa_auto.reporting.service.send_card", return_value=True
         ) as send:
             path = report_run(result, cleanup)
 
@@ -925,7 +925,7 @@ class TestService:
             "wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports
         ), patch("wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"), patch(
             "wuwa_auto.reporting.service.load_boss_names", return_value={}
-        ), patch("wuwa_auto.reporting.service.send_report_card") as send:
+        ), patch("wuwa_auto.reporting.service.send_card") as send:
             path = report_run(boss, allow_send=False)
 
         send.assert_not_called()
@@ -946,7 +946,7 @@ class TestService:
         with patch("wuwa_auto.reporting.service.REPORTS_DIR", reports), patch(
             "wuwa_auto.reporting.service.RUNS_DIR", tmp_path / "runs"
         ), patch("wuwa_auto.reporting.service.load_boss_names", return_value={}), patch(
-            "wuwa_auto.reporting.service.send_report_card"
+            "wuwa_auto.reporting.service.send_card"
         ) as send:
             path, text = preview_archived_run("latest")
 
@@ -969,7 +969,7 @@ class TestService:
         with patch("wuwa_auto.reporting.service.REPORTS_DIR", tmp_path / "reports"), patch(
             "wuwa_auto.reporting.day_rollup.REPORTS_DIR", tmp_path / "reports"
         ), patch("wuwa_auto.reporting.service.load_boss_names", return_value={}), patch(
-            "wuwa_auto.reporting.service.send_report_card", return_value=False
+            "wuwa_auto.reporting.service.send_card", return_value=False
         ):
             path = report_run(result)
 
@@ -981,7 +981,7 @@ class TestService:
             evidence_paths=(),
         )
         with patch("wuwa_auto.reporting.service.REPORTS_DIR", tmp_path), patch(
-            "wuwa_auto.reporting.service.send_report_card"
+            "wuwa_auto.reporting.service.send_card"
         ) as send:
             path = report_version_day_deferred(
                 outcome, datetime(2026, 9, 30, 20, 0), allow_send=False

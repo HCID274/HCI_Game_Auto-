@@ -17,7 +17,7 @@ def _enabled() -> bool:
     }
 
 
-def send_report_card(payload: dict[str, object]) -> bool:
+def send_card(payload: dict[str, object]) -> bool:
     if not _enabled():
         log.info("Wuwa Feishu real sending is disabled; preview only")
         return False

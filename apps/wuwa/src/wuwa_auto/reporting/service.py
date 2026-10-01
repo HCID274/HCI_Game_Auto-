@@ -13,7 +13,7 @@ from game_automation_core.reporting.feishu import build_sectioned_card, card_tex
 from game_automation_core.reporting.redact import redact_sensitive_data
 from game_automation_core.reporting.report import SKIPPED
 
-from wuwa_auto.integrations.feishu import send_report_card
+from wuwa_auto.integrations.feishu import send_card
 from wuwa_auto.reporting.boss_names import load_boss_names
 from wuwa_auto.reporting.day_rollup import build_daily_rollup
 from wuwa_auto.reporting.parser import parse_run
@@ -31,7 +31,7 @@ def _publish(
     facts = build_daily_rollup(result, facts, boss_names=boss_names)
     report = build_report(facts, finished_at=datetime.fromisoformat(result.finished_at))
     card = report.to_card()
-    sent = send_report_card(card) if allow_send else False
+    sent = send_card(card) if allow_send else False
 
     # 合并了同日多次运行的日报单独命名，不覆盖单次运行自己的归档。
     stem = f"{result.run_id}_daily_rollup" if len(facts.sources) > 1 else str(result.run_id)
@@ -112,7 +112,7 @@ def report_version_day_deferred(
             )
         ],
     )
-    sent = send_report_card(card) if allow_send else False
+    sent = send_card(card) if allow_send else False
     suffix = ".json" if allow_send else ".preview.json"
     path = REPORTS_DIR / f"version_day_deferred_{now:%Y%m%d_%H%M%S}{suffix}"
     write_json_archive(
