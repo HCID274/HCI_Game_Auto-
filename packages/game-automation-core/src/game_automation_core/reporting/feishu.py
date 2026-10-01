@@ -31,24 +31,29 @@ def send_signed_payload(
     body_payload = dict(payload)
     body_payload["timestamp"] = str(timestamp)
     body_payload["sign"] = make_signature(timestamp, secret)
-    req = request.Request(
-        webhook_url,
-        data=json.dumps(body_payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
+    # 发送失败只返回 False，绝不抛出：汇报出错不能改变任务本身的退出码。
     try:
+        req = request.Request(
+            webhook_url,
+            data=json.dumps(body_payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
         with request.urlopen(req, timeout=timeout) as response:
             response_body = response.read().decode("utf-8", errors="replace")
-            log.info(
-                "Feishu notification sent: status=%s body=%s",
-                response.status,
-                response_body,
-            )
-            return True
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except (ValueError, HTTPError, URLError, TimeoutError, OSError) as exc:
         log.warning("Feishu notification failed: %s", exc)
         return False
+    # 签名错误、卡片格式被拒时机器人仍回 HTTP 200，只有响应体里的 code 为 0 才算送达。
+    try:
+        code = json.loads(response_body).get("code")
+    except (ValueError, AttributeError):
+        code = None
+    if code != 0:
+        log.warning("Feishu rejected the notification: body=%s", response_body)
+        return False
+    log.info("Feishu notification sent: body=%s", response_body)
+    return True
 
 
 def numbered_lines(items: list[str]) -> str:

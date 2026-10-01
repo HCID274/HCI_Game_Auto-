@@ -23,9 +23,9 @@ INFO = "ℹ️"
 
 # 整体状态 -> (标题图标, 结论, 卡片颜色)
 _HEADERS = {
-    "completed": ("✅", "全部完成", "green"),
-    "partial": ("⚠️", "部分完成", "orange"),
-    "failed": ("❌", "失败", "red"),
+    "completed": (DONE, "全部完成", "green"),
+    "partial": (WARN, "部分完成", "orange"),
+    "failed": (FAILED, "失败", "red"),
 }
 
 
@@ -76,11 +76,13 @@ class GameReport:
         return f"{icon} {self.game} {verdict} · {self.finished_at:%m-%d %H:%M}"
 
     def to_card(self) -> dict[str, Any]:
-        lead = (
-            f"用时 {format_duration(self.duration_seconds)}"
-            if self.duration_seconds
-            else ""
-        )
+        if self.duration_seconds:
+            lead = f"用时 {format_duration(self.duration_seconds)}"
+        elif not (self.tasks or self.problems or self.notes):
+            # 飞书卡片正文不能为空。
+            lead = "没有逐项任务记录"
+        else:
+            lead = ""
         card = build_sectioned_card(
             title=self.title,
             template=_HEADERS[self.status][2],

@@ -300,28 +300,35 @@ def parse_run(
     path = Path(result.log_slice_path)
     text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
     config = result.config
+    workflow = str(config.get("workflow_task", "daily"))
     daily_ok = _phase_ok(result, "daily")
     boss_ok = _phase_ok(result, "boss")
-    activity, issues = _activity(text)
+    activity, activity_issues = _activity(text)
+    # 没有阶段前缀的失败原因归到本轮工作流自己的阶段。
+    own_phase = (
+        "boss" if workflow in FARM_ECHO_WORKFLOWS else "daily" if workflow == "daily" else None
+    )
+    issues: dict[str | None, list[str]] = {"boss": [], "daily": [], None: []}
 
     if result.status == "success":
         status = "completed"
     else:
         if config.get("farm_echo_world_team_blocked") or is_farm_echo_world_team_blocked(text):
-            issues.insert(0, WORLD_TEAM_BLOCKED)
+            issues["boss"].append(WORLD_TEAM_BLOCKED)
         else:
-            issues[:0] = explain_failure(result.reason)
+            for phase, line in explain_failure(result.reason):
+                issues[phase or own_phase].append(line)
         recovery = config.get("farm_echo_recovery") or {}
         recovered_some = recovery.get("triggered") and (
             int(recovery.get("total_completed") or 0) > 0
             or recovery.get("first_safe_recovery") is True
         )
         status = "partial" if daily_ok or boss_ok or recovered_some else "failed"
-    issues.extend(str(issue) for issue in (cleanup or {}).get("issues", []))
+    issues["daily"].extend(activity_issues)
 
     return RunFacts(
         overall_status=status,
-        workflow_task=str(config.get("workflow_task", "daily")),
+        workflow_task=workflow,
         reason=str(result.reason),
         duration_seconds=int(result.duration_seconds or 0),
         daily_ok=daily_ok,
@@ -329,7 +336,9 @@ def parse_run(
         daily=[*_tacet(text, config), *_nightmare(text), *activity, *_battle_pass(text)],
         weekly=_garden(text),
         boss=_boss(text, config, boss_ok=boss_ok, boss_names=boss_names or {}),
-        issues=issues,
+        boss_issues=issues["boss"],
+        daily_issues=issues["daily"],
+        other_issues=issues[None],
         cleanup=dict(cleanup or {}),
         sources=[str(getattr(result, "run_id", ""))],
     )

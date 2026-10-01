@@ -8,6 +8,7 @@ from pathlib import Path
 
 from game_automation_core.reporting.archive import write_json_archive
 from game_automation_core.reporting.feishu import card_text
+from game_automation_core.reporting.redact import redact_sensitive_data
 from game_automation_core.reporting.report import GameReport
 
 from starrail_auto.integrations.feishu import send_card
@@ -106,7 +107,7 @@ def report_main_run(
             "stage": stage,
             "retries": retries,
             "sent": sent,
-            "facts": run.to_dict(),
+            "facts": redact_sensitive_data(run.to_dict()),
             "report": report.to_dict(),
             "feishu_card": card,
         },
@@ -127,6 +128,8 @@ def preview_archived_run(name: str = "latest") -> tuple[Path, str]:
         archive_path = candidates[-1]
     else:
         archive_path = REPORTS_DIR / f"{name}.json"
+    if not archive_path.is_file():
+        raise SystemExit(f"archived report not found: {archive_path}")
     data = json.loads(archive_path.read_text(encoding="utf-8"))
     source = data.get("source") or {}
     facts = data.get("facts") or {}
@@ -164,12 +167,26 @@ def preview_archived_run(name: str = "latest") -> tuple[Path, str]:
     return preview, card_text(card)
 
 
-def send_short_report(*, game: str, problems: list[str]) -> bool:
-    """Card for paths that have no M7A log to describe; no problems means success."""
-    report = GameReport(
-        game=game,
-        status="failed" if problems else "completed",
-        finished_at=datetime.now(),
-        problems=problems,
-    )
-    return send_card(report.to_card())
+def send_short_report(
+    *,
+    game: str,
+    problems: list[str],
+    status: str | None = None,
+    duration_seconds: int | None = None,
+) -> bool:
+    """Card for paths that have no M7A log to describe; no problems means success.
+
+    兜底路径上调用，任何异常都只记日志，不能改变任务退出码。
+    """
+    try:
+        report = GameReport(
+            game=game,
+            status=status or ("failed" if problems else "completed"),
+            finished_at=datetime.now(),
+            problems=problems,
+            duration_seconds=duration_seconds,
+        )
+        return send_card(report.to_card())
+    except Exception:
+        log.exception("short report failed")
+        return False

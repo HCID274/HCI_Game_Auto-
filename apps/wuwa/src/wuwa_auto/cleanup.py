@@ -89,14 +89,18 @@ def stop_stale_workflow_controllers() -> list[int]:
 
 
 def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
-    """Capture is done by the caller; this function then closes every owned leaf."""
+    """Capture is done by the caller; this function then closes every owned leaf.
+
+    ``issues`` 会原样出现在日报上，只写用户看得懂的结果；异常细节只进日志。
+    关闭动作出错但进程最终都退出了，就不算问题。
+    """
     result = CleanupResult()
     try:
         stop_stale_workflow_controllers()
         stop_daily_workers()
         stop_pyappify_launchers()
-    except Exception as exc:
-        result.issues.append(f"OK-WW关闭异常：{exc}")
+    except Exception:
+        log.exception("OK-WW cleanup raised")
     result.ok_closed = not _running_ok_processes()
     if not result.ok_closed:
         result.issues.append("OK-WW进程未完全退出")
@@ -104,8 +108,8 @@ def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
     try:
         stop_wuthering_game()
         stop_client_launchers()
-    except Exception as exc:
-        result.issues.append(f"鸣潮关闭异常：{exc}")
+    except Exception:
+        log.exception("Wuthering Waves cleanup raised")
     result.game_closed = not _game_running() and not is_client_launcher_running()
     if not result.game_closed:
         result.issues.append("鸣潮客户端或启动器进程未完全退出")
@@ -116,7 +120,8 @@ def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
             result.acceleration_disconnected = True
         except Exception as exc:
             if acceleration_was_connected:
-                result.issues.append(f"鸣潮加速未确认断开：{exc}")
+                log.warning("UU disconnect was not verified: %s", exc)
+                result.issues.append("鸣潮加速未确认断开")
             else:
                 log.info("UU disconnect was unnecessary or unverifiable: %s", exc)
     else:
@@ -124,8 +129,8 @@ def cleanup_after_run(*, acceleration_was_connected: bool) -> CleanupResult:
 
     try:
         terminate_uu()
-    except Exception as exc:
-        result.issues.append(f"UU退出异常：{exc}")
+    except Exception:
+        log.exception("UU cleanup raised")
     result.uu_exited = not is_any_uu_process_running()
     if not result.uu_exited:
         result.issues.append("UU进程未完全退出")

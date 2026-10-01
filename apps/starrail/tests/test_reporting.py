@@ -383,6 +383,13 @@ class TestParser:
         assert report.errors == []
         assert "secret" not in str(report.to_dict()).casefold()
 
+    def test_stalled_on_a_redemption_line_still_hides_the_code(self) -> None:
+        content = "2026-07-04 06:03:09,644 | INFO | 兑换码使用成功: secret-two (1/3)"
+        report = parse_m7a_run(content, now=datetime(2026, 7, 4, 6, 30))
+
+        assert report.overall_status == "stalled"
+        assert "secret" not in card_text(_report(report).to_card()).casefold()
+
     def test_divergent_universe_facts_are_all_retained(self) -> None:
         content = """\
 2026-07-27 10:54:56,036 | INFO | 差分宇宙积分：0 / 18000
@@ -501,6 +508,14 @@ class TestCard:
         assert card.tasks[0] == "❌ 每日实训 400/500（还差：使用支援角色并获得战斗胜利1次）"
         assert card.problems[0] == "三月七助手日志长时间不更新，被看门狗停止"
 
+    def test_nonzero_exit_is_red_even_when_the_daily_is_done(self) -> None:
+        report = parse_m7a_run(
+            SUCCESS_LOG, now=datetime(2026, 7, 25, 6, 8), run_stage="M7A", force_failed=True
+        )
+
+        assert report.daily_status == "completed"
+        assert _report(report).status == "failed"
+
     def test_completed_run_with_a_broken_plan_is_partial(self) -> None:
         run = RunReport(
             overall_status="completed",
@@ -558,6 +573,33 @@ class TestService:
         assert data["facts"]["daily_score"] == "500/500"
         assert data["report"]["tasks"][0].startswith("✅ 每日实训 500/500")
 
+    def test_secrets_in_m7a_errors_never_reach_the_card_or_archive(self, tmp_path: Path) -> None:
+        log_path = tmp_path / "2026-07-25.log"
+        log_path.write_text(
+            SUCCESS_LOG
+            + "2026-07-25 06:08:00,000 | ERROR | 发生错误 请求失败 token=SUPERSECRET123 "
+            "https://open.feishu.cn/open-apis/bot/v2/hook/HOOKSECRET456\n",
+            encoding="utf-8",
+        )
+        with patch("starrail_auto.reporting.service.REPORTS_DIR", tmp_path / "reports"), patch(
+            "starrail_auto.reporting.service.send_card", return_value=True
+        ), patch(
+            "starrail_auto.reporting.service.load_training_plan", return_value=TrainingPlan()
+        ), patch(
+            "starrail_auto.reporting.service.reconcile_training_plan", return_value=TrainingPlan()
+        ), patch(
+            "starrail_auto.reporting.service.load_power_plan_remaining", return_value={}
+        ), patch(
+            "starrail_auto.reporting.service.format_active_reminders", return_value=[]
+        ):
+            archive = report_main_run(
+                log_path=log_path, offset=0, exit_code=0, stage="", retries=0
+            )
+
+        text = archive.read_text(encoding="utf-8")
+        assert "SUPERSECRET123" not in text
+        assert "HOOKSECRET456" not in text
+
     def test_archived_run_is_rebuilt_as_a_preview_without_sending(self, tmp_path: Path) -> None:
         reports = tmp_path / "reports"
         reports.mkdir()
@@ -586,6 +628,8 @@ class TestService:
         ) as send, patch(
             "starrail_auto.reporting.service.load_training_plan", return_value=TrainingPlan()
         ), patch(
+            "starrail_auto.reporting.service.reconcile_training_plan", return_value=TrainingPlan()
+        ) as reconcile, patch(
             "starrail_auto.reporting.service.load_power_plan_remaining", return_value={}
         ), patch(
             "starrail_auto.reporting.service.format_active_reminders", return_value=[]
@@ -593,6 +637,8 @@ class TestService:
             preview, text = preview_archived_run("latest")
 
         send.assert_not_called()
+        # 预览不能改写用户的养成计划。
+        assert reconcile.call_args.kwargs["persist"] is False
         assert preview.name == "2026-09-29_0.preview.json"
         assert text.startswith("❌ 星铁 失败")
         # 当晚 22:00 的另一轮日志不能混进早上这次的预览。
@@ -605,3 +651,44 @@ class TestService:
         text = card_text(send.call_args.args[0])
         assert text.startswith("❌ 星铁收尾 失败")
         assert "1. UU 加速器进程没能退出" in text
+
+    def test_short_success_card_is_never_an_empty_card(self) -> None:
+        with patch("starrail_auto.reporting.service.send_card", return_value=True) as send:
+            send_short_report(game="星铁 universe", problems=[])
+
+        assert send.call_args.args[0]["card"]["elements"]
+
+
+class TestWorkflowReport:
+    """汇报出错时的兜底：不发假绿卡，也绝不改变任务退出码。"""
+
+    def _execute(self, exit_code: int, *, send_card_error: bool = False):
+        from starrail_auto.m7a.models import RunResult
+        from starrail_auto.workflows import daily
+
+        result = RunResult(exit_code, stage="M7A" if exit_code else "")
+        send = patch(
+            "starrail_auto.reporting.service.send_card",
+            side_effect=ValueError("bad webhook") if send_card_error else None,
+            return_value=True,
+        )
+        with patch.object(daily, "_setup_logging"), patch.object(
+            daily, "_run", return_value=result
+        ), patch.object(
+            daily, "report_main_run", side_effect=ValueError("day 2026-02-30 is out of range")
+        ), send as sent:
+            code = daily.execute_task("main")
+        return code, sent
+
+    def test_report_failure_sends_an_orange_fallback_and_keeps_the_exit_code(self) -> None:
+        code, sent = self._execute(0)
+
+        assert code == 0
+        text = card_text(sent.call_args.args[0])
+        assert text.startswith("⚠️ 星铁 部分完成")
+        assert "日报生成出错" in text
+
+    def test_fallback_send_errors_cannot_replace_the_exit_code(self) -> None:
+        code, _ = self._execute(3, send_card_error=True)
+
+        assert code == 3

@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import re
 
-_PHASES = {"pre-daily FarmEcho failed": "讨伐", "DailyTask failed": "日常"}
-_PHASE_SPLIT = re.compile(r"(?:^|;\s*)(pre-daily FarmEcho failed|DailyTask failed): ")
+# 原因串里的阶段前缀 -> (阶段键, 卡片上的中文前缀)
+_PHASES = {
+    "pre-daily FarmEcho failed": ("boss", "讨伐"),
+    "DailyTask failed": ("daily", "日常"),
+}
+_PHASE_SPLIT = re.compile(r"(?:^|;\s*)(pre-daily FarmEcho failed|DailyTask failed):\s*")
 _DIAGNOSTIC_FIELD = re.compile(r"^\w+=")
 # 包装前缀 -> 内层原因无法翻译时使用的中文前缀
 _WRAPPERS = (
@@ -61,6 +65,8 @@ _RULES = tuple(
         (r"log stalled", "OK-WW 日志长时间没有更新，判定卡住"),
         (r"could not bind the current active character", "OK-WW 识别不到当前角色"),
         (r"interactive desktop is blocked", "桌面被锁屏或系统弹窗挡住"),
+        (r"produced no current-run log before startup deadline", "OK-WW 启动后一直没有开始运行"),
+        (r"daily world-state recovery failed", "日常中断后没能把游戏恢复到大世界"),
     )
 )
 MAX_RAW_CHARS = 80
@@ -92,21 +98,21 @@ def _main_clause(segment: str) -> str:
     )
 
 
-def explain_failure(reason: str) -> list[str]:
-    """每个失败阶段一句中文；没有阶段前缀的原因直接翻译。"""
+def explain_failure(reason: str) -> list[tuple[str | None, str]]:
+    """每个失败阶段一句中文，连同阶段键（boss/daily）返回；没有阶段前缀的为 None。"""
 
     parts = _PHASE_SPLIT.split(reason.strip())
-    segments = [("", parts[0])] if parts[0].strip() else []
+    segments = [(None, "", parts[0])] if parts[0].strip() else []
     segments += [
-        (_PHASES[parts[index]], parts[index + 1]) for index in range(1, len(parts), 2)
+        (*_PHASES[parts[index]], parts[index + 1]) for index in range(1, len(parts), 2)
     ]
-    explained: list[str] = []
-    for phase, segment in segments:
+    explained: list[tuple[str | None, str]] = []
+    for phase, label, segment in segments:
         clause = _main_clause(segment)
         if not clause:
             continue
         text = _translate(clause)
-        line = f"{phase}：{text}" if phase else text
+        line = (phase, f"{label}：{text}" if label else text)
         if line not in explained:
             explained.append(line)
     return explained

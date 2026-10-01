@@ -1,6 +1,7 @@
 """Single command-line interface for scheduled and manual automation."""
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -85,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from starrail_auto.reporting.service import preview_archived_run
 
         path, text = preview_archived_run(args.name)
+        # 中文 Windows 下重定向输出默认是 GBK，卡片里的状态符号写不进去。
+        sys.stdout.reconfigure(encoding="utf-8")
         print(text)
         print(f"\npreview written: {path}")
         return 0

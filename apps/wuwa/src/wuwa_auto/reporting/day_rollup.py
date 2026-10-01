@@ -50,6 +50,12 @@ def _archived_candidates(
     return candidates
 
 
+def _daily_order(item: ReportItem) -> int:
+    # 新增的日常项还没排进顺序表时放在最后，不让整张日报出错。
+    order = DAILY_ITEM_ORDER
+    return order.index(item.item_id) if item.item_id in order else len(order)
+
+
 def _latest(candidates: Iterable[_Candidate]) -> _Candidate | None:
     # 最近一次结算为准：早先的成功不能盖住后来的失败。
     return max(candidates, key=lambda item: item.sort_key, default=None)
@@ -94,17 +100,7 @@ def build_daily_rollup(
             if candidate is daily or item.item_id != "daily-activity":
                 daily_items[item.item_id] = item
 
-    issues: list[str] = []
-    for candidate, ok in ((daily, daily.facts.daily_ok), (boss, boss.facts.boss_ok)):
-        if daily is boss or not ok:
-            issues.extend(issue for issue in candidate.facts.issues if issue not in issues)
     latest = candidates[-1]
-    issues.extend(
-        str(issue)
-        for issue in latest.facts.cleanup.get("issues", [])
-        if str(issue) not in issues
-    )
-
     daily_ok, boss_ok = daily.facts.daily_ok, boss.facts.boss_ok
     if daily_ok and boss_ok:
         status = "completed"
@@ -120,12 +116,12 @@ def build_daily_rollup(
         duration_seconds=sum(item.facts.duration_seconds for item in selected),
         daily_ok=daily_ok,
         boss_ok=boss_ok,
-        daily=sorted(
-            daily_items.values(), key=lambda item: DAILY_ITEM_ORDER.index(item.item_id)
-        ),
+        daily=sorted(daily_items.values(), key=_daily_order),
         weekly=list(daily.facts.weekly),
         boss=list(boss.facts.boss),
-        issues=issues,
+        # 每个阶段的异常只取该阶段最近一次结算；收尾问题只看当天最后一次运行。
+        boss_issues=list(boss.facts.boss_issues),
+        daily_issues=list(daily.facts.daily_issues),
         cleanup=latest.facts.cleanup,
         sources=[item.run_id for item in candidates if item.run_id in sources],
     )

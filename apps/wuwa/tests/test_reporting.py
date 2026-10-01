@@ -50,6 +50,7 @@ def _ok_result(
     status: str,
     log_text: str,
     reason: str = "",
+    config: dict | None = None,
 ) -> OkRunResult:
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)
@@ -66,7 +67,7 @@ def _ok_result(
         duration_seconds=600,
         log_slice_path=str(log_path),
         evidence_path=None,
-        config={"workflow_task": workflow, "boss_challenge_index": 2},
+        config={"workflow_task": workflow, "boss_challenge_index": 2, **(config or {})},
         exit_code=0 if status == "success" else 1,
     )
     (run_dir / "result.json").write_text(
@@ -583,7 +584,18 @@ class TestFailureReasons:
         ],
     )
     def test_reasons_become_short_chinese_lines(self, reason: str, expected: list[str]) -> None:
-        assert explain_failure(reason) == expected
+        assert [line for _, line in explain_failure(reason)] == expected
+
+    def test_phase_keys_follow_the_reason_prefixes(self) -> None:
+        reason = (
+            "pre-daily FarmEcho failed: FarmEcho recovery incomplete: absorbed 2/5; "
+            "DailyTask failed: OK-WW produced no current-run log before startup deadline"
+        )
+        assert explain_failure(reason) == [
+            ("boss", "讨伐：讨伐自动恢复后仍没打完（吸收声骸 2/5）"),
+            ("daily", "日常：OK-WW 启动后一直没有开始运行"),
+        ]
+        assert explain_failure("DailyTask failed:") == []
 
 
 class TestRollup:
@@ -699,7 +711,7 @@ class TestRollup:
             60,
             daily_ok=state == "success",
             daily=[ReportItem("nightmare-nest", DONE, "梦魇巢穴：吸收声骸 4 次")],
-            issues=[] if state == "success" else ["本轮没确认活跃度"],
+            daily_issues=[] if state == "success" else ["本轮没确认活跃度"],
         )
 
         with patch(
@@ -717,6 +729,44 @@ class TestRollup:
         assert _lines(combined.boss) == ["✅ 讨伐强敌第2项：吸收声骸 5/5"]
         assert combined.overall_status == ("completed" if state == "success" else "partial")
         assert combined.issues == ([] if state == "success" else ["本轮没确认活跃度"])
+
+    def test_boss_rerun_clears_the_morning_boss_failure_but_not_the_daily_one(
+        self, tmp_path: Path
+    ) -> None:
+        # 0814 实况：早上讨伐没打完、日常被跳过；晚上单独补跑讨伐成功。
+        reports = tmp_path / "reports"
+        morning = _ok_result(
+            tmp_path,
+            run_id="20260814_053000",
+            workflow="daily",
+            status="failed",
+            log_text="",
+            reason=(
+                "pre-daily FarmEcho failed: FarmEcho recovery incomplete: absorbed 2/5; "
+                "DailyTask failed: DailyTask skipped until FarmEcho reaches 5/5"
+            ),
+            config={"daily_sequence": {"boss_status": "failed", "daily_status": "failed"}},
+        )
+        _archive(reports, morning)
+        rerun = _ok_result(
+            tmp_path,
+            run_id="20260814_203538_farm_echo_confirmed_retry",
+            workflow="farm_echo_confirmed_retry",
+            status="success",
+            log_text="FarmEchoTask:farm echo walk_find_echo True\n",
+        )
+        cleanup = {"completed": False, "issues": ["UU进程未完全退出"]}
+
+        with patch("wuwa_auto.reporting.day_rollup.REPORTS_DIR", reports), patch(
+            "wuwa_auto.reporting.day_rollup.RUNS_DIR", tmp_path / "runs"
+        ):
+            rolled_up = build_daily_rollup(rerun, parse_run(rerun, cleanup))
+
+        assert rolled_up.issues == [
+            "日常：要等讨伐打到 5/5 才开始，本轮跳过",
+            "UU进程未完全退出",
+        ]
+        assert rolled_up.sources == [morning.run_id, rerun.run_id]
 
     def test_replaying_an_earlier_run_ignores_later_same_day_runs(self, tmp_path: Path) -> None:
         reports = tmp_path / "reports"
@@ -852,6 +902,21 @@ FarmEchoTask:HOST_FARM_ECHO_ABSORPTION_CONFIRMED 5/5
                 "途中倒地 1 次、重启游戏 1 次、续跑 3 次，已自动恢复",
             ]
         )
+
+    def test_weekly_workflow_failure_keeps_its_weekly_title(self, tmp_path: Path) -> None:
+        from wuwa_auto.okww.runner import write_workflow_failure
+
+        with patch("wuwa_auto.okww.runner.RUNS_DIR", tmp_path / "runs"):
+            result = write_workflow_failure(
+                started=datetime(2026, 9, 27, 8, 0).astimezone(),
+                reason="weekly_garden workflow exception: UU startup failed after 2 restart(s)",
+                workflow_task="weekly_garden",
+            )
+
+        text = _card(parse_run(result))
+        assert text.startswith("❌ 鸣潮周常 失败")
+        assert "1. UU 加速器启动失败（重启 2 次后放弃）" in text
+        assert "日常任务" not in text
 
     def test_cleanup_problems_downgrade_a_clean_run(self, tmp_path: Path) -> None:
         facts = parse_run(

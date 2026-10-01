@@ -9,6 +9,7 @@ from game_automation_core.reporting.feishu import (
     build_sectioned_card,
     card_text,
     make_signature,
+    send_signed_payload,
 )
 from game_automation_core.reporting.redact import redact_sensitive_data
 from game_automation_core.reporting.report import (
@@ -123,3 +124,44 @@ def test_completed_is_reserved_for_clean_runs(status, tasks, problems, expected)
 )
 def test_duration_is_human_readable(seconds: int, text: str) -> None:
     assert format_duration(seconds) == text
+
+
+class _Response:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("body", "sent"),
+    [
+        ('{"StatusCode":0,"code":0,"msg":"success"}', True),
+        ('{"code":19021,"msg":"sign match fail or timestamp is not within one hour"}', False),
+        ("not json", False),
+    ],
+)
+def test_only_a_zero_feishu_code_counts_as_sent(monkeypatch, body: str, sent: bool) -> None:
+    monkeypatch.setattr(
+        "game_automation_core.reporting.feishu.request.urlopen",
+        lambda *args, **kwargs: _Response(body),
+    )
+
+    assert send_signed_payload({}, webhook_url="https://example.invalid/hook", secret="s") is sent
+
+
+def test_malformed_webhook_url_fails_without_raising() -> None:
+    assert send_signed_payload({}, webhook_url="not a url", secret="s") is False
+
+
+def test_card_body_is_never_empty() -> None:
+    report = GameReport(game="星铁 universe", status="completed", finished_at=datetime(2026, 7, 25))
+
+    assert report.to_card()["card"]["elements"]

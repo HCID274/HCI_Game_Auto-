@@ -199,6 +199,7 @@ def write_workflow_failure(
     reason: str,
     evidence_path: Path | None = None,
     source_result: OkRunResult | None = None,
+    workflow_task: str | None = None,
 ) -> OkRunResult:
     """Persist a workflow failure, optionally retaining its latest result."""
     finished = datetime.now().astimezone()
@@ -226,6 +227,9 @@ def write_workflow_failure(
         config["workflow_failure_source_run_id"] = source_result.run_id
         if evidence is None and source_result.evidence_path:
             evidence = Path(source_result.evidence_path)
+    if workflow_task:
+        # 日报靠它区分日常、讨伐和周常；缺了会把周常失败算成日常失败。
+        config.setdefault("workflow_task", workflow_task)
     slice_path.write_text(source_text, encoding="utf-8")
     result = OkRunResult(
         run_id=run_id,

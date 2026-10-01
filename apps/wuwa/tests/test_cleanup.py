@@ -62,4 +62,25 @@ def test_disconnect_failure_is_preserved_but_uu_is_still_exited() -> None:
 
     assert result.completed
     assert result.uu_exited
-    assert result.issues == ["鸣潮加速未确认断开：not verified"]
+    assert result.issues == ["鸣潮加速未确认断开"]
+
+
+def test_card_issues_name_the_leftover_process_not_the_exception() -> None:
+    timeout = RuntimeError("timeout after 5 seconds (pid=110876, name='Client-Win64-Shipping.exe')")
+    with patch("wuwa_auto.cleanup.stop_stale_workflow_controllers"), patch(
+        "wuwa_auto.cleanup.stop_daily_workers"
+    ), patch(
+        "wuwa_auto.cleanup.stop_pyappify_launchers"
+    ), patch("wuwa_auto.cleanup._running_ok_processes", return_value=[]), patch(
+        "wuwa_auto.cleanup.stop_wuthering_game", side_effect=timeout
+    ), patch("wuwa_auto.cleanup.stop_client_launchers"), patch(
+        "wuwa_auto.cleanup._game_running", return_value=True
+    ), patch("wuwa_auto.cleanup.is_client_launcher_running", return_value=False), patch(
+        "wuwa_auto.cleanup.is_uu_running", return_value=False
+    ), patch("wuwa_auto.cleanup.terminate_uu"), patch(
+        "wuwa_auto.cleanup.is_any_uu_process_running", return_value=False
+    ):
+        result = cleanup_after_run(acceleration_was_connected=True)
+
+    assert not result.completed
+    assert result.issues == ["鸣潮客户端或启动器进程未完全退出"]

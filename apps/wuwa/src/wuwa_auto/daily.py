@@ -661,6 +661,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
             reason=failure_reason or "daily workflow ended without a result",
             evidence_path=failure_evidence,
             source_result=result,
+            workflow_task=task_name,
         )
     if cleanup is None:
         cleanup = cleanup_after_run(

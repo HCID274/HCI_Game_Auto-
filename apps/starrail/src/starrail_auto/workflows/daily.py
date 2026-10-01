@@ -22,6 +22,7 @@ from starrail_auto.uu.service import ensure_uu_connected
 
 log = logging.getLogger(__name__)
 DAILY_RESET_HOUR = 5
+REPORT_FAILED = "日报生成出错，今天的任务清单请看运行日志"
 
 
 def _setup_logging() -> None:
@@ -66,6 +67,7 @@ def execute_task(task: str, timeout: int | None = None) -> int:
     _setup_logging()
     started = time.monotonic()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
+    duration = round(time.monotonic() - started)
     if task == "main":
         try:
             report_main_run(
@@ -74,20 +76,30 @@ def execute_task(task: str, timeout: int | None = None) -> int:
                 exit_code=result.exit_code,
                 stage=result.stage,
                 retries=result.retries,
-                duration_seconds=round(time.monotonic() - started),
+                duration_seconds=duration,
             )
         except Exception:
             log.exception("final report service failed")
-            _send_short_report(result, game="星铁")
+            # 任务清单生成失败时不能发“全部完成”，至少说明日报本身出了错。
+            _send_short_report(
+                result, game="星铁", duration=duration, report_failed=True
+            )
     else:
-        _send_short_report(result, game=f"星铁 {task}")
+        _send_short_report(result, game=f"星铁 {task}", duration=duration)
     log.info("workflow finished with code %d", result.exit_code)
     return result.exit_code
 
 
-def _send_short_report(result: RunResult, *, game: str) -> None:
+def _send_short_report(
+    result: RunResult, *, game: str, duration: int, report_failed: bool = False
+) -> None:
     problems = [] if result.exit_code == EXIT_OK else [describe_stage(result.stage)]
-    send_short_report(game=game, problems=problems)
+    if report_failed:
+        problems.append(REPORT_FAILED)
+    status = "failed" if result.exit_code != EXIT_OK else "partial" if problems else None
+    send_short_report(
+        game=game, problems=problems, status=status, duration_seconds=duration
+    )
 
 
 def _daily_reset_has_passed(now: datetime | None = None) -> bool:
