@@ -34,6 +34,7 @@ from starrail_auto.uu.desktop import (
     mandatory_update_visible,
     minimize_uu_window,
     move_mouse_to,
+    park_cursor_for_detection,
     require_admin,
     require_supported_display,
     startup_error,
@@ -142,6 +143,8 @@ def _run_startup_attempt(attempt_no: int, *, update_used: bool = False) -> None:
             )
         log.info("existing UU session is not accelerated; running full chain")
 
+    # 鼠标残留在星铁卡片上会让卡片变成悬停样式，识别模板（卡片原图）随之失效。
+    park_cursor_for_detection()
     first = wait_for_image(
         TPL_STEP_1,
         step_name="locate_startup_move_target",

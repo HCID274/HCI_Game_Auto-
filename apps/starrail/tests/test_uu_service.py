@@ -68,6 +68,47 @@ class UuIdentityTests(unittest.TestCase):
         wait_for_image.assert_not_called()
 
 
+    def test_cursor_is_parked_before_locating_the_starrail_card(self) -> None:
+        # 2026-10-03：鼠标残留在卡片上使其变成悬停样式，卡片原图模板找不到。
+        order: list[str] = []
+        with patch(
+            "starrail_auto.uu.service.require_desktop_ready"
+        ), patch(
+            "starrail_auto.uu.service.describe_window",
+            return_value="test desktop",
+        ), patch(
+            "starrail_auto.uu.service.require_supported_display"
+        ), patch(
+            "starrail_auto.uu.service.is_uu_running",
+            return_value=False,
+        ), patch(
+            "starrail_auto.uu.service._ensure_uu_started"
+        ), patch(
+            "starrail_auto.uu.service.focus_uu_window",
+            return_value="UU加速器",
+        ), patch(
+            "starrail_auto.uu.service._recover_mandatory_update",
+            return_value=False,
+        ), patch(
+            "starrail_auto.uu.service.dismiss_known_popups"
+        ), patch(
+            "starrail_auto.uu.service.park_cursor_for_detection",
+            side_effect=lambda: order.append("park"),
+        ), patch(
+            "starrail_auto.uu.service.wait_for_image",
+            side_effect=lambda *a, **k: order.append("locate") or (1, 2),
+        ), patch(
+            "starrail_auto.uu.service.move_mouse_to",
+            side_effect=RuntimeError("stop after locate"),
+        ), patch(
+            "starrail_auto.uu.service.time.sleep"
+        ):
+            with self.assertRaises(RuntimeError):
+                _run_startup_attempt(1)
+
+        self.assertEqual(order, ["park", "locate"])
+
+
 class UuSupervisorTests(unittest.TestCase):
     def test_two_failed_attempts_use_two_restarts_then_succeed(self) -> None:
         errors = [

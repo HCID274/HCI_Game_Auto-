@@ -143,6 +143,10 @@ def move_mouse_to(position: tuple[int, int]) -> None:
     _controller.move_mouse_to(position)
 
 
+def park_cursor_for_detection() -> None:
+    _controller.park_cursor_for_detection()
+
+
 def dismiss_known_popups(context: str) -> None:
     _controller.dismiss_known_popups(context)
 
