@@ -18,6 +18,7 @@ if str(HOST_SRC) not in sys.path:
 
 from wuwa_auto.okww.daily_activity import install_daily_activity_override
 from wuwa_auto.okww.daily_trace import install_daily_trace
+from wuwa_auto.okww.game_launch import install_game_launch_arguments
 
 
 CLICK_ATTEMPTS = 2
@@ -319,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     from src.task.ForgeryTask import ForgeryTask
     from src.task.SimulationTask import SimulationTask
 
+    install_game_launch_arguments()
     install_nightmare_override(NightmareNestTask)
     install_daily_activity_override(DailyTask)
     install_daily_trace(

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from .game_launch import install_game_launch_arguments
     from .farm_echo_state import (
         PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER,
         REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
@@ -20,6 +21,7 @@ try:
     )
     from .virtual_hid import _virtual_hid_click
 except ImportError:  # executed directly by OK-WW's bundled Python
+    from game_launch import install_game_launch_arguments
     from farm_echo_state import (
         PARTY_MEMBER_HEAL_RECOVERY_COMPLETED_MARKER,
         REALM_DEFEAT_HEAL_RECOVERY_COMPLETED_MARKER,
@@ -491,6 +493,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(working_dir))
 
         from ok import run_task
+
+        install_game_launch_arguments()
         from src.task.DomainTask import DomainTask
         from src.task.WWOneTimeTask import WWOneTimeTask
 

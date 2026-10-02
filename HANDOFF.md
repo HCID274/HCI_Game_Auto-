@@ -279,6 +279,19 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   `Client/Saved/Logs/Client.log` 05:42 新建后始终 0 字节,600 秒无窗口。05:47 有显卡驱动超时
   事件(LiveKernelEvent 141),但此类事件 09-09 起每天 5–20 次、成功日也有,不能单独归因。
   游戏进程卡在哪一步现有日志定位不到;下一次 05:30 结果是判据。
+- **1002 晨再红,根因查明(1003 凌晨)**:游戏在 OK-WW 直接拉起后约 9 秒自己崩溃——
+  `Client/Saved/Crashes/_0000/` 每次启动都被覆盖,断言 `Fatal error: [File:Unknown] [Line: 54]`,
+  即上游 issue #1714/#1715 的 `kuro: Use launcher to start game!`。**鸣潮 3.7 起直接运行
+  `Wuthering Waves.exe` 必须带资源包参数 `-krqlv=<sd|hd|uhd>`**,OK-WW v3.6.7 以 `None`
+  参数拉起(日志 `try execute ...Wuthering Waves.exe None with start`),上游 master 已修
+  (提交 0e53ca3「支持3.7启动游戏」)但最新正式版仍是 v3.6.7,beta 也不含。你手动经启动器
+  进游戏正常,是因为启动器自己带参数。0930 之前能直接拉起,是旧版本不检查。
+  与内存、UU、窗口识别无关;GPU 超时事件(LiveKernelEvent 141)自 0909 起天天有,是旁证噪声。
+- **修复(1003)**:`okww/game_launch.py` 在运行时包装 OK-WW 的 `start_controller.execute`,
+  对游戏本体补 `-krqlv=hd`(本机装的是高清资源包,见 `ManifestResource_HD_*`/`Video/hd`;
+  在启动器里换档要改 `GAME_PACKAGE`),已带参数不重复追加;三个 worker 与兼容性探针都挂了它,
+  上游改名会在每次日常开头的兼容性检查里直接失败。不改 OK-WW 安装目录。OK-WW 发布含修复的
+  正式版后删除该模块即可。真机验收见下一条。
 
 ## 9. 验证、发布与排障手册
 

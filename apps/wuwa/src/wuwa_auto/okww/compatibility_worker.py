@@ -7,6 +7,11 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    from .game_launch import install_game_launch_arguments
+except ImportError:  # executed directly by OK-WW's bundled Python
+    from game_launch import install_game_launch_arguments
+
 MARKER = "HOST_OKWW_COMPATIBLE"
 
 
@@ -45,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not callable(run_task):
         raise TypeError("ok.run_task is no longer callable")
+    # 游戏启动参数钩子挂在 OK-WW 的 execute 上；上游改名会在这里直接失败。
+    install_game_launch_arguments()
     _require(WWOneTimeTask, "run")
     _require(
         FarmEchoTask,

@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MethodType
 
 try:
+    from .game_launch import install_game_launch_arguments
     from .farm_echo_state import (
         PARTY_MEMBER_UNAVAILABLE_MARKER,
         REALM_DEFEAT_MARKER,
@@ -29,6 +30,7 @@ try:
         revive_dialog_visible,
     )
 except ImportError:  # executed directly by OK-WW's bundled Python
+    from game_launch import install_game_launch_arguments
     from farm_echo_state import (
         PARTY_MEMBER_UNAVAILABLE_MARKER,
         REALM_DEFEAT_MARKER,
@@ -240,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.path.insert(0, str(working_dir))
 
         from ok import run_task
+
+        install_game_launch_arguments()
         from src.task.FarmEchoTask import FarmEchoTask as UpstreamFarmEchoTask
         from src.task.WWOneTimeTask import WWOneTimeTask
 
