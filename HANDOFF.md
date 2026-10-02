@@ -283,8 +283,8 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   `Client/Saved/Crashes/_0000/` 每次启动都被覆盖,断言 `Fatal error: [File:Unknown] [Line: 54]`,
   即上游 issue #1714/#1715 的 `kuro: Use launcher to start game!`。**鸣潮 3.7 起直接运行
   `Wuthering Waves.exe` 必须带资源包参数 `-krqlv=<sd|hd|uhd>`**,OK-WW v3.6.7 以 `None`
-  参数拉起(日志 `try execute ...Wuthering Waves.exe None with start`),上游 master 已修
-  (提交 0e53ca3「支持3.7启动游戏」)但最新正式版仍是 v3.6.7,beta 也不含。你手动经启动器
+  参数拉起(日志 `try execute ...Wuthering Waves.exe None with start`),上游已修
+  (提交 0e53ca3「支持3.7启动游戏」),含修复的正式版 v3.7.2 于 1003 03:19 才发布,本机仍是 v3.6.7。你手动经启动器
   进游戏正常,是因为启动器自己带参数。0930 之前能直接拉起,是旧版本不检查。
   与内存、UU、窗口识别无关;GPU 超时事件(LiveKernelEvent 141)自 0909 起天天有,是旁证噪声。
 - **修复(1003)**:`okww/game_launch.py` 在运行时包装 OK-WW 的 `start_controller.execute`,
@@ -292,6 +292,21 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   在启动器里换档要改 `GAME_PACKAGE`),已带参数不重复追加;三个 worker 与兼容性探针都挂了它,
   上游改名会在每次日常开头的兼容性检查里直接失败。不改 OK-WW 安装目录。OK-WW 发布含修复的
   正式版后删除该模块即可。真机验收见下一条。
+- **1003 真机验收(05:38 手动重跑 `Game_Daily_0530`)**:
+  - 星铁:05:30 那趟在 UU 步骤 4 次找不到 `uu_01.png` 整体失败(0902、0912 同类),根因是鼠标残留
+    在星铁卡片上使卡片变成悬停样式、卡片原图模板失效;`uu/service.py` 现在定位前先
+    `park_cursor_for_detection()`(鸣潮早有同样做法)。重跑 05:46 星铁日常 exit 0。
+  - 鸣潮:启动参数修复生效(游戏不再启动即崩、热更新重启已被恢复流程处理)。但 3.7 进世界后立即弹出
+    玩法教程「咎锁遗患」(两页,底部"切换至最后一页后可关闭界面"),ESC 关不掉,上游 `ensure_main`
+    只会反复按 ESC 到超时。`confirmed_retry_worker.py` 在 `is_main`/`walk_after_boss_teleport` 里
+    OCR 识别该提示,按 D 翻页后 ESC(`farm_echo_state.dismiss_tutorial_overlay`,标记
+    `HOST_FARM_ECHO_TUTORIAL_OVERLAY_DISMISSED`);真机 06:08 约 9 秒关掉,随后月卡弹窗与
+    讨伐入口正常。
+  - **未解决**:传送到讨伐点后角色落在 3.7 新增的任务区域内(HUD 追踪任务「御剑飞往倚枝岭」,
+    离开区域会出现"已离开任务区域,请尽快返回"倒计时),上游向前走 20 秒只爬上悬崖,
+    `Teleport to boss failed: can not walk to combat or F`。OK-WW v3.7.2(1003 03:19 发布,
+    含 `-krqlv` 与无音区适配)没改 FarmEcho 走路逻辑,升级不能解决;需用户先在游戏里处理该
+    3.7 任务状态或换讨伐目标。证据:`apps/wuwa/runtime/runs/20261003_061*_farm_echo_confirmed_retry`。
 
 ## 9. 验证、发布与排障手册
 
