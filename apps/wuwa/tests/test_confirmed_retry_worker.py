@@ -38,7 +38,7 @@ def test_confirmed_worker_never_overrides_upstream_combat_or_input() -> None:
     )
 
 
-def test_confirmed_worker_keeps_only_host_accounting_and_death_boundary() -> None:
+def test_confirmed_worker_keeps_only_host_accounting_death_boundary_and_tutorial_guard() -> None:
     methods = _farm_echo_method_names()
 
     assert methods == {
@@ -46,6 +46,7 @@ def test_confirmed_worker_keeps_only_host_accounting_and_death_boundary() -> Non
         "manage_boss_interactions",
         "raise_not_in_combat",
         "teleport_to_configured_boss_and_prepare",
+        "walk_after_boss_teleport",
         "host_record_absorption",
         "incr_drop",
         "run",

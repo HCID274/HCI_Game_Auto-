@@ -24,6 +24,7 @@ try:
         PARTY_MEMBER_UNAVAILABLE_MARKER,
         REALM_DEFEAT_MARKER,
         REVIVE_DIALOG_MARKER,
+        dismiss_tutorial_overlay,
         party_member_unavailable,
         realm_defeat_visible,
         revival_item_unavailable_visible,
@@ -35,6 +36,7 @@ except ImportError:  # executed directly by OK-WW's bundled Python
         PARTY_MEMBER_UNAVAILABLE_MARKER,
         REALM_DEFEAT_MARKER,
         REVIVE_DIALOG_MARKER,
+        dismiss_tutorial_overlay,
         party_member_unavailable,
         realm_defeat_visible,
         revival_item_unavailable_visible,
@@ -348,6 +350,16 @@ def main(argv: list[str] | None = None) -> int:
                 self.log_info(GAMEPLAY_HANDOFF_MARKER)
                 with _scoped_entry_navigation_hid(self):
                     super().teleport_to_configured_boss_and_prepare()
+
+            def walk_after_boss_teleport(self) -> object:
+                # 3.7 的「咎锁遗患」教程弹窗盖住 HUD，上游的走路判定会超时。
+                dismiss_tutorial_overlay(self)
+                try:
+                    return super().walk_after_boss_teleport()
+                except RuntimeError:
+                    if not dismiss_tutorial_overlay(self):
+                        raise
+                    return super().walk_after_boss_teleport()
 
             def host_record_absorption(self) -> None:
                 nonlocal absorbed

@@ -38,6 +38,12 @@ class RealmStateTask(Protocol):
 
     def in_team(self) -> object: ...
 
+    def send_key(self, *args: object, **kwargs: object) -> object: ...
+
+    def ensure_main(self, *args: object, **kwargs: object) -> object: ...
+
+    def log_info(self, message: object) -> object: ...
+
 
 def party_member_unavailable(
     task: RealmStateTask,
@@ -177,3 +183,39 @@ def click_realm_defeat_exit(task: RealmStateTask) -> None:
     )
     if not clicked:
         raise RuntimeError("could not click Exit on realm defeat screen")
+
+
+TUTORIAL_OVERLAY_MARKER = "HOST_FARM_ECHO_TUTORIAL_OVERLAY_DISMISSED"
+_TUTORIAL_HINT = re.compile(r"(?:切换至最后一页|可关闭界面)")
+_TUTORIAL_MAX_PAGES = 6
+
+
+def tutorial_overlay_visible(task: RealmStateTask, *, time_out: float = 1.5) -> bool:
+    """识别 3.7 起的玩法教程弹窗（如「咎锁遗患」），底部固定提示翻到最后一页才能关。"""
+    return bool(
+        task.wait_ocr(
+            0.25,
+            0.88,
+            0.75,
+            0.99,
+            match=_TUTORIAL_HINT,
+            time_out=time_out,
+            settle_time=0.2,
+            raise_if_not_found=False,
+        )
+    )
+
+
+def dismiss_tutorial_overlay(task: RealmStateTask) -> bool:
+    """翻页（D）到最后一页后用 ensure_main 的 ESC 关闭；没有弹窗返回 False。"""
+    if not tutorial_overlay_visible(task, time_out=1):
+        return False
+    task.log_info(TUTORIAL_OVERLAY_MARKER)
+    for _ in range(_TUTORIAL_MAX_PAGES):
+        task.send_key("d", after_sleep=1)
+        if not tutorial_overlay_visible(task, time_out=1):
+            break
+    task.ensure_main(time_out=20)
+    if tutorial_overlay_visible(task, time_out=1):
+        raise RuntimeError("tutorial overlay could not be dismissed")
+    return True

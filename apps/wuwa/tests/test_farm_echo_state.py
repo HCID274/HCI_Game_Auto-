@@ -1,5 +1,9 @@
+import pytest
+
 from wuwa_auto.okww.farm_echo_state import (
+    TUTORIAL_OVERLAY_MARKER,
     click_realm_defeat_exit,
+    dismiss_tutorial_overlay,
     party_member_unavailable,
     realm_defeat_visible,
     revival_item_unavailable_visible,
@@ -72,3 +76,47 @@ def test_revival_item_prompt_requires_prompt_and_party_hud() -> None:
     assert not revival_item_unavailable_visible(
         FakeRealmTask([True], team_state=(False, 0, 3))
     )
+
+
+class FakeTutorialTask:
+    def __init__(self, visible: list[bool]) -> None:
+        self.visible = iter(visible)
+        self.keys: list[str] = []
+        self.logs: list[object] = []
+        self.ensured = False
+
+    def wait_ocr(self, *_: object, **__: object) -> object:
+        return object() if next(self.visible) else None
+
+    def send_key(self, key: str, **_: object) -> None:
+        self.keys.append(key)
+
+    def ensure_main(self, **_: object) -> None:
+        self.ensured = True
+
+    def log_info(self, message: object) -> None:
+        self.logs.append(message)
+
+
+def test_tutorial_overlay_absent_does_nothing() -> None:
+    task = FakeTutorialTask([False])
+
+    assert dismiss_tutorial_overlay(task) is False
+    assert task.keys == [] and not task.ensured
+
+
+def test_tutorial_overlay_pages_forward_then_returns_to_main() -> None:
+    # 进入检测、翻第一页后仍在、翻第二页后提示消失、收尾复查已清除
+    task = FakeTutorialTask([True, True, False, False])
+
+    assert dismiss_tutorial_overlay(task) is True
+    assert task.keys == ["d", "d"]
+    assert task.ensured
+    assert task.logs == [TUTORIAL_OVERLAY_MARKER]
+
+
+def test_tutorial_overlay_that_survives_is_an_error() -> None:
+    task = FakeTutorialTask([True] * 20)
+
+    with pytest.raises(RuntimeError, match="tutorial overlay"):
+        dismiss_tutorial_overlay(task)
