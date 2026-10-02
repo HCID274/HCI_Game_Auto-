@@ -351,6 +351,12 @@ def main(argv: list[str] | None = None) -> int:
                 with _scoped_entry_navigation_hid(self):
                     super().teleport_to_configured_boss_and_prepare()
 
+            def is_main(self, esc: bool = True) -> bool:
+                # 进世界后 HUD 被教程弹窗盖住时，上游只会反复按 ESC 直到超时。
+                if not self.in_team_and_world():
+                    dismiss_tutorial_overlay(self)
+                return super().is_main(esc=esc)
+
             def walk_after_boss_teleport(self) -> object:
                 # 3.7 的「咎锁遗患」教程弹窗盖住 HUD，上游的走路判定会超时。
                 dismiss_tutorial_overlay(self)

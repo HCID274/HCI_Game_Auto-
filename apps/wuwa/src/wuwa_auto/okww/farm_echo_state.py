@@ -40,8 +40,6 @@ class RealmStateTask(Protocol):
 
     def send_key(self, *args: object, **kwargs: object) -> object: ...
 
-    def ensure_main(self, *args: object, **kwargs: object) -> object: ...
-
     def log_info(self, message: object) -> object: ...
 
 
@@ -207,7 +205,11 @@ def tutorial_overlay_visible(task: RealmStateTask, *, time_out: float = 1.5) -> 
 
 
 def dismiss_tutorial_overlay(task: RealmStateTask) -> bool:
-    """翻页（D）到最后一页后用 ensure_main 的 ESC 关闭；没有弹窗返回 False。"""
+    """翻页（D）到最后一页后按 ESC 关闭；没有弹窗返回 False。
+
+    弹窗出现在进世界后第一时间，上游 ensure_main 的 ESC 循环关不掉它，
+    所以由 is_main 钩子调用本函数，不能反过来依赖 ensure_main。
+    """
     if not tutorial_overlay_visible(task, time_out=1):
         return False
     task.log_info(TUTORIAL_OVERLAY_MARKER)
@@ -215,7 +217,7 @@ def dismiss_tutorial_overlay(task: RealmStateTask) -> bool:
         task.send_key("d", after_sleep=1)
         if not tutorial_overlay_visible(task, time_out=1):
             break
-    task.ensure_main(time_out=20)
+    task.send_key("esc", after_sleep=1)
     if tutorial_overlay_visible(task, time_out=1):
         raise RuntimeError("tutorial overlay could not be dismissed")
     return True

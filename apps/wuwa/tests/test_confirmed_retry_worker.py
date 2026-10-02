@@ -46,6 +46,7 @@ def test_confirmed_worker_keeps_only_host_accounting_death_boundary_and_tutorial
         "manage_boss_interactions",
         "raise_not_in_combat",
         "teleport_to_configured_boss_and_prepare",
+        "is_main",
         "walk_after_boss_teleport",
         "host_record_absorption",
         "incr_drop",

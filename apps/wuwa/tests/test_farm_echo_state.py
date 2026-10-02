@@ -83,16 +83,12 @@ class FakeTutorialTask:
         self.visible = iter(visible)
         self.keys: list[str] = []
         self.logs: list[object] = []
-        self.ensured = False
 
     def wait_ocr(self, *_: object, **__: object) -> object:
         return object() if next(self.visible) else None
 
     def send_key(self, key: str, **_: object) -> None:
         self.keys.append(key)
-
-    def ensure_main(self, **_: object) -> None:
-        self.ensured = True
 
     def log_info(self, message: object) -> None:
         self.logs.append(message)
@@ -102,7 +98,7 @@ def test_tutorial_overlay_absent_does_nothing() -> None:
     task = FakeTutorialTask([False])
 
     assert dismiss_tutorial_overlay(task) is False
-    assert task.keys == [] and not task.ensured
+    assert task.keys == []
 
 
 def test_tutorial_overlay_pages_forward_then_returns_to_main() -> None:
@@ -110,8 +106,7 @@ def test_tutorial_overlay_pages_forward_then_returns_to_main() -> None:
     task = FakeTutorialTask([True, True, False, False])
 
     assert dismiss_tutorial_overlay(task) is True
-    assert task.keys == ["d", "d"]
-    assert task.ensured
+    assert task.keys == ["d", "d", "esc"]
     assert task.logs == [TUTORIAL_OVERLAY_MARKER]
 
 
