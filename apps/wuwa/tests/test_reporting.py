@@ -135,6 +135,25 @@ DailyTask:Daily Task Completed
 
         assert _lines(facts.daily) == ["✅ 无音区第6项：清剿 2 场，消耗 120 结晶波片"]
 
+    def test_unreachable_tacet_is_a_skipped_warning(self, tmp_path: Path) -> None:
+        # 2026-10-04：3.7 插入新无音区后序号指到传送不了的烬心域。
+        text = """
+TacetTask:HOST_TACET_UNREACHABLE_SKIPPED index=2
+DailyTask:HOST_DAILY_ACTIVITY_SHORT_AFTER_TACET_SKIP daily activity verification failed
+DailyTask:Daily Task Completed
+"""
+        facts = parse_run(
+            _result(
+                tmp_path,
+                text,
+                status="failed",
+                reason="OK-WW DailyTask completed without verified daily activity claim",
+            )
+        )
+
+        assert _lines(facts.daily)[0] == "⚠️ 无音区第6项：附近信标无法快速到达，已跳过，体力没花"
+        assert "日常跑完了，但每日活跃度奖励没确认领取" in _card(facts)
+
     def test_unconfirmed_points_are_only_reported_as_a_claim_click(self, tmp_path: Path) -> None:
         text = """
 DailyTask:info_set total daily points 0
