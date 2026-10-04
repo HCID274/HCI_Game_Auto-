@@ -147,12 +147,18 @@ DailyTask:Daily Task Completed
                 tmp_path,
                 text,
                 status="failed",
-                reason="OK-WW DailyTask completed without verified daily activity claim",
+                reason=(
+                    "OK-WW DailyTask completed after skipping an unreachable tacet; "
+                    "daily activity short"
+                ),
             )
         )
 
         assert _lines(facts.daily)[0] == "⚠️ 无音区第6项：附近信标无法快速到达，已跳过，体力没花"
-        assert "日常跑完了，但每日活跃度奖励没确认领取" in _card(facts)
+        card = _card(facts)
+        assert "无音区传送不了已跳过，每日活跃度没凑满" in card
+        # 日常其实跑完了（邮件、通行证都领了），不能写成“中途停止”。
+        assert "中途停止" not in card
 
     def test_unconfirmed_points_are_only_reported_as_a_claim_click(self, tmp_path: Path) -> None:
         text = """

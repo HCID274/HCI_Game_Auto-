@@ -116,6 +116,7 @@ def build_daily_rollup(
         duration_seconds=sum(item.facts.duration_seconds for item in selected),
         daily_ok=daily_ok,
         boss_ok=boss_ok,
+        daily_finished=daily.facts.daily_finished,
         daily=sorted(daily_items.values(), key=_daily_order),
         weekly=list(daily.facts.weekly),
         boss=list(boss.facts.boss),

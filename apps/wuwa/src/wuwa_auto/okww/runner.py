@@ -32,6 +32,7 @@ from wuwa_auto.okww.daily_activity import (
 from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
 from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
+from wuwa_auto.okww.tacet_skip import TACET_UNREACHABLE_MARKER
 from wuwa_auto.settings import (
     OK_LOG_FILE,
     OK_PYTHON_EXE,
@@ -388,7 +389,10 @@ def _run_task(
                 facts["daily_activity"] = daily_activity
                 if daily_activity.get("state") != "verified":
                     reason = (
-                        "OK-WW DailyTask completed without verified daily "
+                        "OK-WW DailyTask completed after skipping an unreachable "
+                        "tacet; daily activity short"
+                        if TACET_UNREACHABLE_MARKER in current_text
+                        else "OK-WW DailyTask completed without verified daily "
                         "activity claim"
                     )
                     evidence = save_step_screenshot("ok_daily_activity_unverified")

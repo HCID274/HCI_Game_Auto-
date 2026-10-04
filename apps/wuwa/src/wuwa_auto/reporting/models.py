@@ -32,6 +32,8 @@ class RunFacts:
     reason: str
     duration_seconds: int
     daily_ok: bool | None = None
+    # 日常跑到了 Daily Task Completed；没全部完成时由具体任务行说明，不再写“中途停止”。
+    daily_finished: bool = False
     boss_ok: bool | None = None
     daily: list[ReportItem] = field(default_factory=list)
     weekly: list[ReportItem] = field(default_factory=list)

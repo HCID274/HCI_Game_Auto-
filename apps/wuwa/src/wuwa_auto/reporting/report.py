@@ -17,7 +17,7 @@ GAME_LABELS = {
 
 def build_report(facts: RunFacts, *, finished_at: datetime) -> GameReport:
     daily = [item.line for item in facts.daily]
-    if facts.daily_ok is False:
+    if facts.daily_ok is False and not facts.daily_finished:
         daily.append(f"{FAILED} 日常任务：{'中途停止' if daily else '没完成'}")
     tasks = [
         *daily,

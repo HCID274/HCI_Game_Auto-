@@ -51,6 +51,7 @@ _RULES = tuple(
             "每日活跃度没达标（{points}/{target}）",
         ),
         (r"daily activity unverified", "每日活跃度奖励没确认到账"),
+        (r"skipping an unreachable tacet", "无音区传送不了已跳过，每日活跃度没凑满"),
         (r"completed without verified daily activity claim", "日常跑完了，但每日活跃度奖励没确认领取"),
         (r"Daily Task exception stopped", "OK-WW 日常任务异常中止"),
         (

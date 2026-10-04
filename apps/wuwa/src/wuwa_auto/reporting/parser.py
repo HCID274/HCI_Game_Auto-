@@ -338,6 +338,7 @@ def parse_run(
         duration_seconds=int(result.duration_seconds or 0),
         daily_ok=daily_ok,
         boss_ok=boss_ok,
+        daily_finished="DailyTask:Daily Task Completed" in text,
         daily=[*_tacet(text, config), *_nightmare(text), *activity, *_battle_pass(text)],
         weekly=_garden(text),
         boss=_boss(text, config, boss_ok=boss_ok, boss_names=boss_names or {}),
