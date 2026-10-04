@@ -208,6 +208,20 @@ DailyTask:Daily Task Completed
 
         assert _lines(facts.daily) == ["❌ 梦魇巢穴：1 处没传送过去，已跳过"]
 
+    def test_nightmare_skip_counts_each_nest_once_across_retries(self, tmp_path: Path) -> None:
+        # 2026-10-04：同一巢穴在首轮和 34 次日常重试里各撞一次，曾被报成 35 处。
+        same = """
+NightmareNestTask:HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED target=go_nest:48:18 reason=button_still_visible_after_retry
+"""
+        text = same * 35 + """
+NightmareNestTask:HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED target=go_nest:41:25 reason=button_still_visible_after_retry
+NightmareNestTask:farm echo walk find true
+DailyTask:Daily Task Completed
+"""
+        facts = parse_run(_result(tmp_path, text))
+
+        assert _lines(facts.daily) == ["⚠️ 梦魇巢穴：吸收声骸 1 次，2 处没传送过去，已跳过"]
+
     def test_nightmare_echoes_do_not_inflate_the_boss_count(self, tmp_path: Path) -> None:
         text = """
 NightmareNestTask:farm echo yolo find True

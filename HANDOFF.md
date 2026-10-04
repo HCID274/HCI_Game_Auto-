@@ -307,6 +307,16 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
     `Teleport to boss failed: can not walk to combat or F`。OK-WW v3.7.2(1003 03:19 发布,
     含 `-krqlv` 与无音区适配)没改 FarmEcho 走路逻辑,升级不能解决;需用户先在游戏里处理该
     3.7 任务状态或换讨伐目标。证据:`apps/wuwa/runtime/runs/20261003_061*_farm_echo_confirmed_retry`。
+    1003 傍晚用户把讨伐改为「讨伐强敌第1项」(OK-WW `FarmEchoTask.json`:`Boss Challenge`/1)。
+- **1004 晨:讨伐 5/5 通过,日常卡在无音区**:3.7 在 F2 无音区列表第一组顶部插入「沉心域」「烬心域」
+  两项(上游 7d1a5a9 把结构 `[2,5,5,7]` 改为 `[4,5,5,7]`),原第 2 项「玄幽东岳无音区」移到第 4 项。
+  配置仍是 2,选中的烬心域显示"附近信标无法快速到达"、「前往」置灰,`click_team_challenge` 等不到
+  `team_start_challenge` 而 `WaitFailedException`;通用重试按设计撞满 60 分钟无进度(34 次)才停。
+  OCR 对照见 `runs/20260929_063536` 与 `runs/20261004_055512` 的 `book_tab_target_page_check.row_names`。
+  修复:OK-WW `configs/DailyTask.json` 的 `Which Tacet Suppression to Farm` 2→4(序号 ≤4 时上游直接点
+  第 N 个可见「前往」,不依赖结构表,v3.6.7 可用)。**每次版本更新后先核对 F2 列表是否插入了新项。**
+  同日日报"35 处没传送过去"是计数错误:同一巢穴 `go_nest:48:18` 被首轮与 34 次重试各记一次,
+  `reporting/parser.py` 改为按巢穴去重。
 
 ## 9. 验证、发布与排障手册
 

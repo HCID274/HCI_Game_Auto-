@@ -32,6 +32,10 @@ DAILY_ITEM_ORDER = ("tacet", "nightmare-nest", "daily-activity", "battle-pass")
 DAILY_POINTS = re.compile(r"total daily points (?P<points>\d+)")
 HOST_CLAIM_ACTION = re.compile(r'HOST_DAILY_ACTIVITY_CLAIM_ACTION .*"host_clicks":\s*[1-9]')
 BOSS_TELEPORT = re.compile(r"Teleport to Boss Boss Challenge (?P<index>\d+)")
+# 每次日常重试都会重撞同一个传送不了的巢穴，按巢穴去重计数（1004 曾报成 35 处）。
+NIGHTMARE_UNREACHABLE = re.compile(
+    r"(?:HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED target=|nightmare nest unreachable, skip this run: )(\S+)"
+)
 # OCR 面板标签会把进度和档位数字粘在任务名后面，例如“击败1次怒涛级敌人0/1”。
 PANEL_PROGRESS_SUFFIX = re.compile(r"\s*\d+\s*/\s*\d+.*$")
 NIGHTMARE_ECHO_MARKERS = (
@@ -81,9 +85,7 @@ def _tacet(text: str, config: Mapping[str, Any]) -> list[ReportItem]:
 
 def _nightmare(text: str) -> list[ReportItem]:
     echoes = sum(text.count(marker) for marker in NIGHTMARE_ECHO_MARKERS)
-    skipped = text.count("HOST_NIGHTMARE_TRAVEL_NOT_CONFIRMED") or text.count(
-        "NightmareNestTask:nightmare nest unreachable, skip this run"
-    )
+    skipped = len(set(NIGHTMARE_UNREACHABLE.findall(text)))
     failed = "NightmareNestTask Failed" in text
     if not (echoes or skipped or failed):
         return []
