@@ -323,11 +323,13 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   任务改走 `okww/ok_main_worker.py`:先装补丁,再用原参数执行上游 `main.py`。已在 OK-WW 自带
   Python 里空跑确认补丁生效、`config` 解析到上游工作目录、参数原样传递(未启动游戏);
   真机判据是下周日 08:00 周常的 OK 日志出现 `-krqlv=hd`。
-- **1004 无音区置灰兜底(用户批准)**:`okww/tacet_skip.py` 包住 `TacetTask.farm_tacet`,只在失败后
-  OCR 到详情面板红条"无法快速到达"(帧内 0.65–1.0 × 0.78–0.93,已用 1004 证据截图核对)时
-  记 `HOST_TACET_UNREACHABLE_SKIPPED`、ESC 回世界并跳过;同进程里 `claim_daily` 的活跃度核验失败
-  只记 `HOST_DAILY_ACTIVITY_SHORT_AFTER_TACET_SKIP`,上游继续领邮件/通行证。`daily.py` 见到跳过标记
-  且 `Daily Task Completed` 即终止重试梯。尚无真机触发(序号已改 4);下次版本日插入新项时验证。
+- **1004 无音区改为按名字选(用户选 a)**:先做过"置灰就跳过"(0703544),用户指出老地方本来就到得了,
+  根因是按行号选;已撤掉跳过,改由 `okww/tacet_target.py` 替换 `TacetTask.teleport_to_tacet`:列表首屏
+  OCR 行名(复用 daily_trace 的区域与正则)与 `boss_proceed` 按钮各按 y 排序,第 k 个无音区名配第 k 个
+  按钮,点 `TACET_NAME`(玄幽东岳无音区)那一行,之后同上游等待传送特征;记 `HOST_TACET_TARGET_BY_NAME`,
+  日报无音区行用这个名字。目标不在首屏时报 `tacet ... not found on the first page`,不点别的行。
+  保留的通用修正:日常已跑到 `Daily Task Completed` 时卡片不再追加"日常任务中途停止"(`daily_finished`)。
+  真机判据:1005 05:30 日常 OK 日志出现该标记且无音区清剿成功。
 
 ## 9. 验证、发布与排障手册
 

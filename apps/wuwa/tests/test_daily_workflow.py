@@ -971,33 +971,6 @@ def test_retry_ladder_stops_immediately_at_hard_deadline(
     assert terminal["reason"] == "workflow hard deadline reached"
 
 
-def test_retry_ladder_does_not_retry_a_skipped_unreachable_tacet(
-    tmp_path: Path,
-) -> None:
-    # 2026-10-04：置灰的「前往」重试 34 次也点不亮，空耗一小时。
-    initial = _result(
-        tmp_path / "runs",
-        "initial",
-        "TacetTask:HOST_TACET_UNREACHABLE_SKIPPED index=2\n"
-        "DailyTask:Daily Task Completed\n",
-        status="failed",
-        absorbed=0,
-    )
-
-    with patch("wuwa_auto.daily.stop_daily_workers"), patch(
-        "wuwa_auto.daily.run_world_state_recovery",
-    ) as recover_world, patch(
-        "wuwa_auto.daily.run_daily_task",
-    ) as retry_daily:
-        result = _maybe_recover_daily_state(initial, now_fn=lambda: 0.0)
-
-    retry_daily.assert_not_called()
-    recover_world.assert_not_called()
-    terminal = result.config["daily_state_recoveries"][-1]
-    assert terminal["kind"] == "generic-bounded-retry-exhausted"
-    assert terminal["reason"].startswith("tacet unreachable")
-
-
 def test_retry_ladder_stops_when_clock_stops_advancing(
     tmp_path: Path,
 ) -> None:

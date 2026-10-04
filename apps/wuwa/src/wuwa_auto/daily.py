@@ -37,7 +37,6 @@ from wuwa_auto.okww.runner import (
     write_result,
     write_workflow_failure,
 )
-from wuwa_auto.okww.tacet_skip import TACET_UNREACHABLE_MARKER
 from wuwa_auto.reporting.service import report_run, report_version_day_deferred
 from wuwa_auto.settings import FARM_ECHO_TARGET_REQUEST
 from wuwa_auto.uu.desktop import require_admin, save_step_screenshot
@@ -239,12 +238,6 @@ def _daily_progress_fingerprint(result: OkRunResult) -> tuple[object, ...]:
     return (nests, stamina, completed, absorbed)
 
 
-def _tacet_skip_settled(result: OkRunResult) -> bool:
-    """无音区传送不了已跳过、其余日常已跑完：重试点不亮置灰的「前往」。"""
-    text = _read_result_log(result)
-    return TACET_UNREACHABLE_MARKER in text and "Daily Task Completed" in text
-
-
 def _append_terminal_recovery_record(
     current: OkRunResult,
     *,
@@ -304,12 +297,6 @@ def _retry_daily_after_any_failure(
             )
         last_tick = now
         minutes_since_progress = (now - last_progress_at) / 60.0
-        if _tacet_skip_settled(current):
-            return _append_terminal_recovery_record(
-                current,
-                why="tacet unreachable and skipped; retrying cannot enable it",
-                minutes=round(minutes_since_progress),
-            )
         if minutes_since_progress * 60.0 >= DAILY_NO_PROGRESS_TIMEOUT:
             return _append_terminal_recovery_record(
                 current,

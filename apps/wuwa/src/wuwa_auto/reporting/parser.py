@@ -23,7 +23,7 @@ from wuwa_auto.okww.logs import (
     count_farm_echo_kill_confirmations,
     is_farm_echo_world_team_blocked,
 )
-from wuwa_auto.okww.tacet_skip import TACET_UNREACHABLE_MARKER
+from wuwa_auto.okww.tacet_target import TACET_TARGET_MARKER
 from wuwa_auto.reporting.models import ReportItem, RunFacts
 from wuwa_auto.reporting.reasons import explain_failure
 
@@ -71,12 +71,11 @@ def _tacet(text: str, config: Mapping[str, Any]) -> list[ReportItem]:
     runs = text.count("TacetTask:start walk_to_treasure") - text.count(
         "TacetTask:is not claim treasure, restart challenge"
     )
-    index = config.get("daily_farm_index")
-    label = f"无音区第{index}项" if index else "无音区"
-    if TACET_UNREACHABLE_MARKER in text:
-        return [ReportItem("tacet", WARN, f"{label}：附近信标无法快速到达，已跳过，体力没花")]
     if runs <= 0:
         return []
+    named = re.findall(rf"{TACET_TARGET_MARKER} (\S+)", text)
+    index = config.get("daily_farm_index")
+    label = named[-1] if named else f"无音区第{index}项" if index else "无音区"
     return [
         ReportItem(
             "tacet",

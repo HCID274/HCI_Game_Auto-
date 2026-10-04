@@ -19,7 +19,7 @@ if str(HOST_SRC) not in sys.path:
 from wuwa_auto.okww.daily_activity import install_daily_activity_override
 from wuwa_auto.okww.daily_trace import install_daily_trace
 from wuwa_auto.okww.game_launch import install_game_launch_arguments
-from wuwa_auto.okww.tacet_skip import install_tacet_unreachable_skip
+from wuwa_auto.okww.tacet_target import install_tacet_target_by_name
 
 
 CLICK_ATTEMPTS = 2
@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         forgery_task_class=ForgeryTask,
         simulation_task_class=SimulationTask,
     )
-    install_tacet_unreachable_skip(DailyTask, TacetTask)
+    install_tacet_target_by_name(TacetTask)
     if resume_after_nightmare:
         install_daily_resume_after_nightmare(DailyTask)
     if compatibility_only:
