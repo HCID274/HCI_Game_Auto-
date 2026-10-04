@@ -33,7 +33,6 @@ from wuwa_auto.okww.daily_capabilities import compare_activity_panel
 from wuwa_auto.okww.daily_worker import TRAVEL_NOT_CONFIRMED_MARKER
 from wuwa_auto.okww.logs import SUCCESS_MARKER, LogCursor, find_failure
 from wuwa_auto.settings import (
-    OK_ENTRYPOINT,
     OK_LOG_FILE,
     OK_PYTHON_EXE,
     OK_PYTHONW_EXE,
@@ -49,6 +48,7 @@ STARTUP_LOG_TIMEOUT = 180.0
 LOG_STALL_TIMEOUT = 2700.0
 POLL_INTERVAL = 1.0
 DAILY_WORKER_ENTRYPOINT = Path(__file__).with_name("daily_worker.py")
+OK_MAIN_WORKER_ENTRYPOINT = Path(__file__).with_name("ok_main_worker.py")
 
 
 @dataclass(frozen=True)
@@ -264,7 +264,8 @@ def _build_task_command(
         return command
     return [
         str(OK_PYTHONW_EXE),
-        str(OK_ENTRYPOINT),
+        str(OK_MAIN_WORKER_ENTRYPOINT),
+        str(OK_WORKING_DIR),
         "--headless",
         "-t",
         # 上游按语言过滤任务后，配置表中的第 11 项可能变成运行时第 9 项。

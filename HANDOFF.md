@@ -317,6 +317,12 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   第 N 个可见「前往」,不依赖结构表,v3.6.7 可用)。**每次版本更新后先核对 F2 列表是否插入了新项。**
   同日日报"35 处没传送过去"是计数错误:同一巢穴 `go_nest:48:18` 被首轮与 34 次重试各记一次,
   `reporting/parser.py` 改为按巢穴去重。
+- **1004 08:00 周常乐园红**:OK 日志 `try execute ...Wuthering Waves.exe None`,游戏启动即崩,
+  `Start task failed: 🎡 自动周常乐园`。1003 的 `-krqlv` 补丁只挂在日常/讨伐/恢复 worker 上,
+  周常和独立 `farm-echo` 直接调上游 `main.py`,漏了。现在 `runner._build_task_command` 对这两类
+  任务改走 `okww/ok_main_worker.py`:先装补丁,再用原参数执行上游 `main.py`。已在 OK-WW 自带
+  Python 里空跑确认补丁生效、`config` 解析到上游工作目录、参数原样传递(未启动游戏);
+  真机判据是下周日 08:00 周常的 OK 日志出现 `-krqlv=hd`。
 
 ## 9. 验证、发布与排障手册
 

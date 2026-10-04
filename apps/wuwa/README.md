@@ -114,8 +114,13 @@ F2 分类点击被客户端更新或场景恢复吞掉，先重新选择强敌�
 鸣潮 3.7 起直接运行 `Wuthering Waves.exe` 必须带资源包参数 `-krqlv=hd|sd|uhd`，否则游戏约
 9 秒后崩溃（`kuro: Use launcher to start game!`）。OK-WW v3.6.7 不带该参数，宿主在
 `okww/game_launch.py` 里运行时补上（档位 `GAME_PACKAGE`，本机是高清 `hd`）；OK-WW
-发布含修复的正式版后可删除该模块。排查启动失败先看游戏目录
-`Wuthering Waves Game/Client/Saved/Crashes/_0000/`。
+发布含修复的正式版后可删除该模块。所有拉起 OK-WW 的入口都必须先装这个补丁：日常、讨伐、
+恢复各 worker 自己调用，周常乐园和独立讨伐经 `okww/ok_main_worker.py` 包一层再执行上游
+`main.py`。排查启动失败先看 OK 日志里 `try execute ...Wuthering Waves.exe` 后面是否带参数，
+再看游戏目录 `Wuthering Waves Game/Client/Saved/Crashes/_0000/`。
+
+版本更新可能在 F2 列表里插入新项，配置里的序号会指到别的目标（1004：无音区第 2 项从
+玄幽东岳变成新地图烬心域，传送不了）。版本日后先核对 OK-WW 配置里的无音区、讨伐序号。
 
 ## 汇报规则
 
