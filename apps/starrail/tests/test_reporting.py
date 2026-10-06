@@ -83,6 +83,12 @@ def _report(run: RunReport, *, plan: TrainingPlan = TrainingPlan(), reminders=()
     )
 
 
+def _stamina(card) -> list[str]:
+    """卡片「体力去向」一栏的逐行内容。"""
+    text = dict(card.notes).get("体力去向", "")
+    return text.splitlines() if text else []
+
+
 class TestTrainingPlan:
     PLAN = """\
 # 星铁养成计划
@@ -199,6 +205,34 @@ class TestParser:
         assert skipped.status == "skipped"
         assert skipped.reason == "开拓力 < 40，保留该计划"
 
+    def test_m7a_full_width_colons_still_report_every_dungeon(self) -> None:
+        # M7A v2026.10.3（10-04 起）把“计划次数”“剩余次数”后的冒号改成全角，
+        # 旧规则漏掉了所有刷副本记录；以下是 10-05 日志原句。
+        content = """\
+2026-10-05 05:32:52,259 | INFO | 执行体力计划 [1/5]: 凝滞虚影 - 塞壬之形, 计划次数： 5
+2026-10-05 05:33:00,942 | INFO | 开拓力: 239/300
+---------------------------------- 开始刷凝滞虚影 - 塞壬之形，总计1轮，每轮包含5次 ----------------------------------
+2026-10-05 05:35:43,510 | INFO | 第1次副本完成
+2026-10-05 05:36:22,968 | INFO | 副本任务完成
+2026-10-05 05:36:22,968 | INFO | 体力计划已完成: 凝滞虚影 - 塞壬之形
+2026-10-05 05:36:22,968 | INFO | 执行体力计划 [2/5]: 拟造花萼（赤） - 「世界尽头」酒馆, 计划次数： 78
+--------------------------- 开始刷拟造花萼（赤） - 「世界尽头」酒馆，总计1轮，每轮包含9次 ---------------------------
+2026-10-05 05:38:52,009 | INFO | 第1次副本完成
+2026-10-05 05:39:31,237 | INFO | 副本任务完成
+2026-10-05 05:39:31,238 | INFO | 体力计划剩余: 拟造花萼（赤） - 「世界尽头」酒馆, 剩余次数： 69
+2026-10-05 05:39:31,238 | INFO | 执行体力计划 [3/5]: 侵蚀隧洞 - 密伶之径, 计划次数： 100
+2026-10-05 05:39:35,483 | INFO | 开拓力 < 40
+2026-10-05 05:39:35,483 | INFO | 无法执行: 侵蚀隧洞 - 密伶之径，保留该计划
+"""
+        report = parse_m7a_run(content, now=datetime(2026, 10, 5, 5, 40))
+
+        assert report.other_tasks == []
+        assert _stamina(_report(report)) == [
+            "✅ 凝滞虚影·塞壬之形：5 次，计划已完成",
+            "✅ 拟造花萼（赤）·「世界尽头」酒馆：9 次，计划还剩 69 次",
+            "⏸️ 侵蚀隧洞·密伶之径：开拓力 < 40，保留该计划",
+        ]
+
     def test_same_plan_multiple_batches_are_accumulated(self) -> None:
         content = """\
 |                                                 开始执行体力计划                                                  |
@@ -244,7 +278,7 @@ class TestParser:
         assert activity.source == "activity"
         assert (activity.completed_instances, activity.remaining_plan_count) == (7, 25)
         assert activity.activity_remaining_count == 5
-        assert _report(report).tasks[1:3] == [
+        assert _stamina(_report(report)) == [
             "✅ 位面分裂：饰品提取·鎏金追忆：7 次，计划还剩 25 次，双倍还剩 5 次",
             "✅ 拟造花萼（赤）·海原电视塔（远坂凛 行迹材料）：1 次，计划还剩 29 次",
         ]
@@ -344,7 +378,7 @@ class TestParser:
         report = parse_m7a_run(content, now=datetime(2026, 7, 22, 6, 5))
 
         assert report.stamina_runs[0].remaining_plan_count == 0
-        assert "✅ 拟造花萼（赤）·海原电视塔：1 次，计划已完成" in _report(report).tasks
+        assert "✅ 拟造花萼（赤）·海原电视塔：1 次，计划已完成" in _stamina(_report(report))
 
     def test_default_stamina_does_not_reuse_the_skipped_plan(self) -> None:
         content = """\
@@ -364,7 +398,7 @@ class TestParser:
             ("饰品提取 - 孽果盘生", "plan", "skipped"),
             ("拟造花萼（赤） - 「世界尽头」酒馆", "default", "completed"),
         ]
-        assert _report(report).tasks[1:3] == [
+        assert _stamina(_report(report)) == [
             "⏸️ 饰品提取·孽果盘生：开拓力 < 40，保留该计划",
             "✅ 清体力：拟造花萼（赤）·「世界尽头」酒馆：3 次",
         ]
@@ -459,11 +493,15 @@ class TestCard:
         assert card.problems == []
         assert card.tasks == [
             "✅ 每日实训 500/500（本次补做：派遣委托、万能合成机）",
-            "✅ 饰品提取·鎏金追忆（Archer 遗器）：6 次，计划还剩 25 次",
-            "⏸️ 侵蚀隧洞·魔占之径：开拓力 < 40，保留该计划",
             "✅ 领取奖励：每日实训",
         ]
+        assert _stamina(card) == [
+            "✅ 饰品提取·鎏金追忆（Archer 遗器）：6 次，计划还剩 25 次",
+            "⏸️ 侵蚀隧洞·魔占之径：开拓力 < 40，保留该计划",
+        ]
         text = card_text(card.to_card())
+        # 体力去向单独一栏，紧跟今日任务、排在养成待办前。
+        assert text.index("**今日任务**") < text.index("**体力去向**") < text.index("**养成待办**")
         assert "**养成待办**\n1. 远坂凛：行迹材料" in text
         assert "**提醒**\n1. 距离月卡过期还有8天" in text
         assert "用时 41分钟" in text
@@ -482,8 +520,8 @@ class TestCard:
             "停在「清体力」",
             "三月七助手报错：战斗超时；检测到该次副本未正常运行，重试：1/3；无法识别当前游戏界面",
         ]
-        assert card.tasks == [
-            "❌ 每日实训：没完成（分数没读到）",
+        assert card.tasks == ["❌ 每日实训：没完成（分数没读到）"]
+        assert _stamina(card) == [
             "✅ 饰品提取·西风丛中：2 次，计划已完成",
             "❌ 侵蚀隧洞·睿治之径：中途出错（无法识别当前游戏界面，保留该计划）",
             "❌ 饰品提取·鎏金追忆：中途出错（无法识别当前游戏界面，保留该计划）",

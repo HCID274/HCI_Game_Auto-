@@ -20,19 +20,21 @@ DAILY_COMPLETED_PATTERN = re.compile(
 )
 DAILY_BLOCKED_PATTERN = re.compile(r"^任务无法完成: (?P<task>.+)$")
 DAILY_SCORE_PATTERN = re.compile(r"当前(?:累计)?分数[：:]\s*(?P<score>\d+\s*/\s*\d+)")
+# 体力计划各行的冒号全角、半角都认：M7A v2026.10.3 起把“计划次数”“剩余次数”后的
+# 冒号改成了全角，旧规则从 10-04 起漏掉了所有刷副本记录。
 PLAN_PATTERN = re.compile(
-    r"^执行体力计划 \[\d+/\d+\]: (?P<name>.+), 计划次数: (?P<count>\d+)$"
+    r"^执行体力计划 \[\d+/\d+\][:：]\s*(?P<name>.+), 计划次数[:：]\s*(?P<count>\d+)$"
 )
 FARM_PATTERN = re.compile(
     r"开始刷(?P<name>.+?)，总计(?P<rounds>\d+)轮，每轮包含(?P<rewards>\d+)次"
 )
 INSTANCE_COMPLETED_PATTERN = re.compile(r"^第(?P<count>\d+)次副本完成$")
 PLAN_REMAINING_PATTERN = re.compile(
-    r"^体力计划剩余: (?P<name>.+), 剩余次数: (?P<count>\d+)$"
+    r"^体力计划剩余[:：]\s*(?P<name>.+), 剩余次数[:：]\s*(?P<count>\d+)$"
 )
-PLAN_COMPLETED_PATTERN = re.compile(r"^体力计划已完成: (?P<name>.+)$")
-PLAN_SKIPPED_PATTERN = re.compile(r"^无法执行: (?P<name>.+?)，(?P<reason>.+)$")
-PLAN_ERROR_PATTERN = re.compile(r"^执行体力计划时出错: (?P<reason>.+)$")
+PLAN_COMPLETED_PATTERN = re.compile(r"^体力计划已完成[:：]\s*(?P<name>.+)$")
+PLAN_SKIPPED_PATTERN = re.compile(r"^无法执行[:：]\s*(?P<name>.+?)，(?P<reason>.+)$")
+PLAN_ERROR_PATTERN = re.compile(r"^执行体力计划时出错[:：]\s*(?P<reason>.+)$")
 TRAINING_TARGET_PATTERN = re.compile(r"^培养目标(?P<character>.+?)的待刷副本:$")
 DIRECT_REWARD_PATTERN = re.compile(r"^领取(?P<reward>.+?)奖励完成$")
 ACTIVITY_REMAINING_PATTERN = re.compile(

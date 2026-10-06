@@ -63,7 +63,7 @@ class GameReport:
     finished_at: datetime
     tasks: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
-    notes: list[tuple[str, list[str]]] = field(default_factory=list)
+    notes: list[tuple[str, str | list[str]]] = field(default_factory=list)
     duration_seconds: int | None = None
 
     def __post_init__(self) -> None:

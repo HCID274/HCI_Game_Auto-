@@ -159,17 +159,20 @@ def build_report(
     status = _status(run)
     failed = status == "failed"
     tasks = [_daily_line(run, failed=failed)]
-    tasks.extend(_stamina_line(item, failed=failed) for item in run.stamina_runs)
+    # 体力花在哪单独成一栏，不和每日实训挤在一起；“未执行”也是体力计划。
+    stamina = [_stamina_line(item, failed=failed) for item in run.stamina_runs]
     if run.rewards:
         tasks.append(f"{DONE} 领取奖励：{'、'.join(run.rewards)}")
-    tasks.extend(_other_line(text) for text in run.other_tasks)
+    for text in run.other_tasks:
+        (stamina if "未执行：" in text else tasks).append(_other_line(text))
     tasks.extend(
         f"{DONE} 养成计划完成：{goal.character} {goal.category}"
         for goal in plan.completed_this_run
     )
-    status = settle_status(status, tasks)
+    status = settle_status(status, [*tasks, *stamina])
 
     notes = [
+        ("体力去向", "\n".join(stamina)),
         ("养成待办", [f"{goal.character}：{goal.category}" for goal in plan.active_goals]),
         ("提醒", reminders),
     ]
