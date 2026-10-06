@@ -144,6 +144,11 @@ def _meaningful_message(message: str) -> bool:
         "准备发送 winotify",
         "winotify 通知发送完成",
         "GitHub 确认",
+        # M7A 出错后固定附带的截图与排障套话，不是卡住的地方。
+        "错误截图已保存",
+        "反馈问题时请附上此截图",
+        "请关闭",
+        "你可以通过",
     )
     return not message.startswith(ignored)
 
@@ -209,6 +214,7 @@ def parse_m7a_run(
     detected_training_target = ""
     detected_training_dungeons: list[str] = []
     last_plan_constraint = ""
+    last_screen = ""
     redemption_total = 0
     redemption_failed = 0
     capturing_redemption_codes = False
@@ -385,6 +391,9 @@ def parse_m7a_run(
             elif " - " in message and not message.startswith(("当前界面", "切换到")):
                 _append_unique(detected_training_dungeons, message)
 
+        if message.startswith("当前界面："):
+            last_screen = message.removeprefix("当前界面：").strip()
+
         pending_match = DAILY_TASK_PENDING_PATTERN.match(message)
         if pending_match:
             _append_unique(report.daily_unfinished, pending_match.group("task"))
@@ -531,6 +540,9 @@ def parse_m7a_run(
     last_message = meaningful[-1][2] if meaningful else ""
     if active_section == "差分宇宙" and last_message:
         report.current_task = f"差分宇宙：{last_message}"
+    elif not active_section and last_screen and "无法切换到" in last_message:
+        # 切不动界面时，M7A 最后认出的画面就是卡住的地方。
+        report.current_task = f"游戏画面：{last_screen}"
     else:
         report.current_task = active_section or last_message or run_stage or "未知阶段"
 

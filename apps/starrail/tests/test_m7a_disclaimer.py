@@ -5,11 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import patch
 
+import pytest
 from game_automation_core.windows.desktop_guard import WindowSnapshot
 from PIL import Image, ImageDraw
 
 from starrail_auto.m7a import disclaimer
 from starrail_auto.m7a.disclaimer import M7ADisclaimerHandler
+
+
+@pytest.fixture(autouse=True)
+def _no_desktop_screenshot(monkeypatch) -> None:
+    # 点击前的取证会截真实桌面存进 runtime/evidence；测试里不该截用户桌面。
+    monkeypatch.setattr(disclaimer, "save_screenshot", lambda _prefix: None)
 
 
 def _window(*, process_name: str = "March7th Assistant.exe") -> WindowSnapshot:

@@ -233,6 +233,29 @@ class TestParser:
             "⏸️ 侵蚀隧洞·密伶之径：开拓力 < 40，保留该计划",
         ]
 
+    def test_stuck_screen_is_reported_instead_of_m7a_boilerplate(self) -> None:
+        # 10-06 原句：Windows 位置弹窗挡住了「点击进入」，M7A 报错后只剩截图套话。
+        content = """\
+============================================= 开始查询日常任务完成情况 ==============================================
+2026-10-06 05:32:22,548 | INFO | 当前界面：点击进入
+2026-10-06 05:32:43,668 | WARNING | 切换到 主界面 超时，准备重试
+2026-10-06 05:33:05,110 | INFO | 当前界面：点击进入
+2026-10-06 05:33:26,173 | ERROR | 无法切换到 主界面
+2026-10-06 05:33:26,173 | ERROR | 请关闭帧率监控HUD、微星小飞机、游戏加加、HDR或N卡游戏滤镜等等任何可能影响游戏画面的软件
+2026-10-06 05:33:26,173 | ERROR | 你可以通过 工具箱-游戏截图 判断当前游戏画面是否被正确获取
+2026-10-06 05:33:26,173 | ERROR | 发生错误 无法切换到指定游戏界面
+2026-10-06 05:33:26,539 | INFO | 错误截图已保存: logs\\screenshots\\error_2026-10-06_05-33-26.png
+2026-10-06 05:33:26,539 | INFO | 反馈问题时请附上此截图以协助诊断
+2026-10-06 05:33:26,540 | INFO | 准备发送 winotify 通知（级别：仅错误，图片：否）
+2026-10-06 05:33:33,550 | INFO | winotify 通知发送完成
+"""
+        report = parse_m7a_run(
+            content, now=datetime(2026, 10, 6, 5, 33, 52), force_failed=True
+        )
+
+        assert report.current_task == "游戏画面：点击进入"
+        assert _report(report).problems[0] == "停在「游戏画面：点击进入」"
+
     def test_same_plan_multiple_batches_are_accumulated(self) -> None:
         content = """\
 |                                                 开始执行体力计划                                                  |

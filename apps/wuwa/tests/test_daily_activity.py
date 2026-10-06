@@ -289,6 +289,8 @@ def test_wrong_page_number_cannot_become_daily_total() -> None:
 
     verifier = DailyActivityVerifier(WrongPageTask(Path(".")))
     verifier._activity_panel_confirmed = False
+    # 不走真实截图：否则同名假截图已存在时会退回截用户整个桌面。
+    verifier._capture = lambda _stage: None  # type: ignore[method-assign]
 
     total, _evidence, _source = verifier.capture_total_after_claim()
     assert total is None
