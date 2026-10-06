@@ -20,7 +20,7 @@ DAILY_COMPLETED_PATTERN = re.compile(
 )
 DAILY_BLOCKED_PATTERN = re.compile(r"^任务无法完成: (?P<task>.+)$")
 DAILY_SCORE_PATTERN = re.compile(r"当前(?:累计)?分数[：:]\s*(?P<score>\d+\s*/\s*\d+)")
-# 体力计划各行的冒号全角、半角都认：M7A v2026.10.3 起把“计划次数”“剩余次数”后的
+# 体力计划各行的冒号全角、半角都认：M7A v2026.9.30 起把“计划次数”“剩余次数”后的
 # 冒号改成了全角，旧规则从 10-04 起漏掉了所有刷副本记录。
 PLAN_PATTERN = re.compile(
     r"^执行体力计划 \[\d+/\d+\][:：]\s*(?P<name>.+), 计划次数[:：]\s*(?P<count>\d+)$"

@@ -103,7 +103,7 @@
 
 历史常见问题包括：防火墙弹窗导致前置失败、DNS/Fake-IP 导致 code 24、旧逻辑把“尚未刷新”或未达标判断错误。排查顺序应是：总控分段结果 → 星铁应用日志 → 报告归档 → 按归档 offset 读 M7A 原始切片 → evidence → 计划任务。
 
-M7A 实机版本已从旧审计文档中的 `v2026.6.8` 演进到 `v2026.7.26`。升级上游后必须重做日志覆盖审计；不能假设旧 marker 永久有效。反例：1004 M7A 自动升到 `v2026.10.3`，“计划次数”“剩余次数”后的冒号改成全角加空格，旧正则漏掉了 1004、1005 两天卡片里的全部刷副本记录；现在 `reporting/parser.py` 的体力计划规则全角、半角冒号都认，并有 1005 原句回归测试。
+M7A 实机版本已从旧审计文档中的 `v2026.6.8` 演进到 `v2026.7.26`。升级上游后必须重做日志覆盖审计；不能假设旧 marker 永久有效。反例：M7A 在 1003 与 1004 两次运行之间自动升到 `v2026.9.30`，“计划次数”“剩余次数”后的冒号改成全角加空格，旧正则漏掉了 1004、1005 两天卡片里的全部刷副本记录；现在 `reporting/parser.py` 的体力计划规则全角、半角冒号都认，并有 1005 原句回归测试。
 
 ## 5. 鸣潮链路与核心经验
 
@@ -329,7 +329,18 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   按钮,点 `TACET_NAME`(玄幽东岳无音区)那一行,之后同上游等待传送特征;记 `HOST_TACET_TARGET_BY_NAME`,
   日报无音区行用这个名字。目标不在首屏时报 `tacet ... not found on the first page`,不点别的行。
   保留的通用修正:日常已跑到 `Daily Task Completed` 时卡片不再追加"日常任务中途停止"(`daily_finished`)。
-  真机判据:1005 05:30 日常 OK 日志出现该标记且无音区清剿成功。
+  真机判据:1005 05:30 日常 OK 日志出现该标记且无音区清剿成功。**1005 已通过**:06:17 记
+  `HOST_TACET_TARGET_BY_NAME 玄幽东岳无音区`,清剿 2 场、消耗 120 结晶波片,06:40 `Daily Task Completed`。
+- **1006 晨星铁、鸣潮双红,同一个 Windows 弹窗**:本机位置服务被组策略关闭
+  (`HKLM\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors` `DisableLocation=1`),星铁游戏启动时
+  请求位置,系统 `PickerHost.exe` 在屏幕正中弹出「位置已关闭。Star Rail 无法使用 GPS…」并占住前台,
+  直到被人点掉。星铁:M7A 识别到「点击进入」,三次点击、60 秒都没进去,报"无法切换到 主界面";
+  同一时刻主机日志里的前台窗口就是该弹窗。鸣潮:弹窗正好盖住 UU 首页的鸣潮卡片,三次找不到
+  `uu_wuthering_card.png`,游戏都没启动。位置权限本身不影响游戏,问题只在弹窗挡住了画面和点击。
+  1005 星铁也请求过位置(CapabilityAccessManager 记录 05:31:37)却没弹窗;1006 04:31 Windows
+  刚更新了 WindowsAppRuntime,弹窗很可能由此开始出现(推断,未证实)。`desktop_guard` 只拦防火墙
+  通知,这个弹窗被当成普通窗口放行。证据:`apps/starrail/runtime/evidence/uu_locate_stop_acceleration_button_failed_20261006_*`、
+  `apps/wuwa/runtime/evidence/uu_locate_wuthering_card_failed_20261006_*`。
 
 ## 9. 验证、发布与排障手册
 

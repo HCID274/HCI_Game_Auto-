@@ -206,7 +206,7 @@ class TestParser:
         assert skipped.reason == "开拓力 < 40，保留该计划"
 
     def test_m7a_full_width_colons_still_report_every_dungeon(self) -> None:
-        # M7A v2026.10.3（10-04 起）把“计划次数”“剩余次数”后的冒号改成全角，
+        # M7A v2026.9.30（10-04 起）把“计划次数”“剩余次数”后的冒号改成全角，
         # 旧规则漏掉了所有刷副本记录；以下是 10-05 日志原句。
         content = """\
 2026-10-05 05:32:52,259 | INFO | 执行体力计划 [1/5]: 凝滞虚影 - 塞壬之形, 计划次数： 5
