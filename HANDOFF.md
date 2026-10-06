@@ -341,6 +341,9 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   刚更新了 WindowsAppRuntime,弹窗很可能由此开始出现(推断,未证实)。`desktop_guard` 只拦防火墙
   通知,这个弹窗被当成普通窗口放行。证据:`apps/starrail/runtime/evidence/uu_locate_stop_acceleration_button_failed_20261006_*`、
   `apps/wuwa/runtime/evidence/uu_locate_wuthering_card_failed_20261006_*`。
+  处理(用户选 a):用户已在 设置 → 隐私和安全性 → 位置 关掉「应用请求位置时通知」,不改代码。
+  判据:1007 05:30 两个游戏都跑通,主机日志不再出现 `PickerHost.exe title=位置已关闭`。
+  再出现就改为程序自动关(把它加进 `desktop_guard.dismiss_known_desktop_notifications`)。
 
 ## 9. 验证、发布与排障手册
 
