@@ -344,6 +344,13 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   处理(用户选 a):用户已在 设置 → 隐私和安全性 → 位置 关掉「应用请求位置时通知」,不改代码。
   判据:1007 05:30 两个游戏都跑通,主机日志不再出现 `PickerHost.exe title=位置已关闭`。
   再出现就改为程序自动关(把它加进 `desktop_guard.dismiss_known_desktop_notifications`)。
+- **1017–1019 三天连红:内存耗尽后整屏截图全黑**。1017 05:32–05:38 系统报虚拟内存不足
+  (Resource-Exhaustion-Detector 2004:Minecraft `javaw.exe` 约 7.7–11 GB、另一个 `python.exe` 3.9 GB,
+  本机 16 GB),星铁游戏连崩 3 次、M7A Launcher 也崩,当天星铁失败。05:30:47 UU 截图还能匹配,05:42 起
+  所有整屏截图(PIL `ImageGrab`、GDI `BitBlt`,带不带 CAPTUREBLT)都是纯黑,1018、1019 两天 UU 找不到游戏卡片,
+  两个游戏都没启动;1020 00:40 复查仍全黑。同时主显示器 DDC/CI 电源状态为开、会话未锁、`PrintWindow`
+  单窗口截图正常,说明窗口在画、只是整屏合成的读回坏了。本机自 1014 未重启。修复交用户:重启电脑,
+  并别让 Minecraft 过夜占内存。证据:`apps/*/runtime/evidence/*2026101[789]_05*.png`(全黑)。
 
 ## 9. 验证、发布与排障手册
 
