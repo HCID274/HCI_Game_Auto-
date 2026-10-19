@@ -121,6 +121,14 @@ DailyTask:Daily Task Completed
         assert facts.overall_status == "completed"
         assert "邮件" not in _card(facts)
 
+        # 开跑前关掉 Minecraft 写进「提醒」，不改变“全部完成”。
+        note = "开跑前可用内存只剩 0.5 GB，已关掉 Minecraft"
+        report = build_report(
+            facts, finished_at=datetime(2026, 8, 9, 6, 10), host_notes=[note]
+        )
+        assert report.status == "completed"
+        assert report.notes == [("提醒", [note])]
+
     def test_tacet_counts_claimed_runs_with_fixed_waveplates(self, tmp_path: Path) -> None:
         text = """
 TacetTask:start walk_to_treasure

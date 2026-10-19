@@ -623,6 +623,7 @@ class TestService:
                 stage="",
                 retries=0,
                 duration_seconds=600,
+                host_notes=["开跑前可用内存只剩 0.5 GB，已关掉 Minecraft"],
             )
 
         send.assert_called_once()
@@ -631,6 +632,11 @@ class TestService:
         data = json.loads(archive.read_text(encoding="utf-8"))
         assert archive.name == "2026-07-25_0.json"
         assert data["sent"] is True and data["exit_code"] == 0
+        # 主机替用户关掉 Minecraft 写进「提醒」，不改变“全部完成”；归档留着供重放。
+        assert ("提醒", ["开跑前可用内存只剩 0.5 GB，已关掉 Minecraft"]) in [
+            tuple(note) for note in data["report"]["notes"]
+        ]
+        assert data["host_notes"] == ["开跑前可用内存只剩 0.5 GB，已关掉 Minecraft"]
         assert data["facts"]["daily_score"] == "500/500"
         assert data["report"]["tasks"][0].startswith("✅ 每日实训 500/500")
 

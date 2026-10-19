@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import ctypes
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import psutil
+from PIL import Image
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -21,9 +24,128 @@ except (AttributeError, OSError):  # pragma: no cover - non-Windows import safet
 import pyautogui
 
 from game_automation_core.uu.errors import UuStartupError
-from game_automation_core.windows.desktop_guard import activate_window
+from game_automation_core.windows.desktop_guard import (
+    activate_window,
+    describe_window,
+    snapshot_window,
+)
 
 log = logging.getLogger(__name__)
+
+# 找图只截 UU 自己的窗口（PrintWindow），不读整块屏幕：1017 内存耗尽后整屏截图
+# 一直全黑，单窗口截图仍正常；系统弹窗盖在 UU 上时，也能按 UU 的真实内容判断。
+PW_RENDERFULLCONTENT = 2  # 连硬件加速绘制的内容一起画进位图
+GA_ROOT = 2
+_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+
+class _BitmapInfoHeader(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+@functools.cache
+def _win32() -> tuple[ctypes.WinDLL, ctypes.WinDLL]:
+    # 独立 DLL 句柄，参数类型不污染 PyGetWindow 共用的 windll.user32。
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    signatures = {
+        user32: {
+            "EnumWindows": ([_WNDENUMPROC, wintypes.LPARAM], wintypes.BOOL),
+            "IsWindowVisible": ([wintypes.HWND], wintypes.BOOL),
+            "IsIconic": ([wintypes.HWND], wintypes.BOOL),
+            "GetWindowThreadProcessId": (
+                [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)],
+                wintypes.DWORD,
+            ),
+            "GetWindowRect": ([wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
+            "GetWindowDC": ([wintypes.HWND], wintypes.HDC),
+            "ReleaseDC": ([wintypes.HWND, wintypes.HDC], ctypes.c_int),
+            "PrintWindow": ([wintypes.HWND, wintypes.HDC, wintypes.UINT], wintypes.BOOL),
+            "WindowFromPoint": ([wintypes.POINT], wintypes.HWND),
+            "GetAncestor": ([wintypes.HWND, wintypes.UINT], wintypes.HWND),
+        },
+        gdi32: {
+            "CreateCompatibleDC": ([wintypes.HDC], wintypes.HDC),
+            "CreateCompatibleBitmap": (
+                [wintypes.HDC, ctypes.c_int, ctypes.c_int],
+                wintypes.HBITMAP,
+            ),
+            "SelectObject": ([wintypes.HDC, wintypes.HGDIOBJ], wintypes.HGDIOBJ),
+            "GetDIBits": (
+                [
+                    wintypes.HDC,
+                    wintypes.HBITMAP,
+                    wintypes.UINT,
+                    wintypes.UINT,
+                    ctypes.c_void_p,
+                    ctypes.POINTER(_BitmapInfoHeader),
+                    wintypes.UINT,
+                ],
+                ctypes.c_int,
+            ),
+            "DeleteObject": ([wintypes.HGDIOBJ], wintypes.BOOL),
+            "DeleteDC": ([wintypes.HDC], wintypes.BOOL),
+        },
+    }
+    for library, functions in signatures.items():
+        for name, (argtypes, restype) in functions.items():
+            function = getattr(library, name)
+            function.argtypes = argtypes
+            function.restype = restype
+    return user32, gdi32
+
+
+def _hwnd_process_name(hwnd: int) -> str:
+    user32, _ = _win32()
+    process_id = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+    try:
+        return psutil.Process(process_id.value).name().casefold()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return ""
+
+
+def capture_window(hwnd: int) -> tuple[Image.Image, int, int] | None:
+    """截一个窗口的完整内容；返回图片和窗口左上角的屏幕坐标。"""
+    user32, gdi32 = _win32()
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+    window_dc = user32.GetWindowDC(hwnd)
+    memory_dc = gdi32.CreateCompatibleDC(window_dc)
+    bitmap = gdi32.CreateCompatibleBitmap(window_dc, width, height)
+    previous = gdi32.SelectObject(memory_dc, bitmap)
+    try:
+        if not user32.PrintWindow(hwnd, memory_dc, PW_RENDERFULLCONTENT):
+            return None
+        header = _BitmapInfoHeader(
+            ctypes.sizeof(_BitmapInfoHeader), width, -height, 1, 32, 0, 0, 0, 0, 0, 0
+        )
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        if not gdi32.GetDIBits(memory_dc, bitmap, 0, height, pixels, ctypes.byref(header), 0):
+            return None
+        image = Image.frombytes("RGB", (width, height), pixels.raw, "raw", "BGRX")
+        return image, rect.left, rect.top
+    finally:
+        gdi32.SelectObject(memory_dc, previous)
+        gdi32.DeleteObject(bitmap)
+        gdi32.DeleteDC(memory_dc)
+        user32.ReleaseDC(hwnd, window_dc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +191,8 @@ class UuDesktopController:
     ) -> None:
         self.config = config
         self.is_process_running = is_process_running
+        # 最近一次找到了图、但点击位置被别的窗口挡住时，记下挡住的是谁。
+        self.last_cover = ""
 
     def require_admin(self) -> None:
         try:
@@ -278,16 +402,83 @@ class UuDesktopController:
         interval = self.config.image_interval if interval is None else interval
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            try:
-                location = pyautogui.locateOnScreen(
-                    str(template), confidence=confidence
-                )
-                if location is not None:
-                    center = pyautogui.center(location)
-                    return center.x, center.y
-            except pyautogui.ImageNotFoundException:
-                pass
+            position = self.locate_in_uu_windows(template, confidence=confidence)
+            if position is None and not self.last_cover:
+                position = self._locate_on_screen(template, confidence=confidence)
+            if position is not None:
+                return position
             time.sleep(interval)
+        return None
+
+    @staticmethod
+    def _locate_on_screen(template: Path, *, confidence: float) -> tuple[int, int] | None:
+        # 兜底：UU 窗口截图在真机验证前保留整屏找图；日志里出现 "screen fallback"
+        # 说明窗口截图没找到。05:30 真机日志确认窗口截图可用后删掉这段。
+        try:
+            location = pyautogui.locateOnScreen(str(template), confidence=confidence)
+        except pyautogui.ImageNotFoundException:
+            return None
+        if location is None:
+            return None
+        center = pyautogui.center(location)
+        log.warning("matched %s via screen fallback, not the UU window", template.name)
+        return center.x, center.y
+
+    def uu_window_handles(self) -> list[int]:
+        """可见且未最小化的 UU 顶层窗口（含无标题弹窗），按 Z 序从上到下。"""
+        user32, _ = _win32()
+        handles: list[int] = []
+
+        @_WNDENUMPROC
+        def collect(hwnd: int, _lparam: int) -> bool:
+            if (
+                hwnd
+                and user32.IsWindowVisible(hwnd)
+                and not user32.IsIconic(hwnd)
+                and _hwnd_process_name(hwnd) in self.config.process_names
+            ):
+                handles.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(collect, 0)
+        return handles
+
+    def cover_at(self, point: tuple[int, int]) -> str:
+        """点击位置最上层不是 UU 的窗口时，返回挡住它的窗口描述。"""
+        user32, _ = _win32()
+        hwnd = user32.WindowFromPoint(wintypes.POINT(*point))
+        root = user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
+        if not root:
+            return f"no window at {point}"
+        if _hwnd_process_name(root) in self.config.process_names:
+            return ""
+        return describe_window(snapshot_window(root))
+
+    def locate_in_uu_windows(
+        self, template: Path, *, confidence: float
+    ) -> tuple[int, int] | None:
+        self.last_cover = ""
+        for hwnd in self.uu_window_handles():
+            captured = capture_window(hwnd)
+            if captured is None:
+                continue
+            image, left, top = captured
+            try:
+                box = pyautogui.locate(str(template), image, confidence=confidence)
+            except pyautogui.ImageNotFoundException:
+                box = None
+            if box is None:
+                continue
+            point = (
+                int(left + box.left + box.width // 2),
+                int(top + box.top + box.height // 2),
+            )
+            # 截图里找到了，还要确认真点下去落在 UU 上，不点到盖在上面的弹窗。
+            cover = self.cover_at(point)
+            if cover:
+                self.last_cover = cover
+                continue
+            return point
         return None
 
     def wait_for_image(
@@ -310,10 +501,10 @@ class UuDesktopController:
             interval=interval,
         )
         if position is None:
-            raise self.startup_error(
-                step_name,
-                f"cannot locate {template.name} within {timeout:.1f}s",
-            )
+            reason = f"cannot locate {template.name} within {timeout:.1f}s"
+            if self.last_cover:
+                reason += f"; covered by {self.last_cover}"
+            raise self.startup_error(step_name, reason)
         log.info("matched %s at %s", template.name, position)
         return position
 

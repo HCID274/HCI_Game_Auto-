@@ -24,12 +24,20 @@ log = logging.getLogger(__name__)
 
 
 def _publish(
-    result: Any, cleanup: dict[str, Any] | None, *, allow_send: bool
+    result: Any,
+    cleanup: dict[str, Any] | None,
+    *,
+    allow_send: bool,
+    host_notes: list[str] | None = None,
 ) -> tuple[Path, str]:
     boss_names = load_boss_names()
     facts = parse_run(result, cleanup, boss_names=boss_names)
     facts = build_daily_rollup(result, facts, boss_names=boss_names)
-    report = build_report(facts, finished_at=datetime.fromisoformat(result.finished_at))
+    report = build_report(
+        facts,
+        finished_at=datetime.fromisoformat(result.finished_at),
+        host_notes=host_notes,
+    )
     card = report.to_card()
     sent = send_card(card) if allow_send else False
 
@@ -50,11 +58,20 @@ def _publish(
     return path, card_text(card)
 
 
-def report_run(result: Any, cleanup: Any | None = None, *, allow_send: bool = True) -> Path:
+def report_run(
+    result: Any,
+    cleanup: Any | None = None,
+    *,
+    allow_send: bool = True,
+    host_notes: list[str] | None = None,
+) -> Path:
     """工作流结束时调用一次：生成唯一的最终卡片、发送并归档。"""
 
     path, _ = _publish(
-        result, cleanup.to_dict() if cleanup is not None else None, allow_send=allow_send
+        result,
+        cleanup.to_dict() if cleanup is not None else None,
+        allow_send=allow_send,
+        host_notes=host_notes,
     )
     log.info("Wuwa report archived: %s", path)
     return path

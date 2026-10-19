@@ -202,7 +202,7 @@ def test_terminal_partial_result_produces_one_final_report(tmp_path: Path) -> No
     recover.assert_called_once()
     assert recover.call_args.args == (initial,)
     assert callable(recover.call_args.kwargs["client_restart"])
-    report.assert_called_once_with(terminal, cleanup)
+    report.assert_called_once_with(terminal, cleanup, host_notes=[])
 
 
 def test_settlement_exception_cannot_report_a_stale_success(

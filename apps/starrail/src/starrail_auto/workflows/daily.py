@@ -4,6 +4,8 @@ import logging
 import time
 from datetime import datetime
 
+from game_automation_core.windows.memory_guard import free_memory_for_games
+
 from starrail_auto.m7a.config import (
     DEFAULT_TIMEOUTS,
     EXIT_DAILY_VALIDATION_FAILED,
@@ -65,6 +67,7 @@ def _run(task: str, timeout: int) -> RunResult:
 
 def execute_task(task: str, timeout: int | None = None) -> int:
     _setup_logging()
+    host_notes = free_memory_for_games()
     started = time.monotonic()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
     duration = round(time.monotonic() - started)
@@ -77,6 +80,7 @@ def execute_task(task: str, timeout: int | None = None) -> int:
                 stage=result.stage,
                 retries=result.retries,
                 duration_seconds=duration,
+                host_notes=host_notes,
             )
         except Exception:
             log.exception("final report service failed")

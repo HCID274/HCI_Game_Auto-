@@ -15,7 +15,9 @@ GAME_LABELS = {
 }
 
 
-def build_report(facts: RunFacts, *, finished_at: datetime) -> GameReport:
+def build_report(
+    facts: RunFacts, *, finished_at: datetime, host_notes: list[str] | None = None
+) -> GameReport:
     daily = [item.line for item in facts.daily]
     if facts.daily_ok is False and not facts.daily_finished:
         daily.append(f"{FAILED} 日常任务：{'中途停止' if daily else '没完成'}")
@@ -30,5 +32,7 @@ def build_report(facts: RunFacts, *, finished_at: datetime) -> GameReport:
         finished_at=finished_at,
         tasks=tasks,
         problems=facts.issues,
+        # 主机在开跑前替用户做的事（如关掉占内存的 Minecraft）。
+        notes=[("提醒", list(host_notes))] if host_notes else [],
         duration_seconds=facts.duration_seconds or None,
     )

@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from game_automation_core.windows.memory_guard import free_memory_for_games
+
 from wuwa_auto.cleanup import (
     CleanupResult,
     cleanup_after_run,
@@ -546,6 +548,7 @@ def _settle_business_transaction(
 def _run_workflow(task_name: str, task_runner) -> int:
     require_admin()
     stop_stale_workflow_controllers()
+    host_notes = free_memory_for_games()
     started = datetime.now().astimezone()
     result: OkRunResult | None = None
     cleanup: CleanupResult | None = None
@@ -669,7 +672,7 @@ def _run_workflow(task_name: str, task_runner) -> int:
         )
 
     try:
-        report_run(result, cleanup)
+        report_run(result, cleanup, host_notes=host_notes)
     except Exception:
         log.exception("final Wuwa report service failed")
 

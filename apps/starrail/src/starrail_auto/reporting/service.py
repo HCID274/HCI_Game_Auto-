@@ -53,6 +53,7 @@ def build_main_report(
     finished_at: datetime,
     duration_seconds: int | None,
     persist_plan: bool = True,
+    host_notes: list[str] | None = None,
 ) -> tuple[RunReport, GameReport]:
     run = parse_m7a_run(
         content,
@@ -70,7 +71,8 @@ def build_main_report(
     report = build_report(
         run,
         plan=plan,
-        reminders=format_active_reminders(finished_at.date()),
+        # 主机在开跑前替用户做的事（如关掉占内存的 Minecraft）排在提醒最前。
+        reminders=[*(host_notes or []), *format_active_reminders(finished_at.date())],
         finished_at=finished_at,
         duration_seconds=duration_seconds,
     )
@@ -85,6 +87,7 @@ def report_main_run(
     stage: str,
     retries: int,
     duration_seconds: int | None = None,
+    host_notes: list[str] | None = None,
 ) -> Path:
     """Send exactly one final card without changing the run result."""
     finished_at = datetime.now()
@@ -95,6 +98,7 @@ def report_main_run(
         stage=stage,
         finished_at=finished_at,
         duration_seconds=duration_seconds,
+        host_notes=host_notes,
     )
     card = report.to_card()
     sent = send_card(card)
@@ -106,6 +110,7 @@ def report_main_run(
             "exit_code": exit_code,
             "stage": stage,
             "retries": retries,
+            "host_notes": list(host_notes or []),
             "sent": sent,
             "facts": redact_sensitive_data(run.to_dict()),
             "report": report.to_dict(),
@@ -158,6 +163,7 @@ def preview_archived_run(name: str = "latest") -> tuple[Path, str]:
         finished_at=finished_at,
         duration_seconds=archived.get("duration_seconds"),
         persist_plan=False,
+        host_notes=data.get("host_notes"),
     )
     card = report.to_card()
     preview = write_json_archive(

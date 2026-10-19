@@ -351,7 +351,16 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   两个游戏都没启动;1020 00:40 复查仍全黑。同时主显示器 DDC/CI 电源状态为开、会话未锁、`PrintWindow`
   单窗口截图正常,说明窗口在画、只是整屏合成的读回坏了。本机自 1014 未重启。**不用重启的修法**:
   1020 00:50 用户按 Win+Ctrl+Shift+B(重置显卡驱动,程序不关),整屏截图立即恢复(均值 240,不再全 0)。
-  不行再试任务管理器结束「桌面窗口管理器」(系统自动拉起),最后才重启。别让 Minecraft 过夜占内存。证据:`apps/*/runtime/evidence/*2026101[789]_05*.png`(全黑)。
+  不行再试任务管理器结束「桌面窗口管理器」(系统自动拉起),最后才重启。别让 Minecraft 过夜占内存。
+  **防再犯(1020,用户批准 a+b)**:
+  - a 开跑前查内存:`game_automation_core/windows/memory_guard.py`,星铁 `execute_task` 与鸣潮 `_run_workflow`
+    开头各调一次。可用内存 < 6 GB 时只结束命令行含 `minecraft` 的 `java/javaw`,卡片「提醒」写
+    "开跑前可用内存只剩 X GB,已关掉 Minecraft(…)";其他大进程只记日志。测试由两个 app 的
+    `tests/conftest.py` 换成空操作,跑测试不会真关 Minecraft。
+  - b UU 找图改为截 UU 自己的窗口(`PrintWindow`,含无标题弹窗),点击前用 `WindowFromPoint`
+    确认落点在 UU 上;被挡时不点,报错写 `covered by <窗口>`。真机验证前保留整屏找图兜底,
+    命中时日志写 `via screen fallback`;1021 05:30 日志若全由窗口截图命中,删掉 `_locate_on_screen`。
+    游戏内截图本来就读窗口(M7A `use_background_screenshot: true`,OK-WW `WGC`),不受整屏黑屏影响。证据:`apps/*/runtime/evidence/*2026101[789]_05*.png`(全黑)。
 
 ## 9. 验证、发布与排障手册
 
