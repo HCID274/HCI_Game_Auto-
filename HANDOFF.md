@@ -388,6 +388,12 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
     已修:`client/launcher.py` 的 `_locate` 也按 `<模板名>__<说明>.png` 试变体,新增
     `client_launcher_update_action__cyan.png`;什么都认不出时先把启动器拉到最前(`_keep_launcher_in_front`)。
     下载中、暂停、进入游戏等按钮若也换了样子,同样从 `wuwa_launcher_update_waiting_*` 截图裁变体。
+    1021 07:03 重跑时又补了 `client_launcher_downloading__cyan.png`、`client_launcher_ready__cyan.png`
+    (下载完显示青色“进入游戏”,旧模板认不出,下载停止后被误判停滞);变体每次找图现读,放进去即对运行中的进程生效。
+    结果:07:04 点更新 → 07:11 下完(约 700 MB)→ 07:11:58 认出“进入游戏”,按版本日约定改约当晚 20:00。
+  - **1021 发现版本日当晚补跑脚本路径错**:`apps/wuwa/scripts/version_day_evening_rerun.ps1` 迁入 monorepo 后
+    仍用 `..\..\orchestrator\run.ps1`(指向不存在的 `apps\orchestrator`),当晚补跑会直接报错;已改为
+    `..\..\..\orchestrator\run.ps1`,`test_version_day.py` 检查该路径真实存在。
 
 ## 9. 验证、发布与排障手册
 

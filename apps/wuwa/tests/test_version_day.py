@@ -64,3 +64,10 @@ def test_register_evening_rerun_returns_start_time_and_fails_loudly() -> None:
     with patch("wuwa_auto.version_day.subprocess.run", return_value=failed):
         with pytest.raises(RuntimeError, match="denied"):
             register_evening_rerun(datetime(2026, 8, 20, 6, 0))
+
+
+def test_evening_rerun_script_points_at_the_real_orchestrator() -> None:
+    # 1021：迁入 monorepo 后脚本仍按旧层级找 run.ps1，当晚补跑会直接报“找不到文件”。
+    text = EVENING_RERUN_SCRIPT.read_text(encoding="utf-8")
+    relative = text.split('"$PSScriptRoot\\', 1)[1].split('"', 1)[0]
+    assert (EVENING_RERUN_SCRIPT.parent / relative.replace("\\", "/")).resolve().is_file()

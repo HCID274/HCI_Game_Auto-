@@ -145,21 +145,28 @@ def test_real_launcher_selfupdate_dialog_matches_both_templates() -> None:
 
 
 def test_launcher_action_templates_are_mutually_distinct() -> None:
+    # 1021 新版启动器的青色变体（更新 / 下载中 / 进入游戏）也必须互不相认。
     templates = [
         cv2.imread(str(path))
         for path in (
             WUWA_LAUNCHER_UPDATE_ACTION_TEMPLATE,
             WUWA_LAUNCHER_DOWNLOADING_TEMPLATE,
             WUWA_LAUNCHER_DOWNLOAD_PAUSED_TEMPLATE,
+            WUWA_LAUNCHER_UPDATE_ACTION_TEMPLATE.with_name("client_launcher_update_action__cyan.png"),
+            WUWA_LAUNCHER_DOWNLOADING_TEMPLATE.with_name("client_launcher_downloading__cyan.png"),
+            WUWA_LAUNCHER_DOWNLOADING_TEMPLATE.with_name("client_launcher_ready__cyan.png"),
         )
     ]
     assert all(template is not None for template in templates)
     for index, left in enumerate(templates):
         for right in templates[index + 1 :]:
+            big, small = (left, right) if left.shape[1] >= right.shape[1] else (right, left)
+            if small.shape[0] > big.shape[0]:
+                small = small[: big.shape[0]]
             confidence = float(
-                np.max(cv2.matchTemplate(left, right, cv2.TM_CCOEFF_NORMED))
+                np.max(cv2.matchTemplate(big, small, cv2.TM_CCOEFF_NORMED))
             )
-            assert confidence < 0.92
+            assert confidence < 0.88
 
 
 def test_selfupdate_dialog_can_be_recognized_inside_main_launcher_window() -> None:
