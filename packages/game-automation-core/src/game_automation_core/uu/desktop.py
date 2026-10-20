@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 import psutil
-from PIL import Image
+from PIL import Image, ImageGrab
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -36,6 +36,10 @@ log = logging.getLogger(__name__)
 # 一直全黑，单窗口截图仍正常；系统弹窗盖在 UU 上时，也能按 UU 的真实内容判断。
 PW_RENDERFULLCONTENT = 2  # 连硬件加速绘制的内容一起画进位图
 GA_ROOT = 2
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+RAISE_INTERVAL_SECONDS = 3.0
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
@@ -75,6 +79,18 @@ def _win32() -> tuple[ctypes.WinDLL, ctypes.WinDLL]:
             "PrintWindow": ([wintypes.HWND, wintypes.HDC, wintypes.UINT], wintypes.BOOL),
             "WindowFromPoint": ([wintypes.POINT], wintypes.HWND),
             "GetAncestor": ([wintypes.HWND, wintypes.UINT], wintypes.HWND),
+            "SetWindowPos": (
+                [
+                    wintypes.HWND,
+                    wintypes.HWND,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    wintypes.UINT,
+                ],
+                wintypes.BOOL,
+            ),
         },
         gdi32: {
             "CreateCompatibleDC": ([wintypes.HDC], wintypes.HDC),
@@ -117,15 +133,38 @@ def _hwnd_process_name(hwnd: int) -> str:
         return ""
 
 
-def capture_window(hwnd: int) -> tuple[Image.Image, int, int] | None:
-    """截一个窗口的完整内容；返回图片和窗口左上角的屏幕坐标。"""
-    user32, gdi32 = _win32()
+def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    user32, _ = _win32()
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return None
-    width, height = rect.right - rect.left, rect.bottom - rect.top
-    if width <= 0 or height <= 0:
+    if rect.right <= rect.left or rect.bottom <= rect.top:
         return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def capture_window(hwnd: int) -> tuple[Image.Image, int, int] | None:
+    """截 UU 窗口所在的屏幕区域；返回图片和窗口左上角的屏幕坐标。
+
+    平时照旧截屏幕上的这块区域，不打扰 UU。整屏截图坏掉（1017 内存耗尽后全黑）时才
+    改用 PrintWindow 直接要窗口内容——它会让 UU 的透明阴影边变成一圈白边（1020 实测），
+    所以只作兜底。
+    """
+    rect = window_rect(hwnd)
+    if rect is None:
+        return None
+    image = ImageGrab.grab(bbox=rect, all_screens=True)
+    if image.getbbox() is None:
+        log.warning("screen capture of UU window is all black; using PrintWindow")
+        image = _print_window(hwnd, rect)
+        if image is None:
+            return None
+    return image, rect[0], rect[1]
+
+
+def _print_window(hwnd: int, rect: tuple[int, int, int, int]) -> Image.Image | None:
+    user32, gdi32 = _win32()
+    width, height = rect[2] - rect[0], rect[3] - rect[1]
     window_dc = user32.GetWindowDC(hwnd)
     memory_dc = gdi32.CreateCompatibleDC(window_dc)
     bitmap = gdi32.CreateCompatibleBitmap(window_dc, width, height)
@@ -139,8 +178,7 @@ def capture_window(hwnd: int) -> tuple[Image.Image, int, int] | None:
         pixels = ctypes.create_string_buffer(width * height * 4)
         if not gdi32.GetDIBits(memory_dc, bitmap, 0, height, pixels, ctypes.byref(header), 0):
             return None
-        image = Image.frombytes("RGB", (width, height), pixels.raw, "raw", "BGRX")
-        return image, rect.left, rect.top
+        return Image.frombytes("RGB", (width, height), pixels.raw, "raw", "BGRX")
     finally:
         gdi32.SelectObject(memory_dc, previous)
         gdi32.DeleteObject(bitmap)
@@ -191,8 +229,9 @@ class UuDesktopController:
     ) -> None:
         self.config = config
         self.is_process_running = is_process_running
-        # 最近一次找到了图、但点击位置被别的窗口挡住时，记下挡住的是谁。
+        # 最近一次 UU 被别的窗口挡住时，记下挡住的是谁，超时报错时一并写出。
         self.last_cover = ""
+        self._next_raise_at = 0.0
 
     def require_admin(self) -> None:
         try:
@@ -328,6 +367,7 @@ class UuDesktopController:
                         return getattr(window, "title", "") or "<untitled>"
                     foreground = int(ctypes.windll.user32.GetForegroundWindow() or 0)
                     if foreground == int(hwnd):
+                        self.ensure_on_primary_screen(int(hwnd))
                         return getattr(window, "title", "") or "<untitled>"
                     last_error = RuntimeError(
                         "UU activation did not own foreground: "
@@ -403,26 +443,59 @@ class UuDesktopController:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             position = self.locate_in_uu_windows(template, confidence=confidence)
-            if position is None and not self.last_cover:
-                position = self._locate_on_screen(template, confidence=confidence)
             if position is not None:
                 return position
+            self.bring_uu_forward_if_covered()
             time.sleep(interval)
         return None
 
-    @staticmethod
-    def _locate_on_screen(template: Path, *, confidence: float) -> tuple[int, int] | None:
-        # 兜底：UU 窗口截图在真机验证前保留整屏找图；日志里出现 "screen fallback"
-        # 说明窗口截图没找到。05:30 真机日志确认窗口截图可用后删掉这段。
+    def _main_uu_window(self) -> tuple[int, tuple[int, int, int, int]] | None:
+        windows = [
+            (hwnd, rect)
+            for hwnd in self.uu_window_handles()
+            if (rect := window_rect(hwnd)) is not None
+        ]
+        if not windows:
+            return None
+        return max(windows, key=lambda item: (item[1][2] - item[1][0]) * (item[1][3] - item[1][1]))
+
+    def bring_uu_forward_if_covered(self) -> None:
+        """找不到图时，UU 主窗口若被别的窗口盖住（1020 实测被 Chrome 盖住），先把 UU 拉到最前。"""
+        now = time.monotonic()
+        if now < self._next_raise_at:
+            return
+        main = self._main_uu_window()
+        if main is None:
+            return
+        hwnd, (left, top, right, bottom) = main
+        cover = self.cover_at(((left + right) // 2, (top + bottom) // 2))
+        if not cover:
+            return
+        self.last_cover = cover
+        self._next_raise_at = now + RAISE_INTERVAL_SECONDS
+        log.info("UU window covered by %s; bringing UU to front", cover)
         try:
-            location = pyautogui.locateOnScreen(str(template), confidence=confidence)
-        except pyautogui.ImageNotFoundException:
-            return None
-        if location is None:
-            return None
-        center = pyautogui.center(location)
-        log.warning("matched %s via screen fallback, not the UU window", template.name)
-        return center.x, center.y
+            activate_window(hwnd, timeout=1.5)
+        except Exception as exc:  # 系统弹窗等拉不动的情况，留给超时报错说明
+            log.warning("could not bring UU to front: %s", exc)
+
+    @staticmethod
+    def ensure_on_primary_screen(hwnd: int) -> None:
+        """UU 窗口有一部分跑出主屏幕时（1020 实测卡在左上角屏外），挪回主屏正中。"""
+        rect = window_rect(hwnd)
+        if rect is None:
+            return
+        left, top, right, bottom = rect
+        screen = pyautogui.size()
+        if left >= 0 and top >= 0 and right <= screen.width and bottom <= screen.height:
+            return
+        x = max(0, (screen.width - (right - left)) // 2)
+        y = max(0, (screen.height - (bottom - top)) // 2)
+        user32, _ = _win32()
+        user32.SetWindowPos(
+            hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        )
+        log.info("moved UU window from %s to (%d, %d)", rect, x, y)
 
     def uu_window_handles(self) -> list[int]:
         """可见且未最小化的 UU 顶层窗口（含无标题弹窗），按 Z 序从上到下。"""
@@ -454,31 +527,51 @@ class UuDesktopController:
             return ""
         return describe_window(snapshot_window(root))
 
+    @staticmethod
+    def template_variants(template: Path) -> list[Path]:
+        """模板本身加上同目录的 `<模板名>__<说明>.png`：同一个按钮或卡片的其他样子。
+
+        UU 换了样子（如鼠标悬停时卡片变暗、出现“立即加速”）时，把那次失败截图里对应的
+        区域裁成这样命名的图放进模板目录即可，流程自动认得，不用改代码。
+        """
+        return [template, *sorted(template.parent.glob(f"{template.stem}__*.png"))]
+
     def locate_in_uu_windows(
         self, template: Path, *, confidence: float
     ) -> tuple[int, int] | None:
         self.last_cover = ""
-        for hwnd in self.uu_window_handles():
-            captured = capture_window(hwnd)
-            if captured is None:
-                continue
-            image, left, top = captured
-            try:
-                box = pyautogui.locate(str(template), image, confidence=confidence)
-            except pyautogui.ImageNotFoundException:
-                box = None
-            if box is None:
-                continue
-            point = (
-                int(left + box.left + box.width // 2),
-                int(top + box.top + box.height // 2),
-            )
-            # 截图里找到了，还要确认真点下去落在 UU 上，不点到盖在上面的弹窗。
-            cover = self.cover_at(point)
-            if cover:
-                self.last_cover = cover
-                continue
-            return point
+        captures: dict[int, tuple[Image.Image, int, int] | None] = {}
+        for variant in self.template_variants(template):
+            with Image.open(variant) as needle:
+                needle_width, needle_height = needle.size
+            for hwnd in self.uu_window_handles():
+                rect = window_rect(hwnd)
+                # UU 还有悬浮球等小窗口，比模板还小时 OpenCV 会直接抛错（1020 两个游戏都崩在这）。
+                if rect is None or rect[2] - rect[0] < needle_width or rect[3] - rect[1] < needle_height:
+                    continue
+                if hwnd not in captures:
+                    captures[hwnd] = capture_window(hwnd)
+                if captures[hwnd] is None:
+                    continue
+                image, left, top = captures[hwnd]
+                try:
+                    box = pyautogui.locate(str(variant), image, confidence=confidence)
+                except pyautogui.ImageNotFoundException:
+                    box = None
+                if box is None:
+                    continue
+                point = (
+                    int(left + box.left + box.width // 2),
+                    int(top + box.top + box.height // 2),
+                )
+                # 截图里找到了，还要确认真点下去落在 UU 上，不点到盖在上面的弹窗。
+                cover = self.cover_at(point)
+                if cover:
+                    self.last_cover = cover
+                    continue
+                if variant != template:
+                    log.info("matched %s via variant %s", template.name, variant.name)
+                return point
         return None
 
     def wait_for_image(

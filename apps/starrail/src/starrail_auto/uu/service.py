@@ -28,6 +28,7 @@ from starrail_auto.uu.config import (
 from starrail_auto.uu.desktop import (
     accept_mandatory_update,
     click,
+    click_after_evidence,
     dismiss_known_popups,
     focus_uu_window,
     keep_uu_in_background_on_exit,
@@ -160,7 +161,8 @@ def _run_startup_attempt(attempt_no: int, *, update_used: bool = False) -> None:
         step_name="locate_startup_click_target",
         timeout=STEP_2_TIMEOUT,
     )
-    click(second)
+    # 点击前留图：此刻星铁卡片正处于悬停样式，可直接裁成 uu_01__hover.png 变体模板。
+    click_after_evidence(second, "start_acceleration")
     time.sleep(POST_CLICK_WAIT)
     if _recover_mandatory_update("before acceleration confirmation"):
         if update_used:

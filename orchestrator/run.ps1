@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     $requestedMode = (Get-Content -LiteralPath $modeRequestPath -Raw).Trim()
-    if ($requestedMode -notin @('starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup')) {
+    if ($requestedMode -notin @('starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'integration-smoke')) {
         throw "unsupported one-shot mode: $requestedMode"
     }
     $runMode = $requestedMode

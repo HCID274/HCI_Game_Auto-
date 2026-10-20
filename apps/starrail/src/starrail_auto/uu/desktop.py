@@ -139,6 +139,10 @@ def click(position: tuple[int, int]) -> None:
     _controller.click(position)
 
 
+def click_after_evidence(position: tuple[int, int], step_name: str) -> None:
+    _controller.click_after_evidence(position, step_name)
+
+
 def move_mouse_to(position: tuple[int, int]) -> None:
     _controller.move_mouse_to(position)
 

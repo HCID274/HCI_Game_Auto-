@@ -57,8 +57,9 @@ def _run(task: str, timeout: int) -> RunResult:
         retries = exc.restarts_used
         log.error("UU acceleration failed: %s", exc)
         return RunResult(EXIT_UU_FAILED, stage="UU", retries=retries)
-    except RuntimeError as exc:
-        log.error("UU acceleration failed: %s", exc)
+    except Exception as exc:
+        # 意外异常也要落到失败结果上，否则整个进程崩掉、连失败卡片都发不出（1020）。
+        log.exception("UU acceleration failed: %s", exc)
         return RunResult(EXIT_UU_FAILED, stage="UU", retries=retries)
     if not check_game_network():
         return RunResult(EXIT_GAME_NETWORK_FAILED, stage="网络代理", retries=retries)

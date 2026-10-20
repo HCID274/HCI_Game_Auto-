@@ -9,8 +9,8 @@
                 Daily = @('run', 'python', '-m', 'starrail_auto', 'daily', '--timeout', '1800')
                 UpdateRecovery = @('run', 'python', '-m', 'starrail_auto.m7a.launcher_update')
                 Cleanup = @('run', 'python', '-m', 'starrail_auto', 'cleanup')
-                UuStart = @('run', 'python', '-m', 'starrail_auto', 'uu', 'start')
-                UuStop = @('run', 'python', '-m', 'starrail_auto', 'uu', 'stop')
+                UuStart = @('run', 'python', '-m', 'starrail_auto', 'uu', 'start', '--log-file', 'runtime/logs/uu.log')
+                UuStop = @('run', 'python', '-m', 'starrail_auto', 'uu', 'stop', '--log-file', 'runtime/logs/uu.log')
                 Smoke = @('run', 'python', '-m', 'starrail_auto', 'smoke')
                 Health = @('run', 'python', '-m', 'starrail_auto', '--help')
             }

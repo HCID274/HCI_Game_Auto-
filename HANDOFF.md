@@ -357,10 +357,26 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
     开头各调一次。可用内存 < 6 GB 时只结束命令行含 `minecraft` 的 `java/javaw`,卡片「提醒」写
     "开跑前可用内存只剩 X GB,已关掉 Minecraft(…)";其他大进程只记日志。测试由两个 app 的
     `tests/conftest.py` 换成空操作,跑测试不会真关 Minecraft。
-  - b UU 找图改为截 UU 自己的窗口(`PrintWindow`,含无标题弹窗),点击前用 `WindowFromPoint`
-    确认落点在 UU 上;被挡时不点,报错写 `covered by <窗口>`。真机验证前保留整屏找图兜底,
-    命中时日志写 `via screen fallback`;1021 05:30 日志若全由窗口截图命中,删掉 `_locate_on_screen`。
-    游戏内截图本来就读窗口(M7A `use_background_screenshot: true`,OK-WW `WGC`),不受整屏黑屏影响。证据:`apps/*/runtime/evidence/*2026101[789]_05*.png`(全黑)。
+  - b UU 找图只在 UU 的窗口里找(`uu/desktop.py`,按进程名枚举含无标题弹窗,跳过比模板小的
+    悬浮球):平时截该窗口所在的屏幕区域,只有截出来全黑时才改用 `PrintWindow`;点击前用
+    `WindowFromPoint` 确认落点在 UU 上。找不到且 UU 被别的窗口盖住时先把 UU 拉到最前(每 3 秒最多一次),
+    仍不行才报 `covered by <窗口>`;UU 窗口有一部分跑出主屏时先挪回主屏正中。
+    游戏内截图本来就读窗口(M7A `use_background_screenshot: true`,OK-WW `WGC`),不受整屏黑屏影响。
+    证据:`apps/*/runtime/evidence/*2026101[789]_05*.png`(全黑)。
+  - **1020 05:30 又红是 b 首版的 bug**:UU 悬浮球窗口比模板小,`pyautogui.locate` 抛 `ValueError`,
+    两个游戏都崩在 UU 这步;星铁 `_run` 只接 `RuntimeError`,进程直接崩、连失败卡片都没发。已修:
+    跳过小窗口,星铁 UU 步骤任何异常都落成失败结果并发卡。首版 `PrintWindow` 还让 UU 透明阴影边变成
+    一圈约 120 像素的白边(用户 12:39 截图;对比 1016 截图无白边),所以改为平时截屏幕区域。
+  - **UU 换了样子就加一张图,不改代码**:模板目录里 `<模板名>__<说明>.png` 自动当作同一元素的其他样子
+    (`UuDesktopController.template_variants`),原模板认不出时才试。做法:从证据截图里裁出该元素的新样子
+    (卡片就裁整张卡,“立即加速”这类各卡共有的部分单独裁会认错卡),按此命名放进 `apps/<app>/templates/`,
+    再用别的游戏卡片的截图确认新图不会误认。现有:`uu_wuthering_card__hover.png`、`uu_01__hover.png`
+    (1020 真机:鼠标停在卡片上时卡片变暗、出现“立即加速”,原模板认不出)。星铁点“开始加速”前会留
+    `uu_start_acceleration_before_click_*` 截图,此刻卡片正是悬停样子,星铁那张就从这里裁。
+  - 1020 12:38 / 12:48 / 12:53 三次 `integration-smoke` 真机全部退出码 0;第三次碰到 UU 被 Chrome 盖住,
+    流程自己把 UU 拉到最前后继续,截图无白边。
+  - 真机回归入口:`runtime/orchestrator/next-run.mode` 写 `integration-smoke` 后
+    `Start-ScheduledTask Game_Daily_0530`(高权限),只跑两边 UU 启动、加速、断开和收尾,不开游戏本体。
 
 ## 9. 验证、发布与排障手册
 
