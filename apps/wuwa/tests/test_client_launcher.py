@@ -899,3 +899,36 @@ def test_update_gate_restarts_stalled_download_then_fails_when_ladder_exhausts()
 
     assert "update_stall_restart_1" in mouse.__class__.__name__ or True
     assert stop.call_count >= 1
+
+
+def test_restyled_update_button_is_found_through_variant_template() -> None:
+    # 1021 启动器自更新后“更新”按钮变成青色圆角，原灰底模板认不出，脚本空等到下载停滞重启。
+    from wuwa_auto.client.launcher import _locate
+    import pyautogui
+
+    fixture = Image.open(Path(__file__).parent / "fixtures" / "client_launcher_update_cyan.png")
+    with patch(
+        "wuwa_auto.client.launcher.pyautogui.locateOnScreen",
+        side_effect=lambda path, confidence, region: pyautogui.locate(path, fixture, confidence=confidence),
+    ):
+        assert _locate(WUWA_LAUNCHER_UPDATE_ACTION_TEMPLATE, confidence=0.92) == (230, 67)
+        assert _locate(WUWA_LAUNCHER_DOWNLOADING_TEMPLATE, confidence=0.92) is None
+        assert _locate(WUWA_LAUNCHER_DOWNLOAD_PAUSED_TEMPLATE, confidence=0.92) is None
+
+
+def test_covered_launcher_is_brought_forward_while_waiting() -> None:
+    # 1021 启动器被 Chrome 盖住，整屏找图什么都认不出。
+    from wuwa_auto.client.launcher import _keep_launcher_in_front
+
+    launcher = _window("launcher_main.exe", 10)
+    with patch("wuwa_auto.client.launcher.ctypes.windll.user32.GetForegroundWindow", return_value=99), patch(
+        "wuwa_auto.client.launcher._focus"
+    ) as focus:
+        _keep_launcher_in_front(launcher)
+    focus.assert_called_once_with(launcher)
+
+    with patch("wuwa_auto.client.launcher.ctypes.windll.user32.GetForegroundWindow", return_value=10), patch(
+        "wuwa_auto.client.launcher._focus"
+    ) as focus:
+        _keep_launcher_in_front(launcher)
+    focus.assert_not_called()

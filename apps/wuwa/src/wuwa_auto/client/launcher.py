@@ -22,6 +22,7 @@ except (AttributeError, OSError):  # pragma: no cover - non-Windows import safet
     pass
 
 import pyautogui
+from game_automation_core.uu.desktop import UuDesktopController
 from game_automation_core.windows.desktop_guard import activate_window
 from PIL import Image
 
@@ -380,18 +381,20 @@ def _locate(
     *,
     region: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int] | None:
-    try:
-        match = pyautogui.locateOnScreen(
-            str(template),
-            confidence=confidence,
-            region=region,
-        )
-    except pyautogui.ImageNotFoundException:
-        return None
-    if match is None:
-        return None
-    center = pyautogui.center(match)
-    return int(center.x), int(center.y)
+    # 1021 启动器自更新后按钮换了样子：模板旁的 `<模板名>__<说明>.png` 一并试。
+    for variant in UuDesktopController.template_variants(template):
+        try:
+            match = pyautogui.locateOnScreen(
+                str(variant),
+                confidence=confidence,
+                region=region,
+            )
+        except pyautogui.ImageNotFoundException:
+            continue
+        if match is not None:
+            center = pyautogui.center(match)
+            return int(center.x), int(center.y)
+    return None
 
 
 def _launcher_selfupdate_state(
@@ -616,6 +619,17 @@ def _save_action_crop(
 def _focus(window: WindowInfo) -> None:
     ctypes.windll.user32.ShowWindow(window.hwnd, SW_RESTORE)
     activate_window(window.hwnd, timeout=3.0)
+
+
+def _keep_launcher_in_front(launcher: WindowInfo) -> None:
+    """整屏找图认不出时，先确认启动器没被别的窗口盖住（1021 被 Chrome 盖住）。"""
+    if ctypes.windll.user32.GetForegroundWindow() == launcher.hwnd:
+        return
+    log.info("launcher is not in front; bringing it forward")
+    try:
+        _focus(launcher)
+    except Exception as exc:
+        log.warning("launcher activation was not confirmed: %s", exc)
 
 
 def _restore_game(window: WindowInfo) -> None:
@@ -1178,6 +1192,7 @@ def _ensure_client_ready(
             evidence.append(str(_save_screenshot("wuwa_launcher_update_waiting")))
             actions.append("update_waiting")
             waiting_captured = True
+        _keep_launcher_in_front(launcher)
         sleep(POLL_INTERVAL_SECONDS)
 
     evidence.append(str(_save_screenshot("wuwa_launcher_update_timeout")))
@@ -1435,6 +1450,7 @@ def ensure_client_updated(
                         )
                         actions.append("update_waiting")
                         waiting_captured = True
+                    _keep_launcher_in_front(launcher)
 
             if update_budget_end is not None:
                 # 0821 live data: a silently-dead download keeps an animated

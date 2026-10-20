@@ -32,11 +32,20 @@ if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     Remove-Item -LiteralPath $modeRequestPath -Force
 }
 
+function Add-LogText {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    # Append with ReadWrite sharing: on 1021 a reader tailing this log made PS 5.1 Add-Content fail
+    # with "file in use", which aborted the whole chain. Keep this file ASCII-only for PS 5.1.
+    $stream = [System.IO.File]::Open($logPath, 'Append', 'Write', 'ReadWrite')
+    $writer = New-Object System.IO.StreamWriter($stream, (New-Object System.Text.UTF8Encoding($true)))
+    try { $writer.WriteLine($Text) } finally { $writer.Dispose() }
+}
+
 function Write-OrchestratorLog {
     param([Parameter(Mandatory = $true)][string]$Message)
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
     Write-Host $line
-    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    Add-LogText $line
 }
 
 function Enter-OrchestratorMutex {
@@ -108,7 +117,7 @@ function Invoke-AppCommand {
         }
     }
     catch {
-        Add-Content -LiteralPath $logPath -Value $_.Exception.ToString() -Encoding UTF8
+        Add-LogText $_.Exception.ToString()
         $code = 99
     }
     Write-OrchestratorLog "finish $Label exit=$code"
@@ -257,7 +266,7 @@ try {
 }
 catch {
     Write-OrchestratorLog "orchestrator exception: $($_.Exception.Message)"
-    Add-Content -LiteralPath $logPath -Value $_.Exception.ToString() -Encoding UTF8
+    Add-LogText $_.Exception.ToString()
     $finalCode = 99
 }
 finally {

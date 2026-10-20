@@ -377,6 +377,17 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
     流程自己把 UU 拉到最前后继续,截图无白边。
   - 真机回归入口:`runtime/orchestrator/next-run.mode` 写 `integration-smoke` 后
     `Start-ScheduledTask Game_Daily_0530`(高权限),只跑两边 UU 启动、加速、断开和收尾,不开游戏本体。
+  - **1021 05:41 链条中断(监控者造成)**:星铁日常退出码 0、卡片已发,但编排脚本写 `finish` 时
+    `Add-Content` 报“文件被占用”(当时 Claude 用 `tail -F` 盯 `orchestrator.log`;PS 5.1 的 `Add-Content`
+    与 tail 的句柄冲突,PS 7 不冲突),异常一路抛出,`result.json` 全是 99,星铁收尾和鸣潮都没跑。
+    已修:`run.ps1` 改用共享读写方式追加日志(`Add-LogText`);`run.ps1` 保持纯 ASCII,PS 5.1 会按 GBK 误读
+    无 BOM 的中文。当天补跑:`starrail-cleanup`、`wuwa-daily` 两个一次性模式。
+    以后伴随监控只轮询读日志(按字节偏移 `tail -c +N`),不对 `orchestrator.log` 用 `tail -F`。
+  - **1021 鸣潮启动器自更新后认不出“更新”按钮**:新版启动器按钮变成青色圆角,原灰底模板 0.6 都配不上,
+    脚本空等,下载 IO 不动被判停滞、重启 6 次后失败;期间启动器还几次被 Chrome 盖住(整屏找图)。
+    已修:`client/launcher.py` 的 `_locate` 也按 `<模板名>__<说明>.png` 试变体,新增
+    `client_launcher_update_action__cyan.png`;什么都认不出时先把启动器拉到最前(`_keep_launcher_in_front`)。
+    下载中、暂停、进入游戏等按钮若也换了样子,同样从 `wuwa_launcher_update_waiting_*` 截图裁变体。
 
 ## 9. 验证、发布与排障手册
 
