@@ -13,7 +13,11 @@ from pathlib import Path
 
 import psutil
 
-from wuwa_auto.client.launcher import click_startup_agreement, is_game_window_alive
+from wuwa_auto.client.launcher import (
+    accept_birthday_invite,
+    click_startup_agreement,
+    is_game_window_alive,
+)
 from wuwa_auto.input.viiper import (
     release_active_mouse_buttons,
     resume_active_mouse_control,
@@ -328,6 +332,7 @@ def _run_task(
     evidence: Path | None = None
     captured_nightmare_transition = False
     startup_agreement_clicked = False
+    birthday_invites = 0
 
     while True:
         now = time.monotonic()
@@ -367,6 +372,13 @@ def _run_task(
             marker in current_text for marker in ("DailyTask:", "GardenTask:", "FarmEchoTask:")
         ):
             startup_agreement_clicked = click_startup_agreement()
+        # 生日邀约弹窗挡住大世界（1022–1025）；每轮最多处理两次。
+        if birthday_invites < 2:
+            try:
+                if accept_birthday_invite():
+                    birthday_invites += 1
+            except Exception:
+                log.exception("birthday invite handler failed")
         failure = find_failure(current_text)
         if failure:
             if task_label == "daily":

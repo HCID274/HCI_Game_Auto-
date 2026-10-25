@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from wuwa_auto.client.launcher import (
+    accept_birthday_invite,
     click_startup_agreement,
     click_startup_network_retry,
     is_game_window_alive,
@@ -223,6 +224,7 @@ def run_confirmed_farm_echo_retry(
     live_combat_degradation = False
     startup_window_focused = False
     startup_agreement_clicked = False
+    birthday_invites = 0
     startup_network_retry_clicks = 0
     last_startup_network_retry_at = 0.0
     startup_network_retry_exhausted = False
@@ -275,6 +277,13 @@ def run_confirmed_farm_echo_retry(
             # 协议弹窗可能先于 UnrealWindow 出现，不能等窗口稳定日志才处理。
             if not startup_agreement_clicked and UPSTREAM_INTERACTION_MARKER not in text:
                 startup_agreement_clicked = click_startup_agreement()
+            # 1022–1025 生日邀约弹窗挡住大世界，四天刷声骸 0/5、日常被跳过；每轮最多处理两次。
+            if birthday_invites < 2 and last_confirmed_absorptions == 0:
+                try:
+                    if accept_birthday_invite():
+                        birthday_invites += 1
+                except Exception:
+                    log.exception("birthday invite handler failed")
             confirmed_absorptions = count_farm_echo_absorptions(text)
             if confirmed_absorptions > last_confirmed_absorptions:
                 last_confirmed_absorptions = confirmed_absorptions

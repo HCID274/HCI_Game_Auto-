@@ -31,6 +31,8 @@ from wuwa_auto.settings import (
     EVIDENCE_DIR,
     WUWA_CLIENT_AGREEMENT_CONFIRM_TEMPLATE,
     WUWA_CLIENT_AGREEMENT_NOTICE_TEMPLATE,
+    WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE,
+    WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE,
     WUWA_CLIENT_EXE,
     WUWA_CLIENT_LOGIN_TEMPLATE,
     WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE,
@@ -546,6 +548,39 @@ def click_startup_agreement() -> bool:
         evidence, _ = _save_environment_snapshot("wuwa_startup_agreement_not_dismissed")
         raise ClientLauncherError(f"startup agreement remained after one verified click; evidence={evidence}")
     return False
+
+
+# 生日弹窗第一位共鸣者头像中心相对“生日快乐”标题中心的偏移（1025 截图，2560x1440）。
+BIRTHDAY_FIRST_RESONATOR_OFFSET = (-77, 307)
+
+
+def accept_birthday_invite() -> bool:
+    """1022 起登录后弹“生日快乐 / 邀约”，挡住大世界，OK-WW 按 Esc 关不掉。
+
+    选第一位共鸣者并点“邀约”；之后的画面交给 OK-WW 的 Esc 回大世界逻辑。
+    """
+    game = _game_window()
+    if game is None:
+        return False
+    region = _search_region(game)
+    notice = _locate(WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE, confidence=0.9, region=region)
+    invite = _locate(WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE, confidence=0.9, region=region)
+    if notice is None or invite is None:
+        return False
+    resonator = (
+        notice[0] + BIRTHDAY_FIRST_RESONATOR_OFFSET[0],
+        notice[1] + BIRTHDAY_FIRST_RESONATOR_OFFSET[1],
+    )
+    _restore_game(game)
+    evidence: list[str] = []
+    with managed_virtual_mouse() as mouse:
+        _click_state(mouse, game, resonator, "birthday_pick_resonator", evidence)
+        time.sleep(1.0)
+        _click_state(mouse, game, invite, "birthday_invite", evidence)
+    time.sleep(3.0)
+    after = _save_screenshot("wuwa_birthday_invite_after_click")
+    log.info("birthday invite accepted; evidence=%s", after)
+    return True
 
 
 def click_startup_network_retry() -> bool:

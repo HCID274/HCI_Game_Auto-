@@ -394,6 +394,12 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
   - **1021 发现版本日当晚补跑脚本路径错**:`apps/wuwa/scripts/version_day_evening_rerun.ps1` 迁入 monorepo 后
     仍用 `..\..\orchestrator\run.ps1`(指向不存在的 `apps\orchestrator`),当晚补跑会直接报错;已改为
     `..\..\..\orchestrator\run.ps1`,`test_version_day.py` 检查该路径真实存在。
+  - **1022–1025 鸣潮连红:登录后“生日快乐 / 邀约”弹窗挡住大世界**。OK-WW `ensure_main` 一直按 Esc 也关不掉,
+    报 `Please start in game world and in team!`,刷声骸 0/5,日常因此被跳过(`daily-skipped.log`)。
+    1023–1025 全部 18 张 `ok_farm_echo_confirmed_retry_failed_*` 截图都是这个弹窗;模板扫 865 张 10 月截图无误认。
+    已加 `accept_birthday_invite()`(`client/launcher.py`):认出 `client_birthday_invite_notice.png` 和
+    `client_birthday_invite_action.png` 后点第一位共鸣者、再点“邀约”,之后交回 OK-WW;`confirmed_retry` 与
+    `runner` 的轮询里每轮最多处理两次。点完之后的画面未经实机验证,1026 早上伴随监控确认。
 
 ## 9. 验证、发布与排障手册
 

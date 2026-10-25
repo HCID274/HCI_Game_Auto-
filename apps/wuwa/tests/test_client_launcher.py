@@ -939,3 +939,39 @@ def test_covered_launcher_is_brought_forward_while_waiting() -> None:
     ) as focus:
         _keep_launcher_in_front(launcher)
     focus.assert_not_called()
+
+
+def test_birthday_invite_picks_first_resonator_then_invites() -> None:
+    # 1022–1025 生日邀约弹窗挡住大世界，OK-WW 按 Esc 关不掉，四天刷声骸 0/5。
+    from wuwa_auto.client.launcher import accept_birthday_invite
+    from wuwa_auto.settings import (
+        WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE,
+        WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE,
+    )
+
+    game = WindowInfo(hwnd=5, pid=5, title="鸣潮", executable=Path("D:/Client.exe"), rect=(0, 0, 2560, 1440))
+    points = {
+        WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE: (1310, 306),
+        WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE: (1827, 1135),
+    }
+    mouse = FakeMouse()
+    with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
+        "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
+    ), patch(
+        "wuwa_auto.client.launcher._locate", side_effect=lambda template, **_: points.get(template)
+    ), patch("wuwa_auto.client.launcher._restore_game"), patch(
+        "wuwa_auto.client.launcher.managed_virtual_mouse"
+    ) as managed, patch(
+        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+    ), patch(
+        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("a.png")
+    ), patch("wuwa_auto.client.launcher.time.sleep"):
+        managed.return_value.__enter__.return_value = mouse
+        assert accept_birthday_invite() is True
+
+    assert mouse.clicks == [(1233, 613), (1827, 1135)]
+
+    with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
+        "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
+    ), patch("wuwa_auto.client.launcher._locate", return_value=None):
+        assert accept_birthday_invite() is False
