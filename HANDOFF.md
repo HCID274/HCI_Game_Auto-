@@ -63,7 +63,7 @@
 
 星铁业务失败本身不阻断鸣潮，但星铁 cleanup 失败会阻断桌面交接。总控等待自己直接启动的 CLI 进程，取真实退出码，不通过轮询后代进程猜测完成。无论成功或异常，`finally` 都要在 `runtime/orchestrator/<run_id>/result.json` 落盘并释放互斥锁。
 
-全局互斥锁是 `Global\HCID274_GameAutomation`。周日鸣潮花园任务为 `Game_Wuwa_WeeklyGarden_Sunday`，08:00 启动，锁等待 210 分钟，实际执行上限 8 小时。旧架构文档曾写 4 小时，已经过期；`config/automation.psd1` 和实际计划任务的 8 小时才是权威值。
+全局互斥锁是 `Global\HCID274_GameAutomation`。周日鸣潮花园计划任务 `Game_Wuwa_WeeklyGarden_Sunday` 已于 2026-10-25 按用户要求停用（只保留日常）：它列入 `RemovedTasks`，日常链开跑时自动删除，`register_tasks.ps1` 不再注册。需要时手动 `run.ps1 -Mode weekly-garden`，锁等待 210 分钟仍取 `Tasks.WeeklyGarden`。
 
 总控最终码：
 
@@ -480,7 +480,7 @@ uv run --project apps/wuwa wuwa-auto elevate client prepare
 
 - [ ] 确认分支、HEAD、工作树，保留用户已有修改。
 - [ ] 读取最新总控 result，按阶段归因，不从 final code 猜游戏失败。
-- [ ] 核对计划任务仍为 05:30 daily、周日 08:00 weekly、全局锁唯一。
+- [ ] 核对计划任务只有 05:30 daily（周日 weekly 已停用）、全局锁唯一。
 - [ ] 确认星铁 M7A/鸣潮 OK-WW 的实机版本与覆盖审计一致。
 - [ ] 确认 UU 复用同时有目标游戏身份和停止按钮。
 - [ ] 鸣潮只由 OK-WW 拉起；更新完成后也先关闭再交回 OK。

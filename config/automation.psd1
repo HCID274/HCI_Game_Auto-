@@ -52,5 +52,8 @@
     RemovedTasks = @(
         'StarRail_Main_0600'
         'StarRail_Cleanup_0800'
+        # 2026-10-25 user: stop the Sunday Wuwa weekly task, keep only dailies.
+        # Tasks.WeeklyGarden stays for a manual `-Mode weekly-garden` run.
+        'Game_Wuwa_WeeklyGarden_Sunday'
     )
 }
