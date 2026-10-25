@@ -57,6 +57,8 @@ WUWA_CLIENT_AGREEMENT_NOTICE_TEMPLATE = TEMPLATES_DIR / "client_agreement_notice
 WUWA_CLIENT_AGREEMENT_CONFIRM_TEMPLATE = TEMPLATES_DIR / "client_agreement_confirm.png"
 WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE = TEMPLATES_DIR / "client_birthday_invite_notice.png"
 WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE = TEMPLATES_DIR / "client_birthday_invite_action.png"
+# 选中共鸣者后按钮变成“邀约<名字>”；只裁礼物图标和“邀约”两字，与名字无关。
+WUWA_CLIENT_BIRTHDAY_SELECTED_TEMPLATE = TEMPLATES_DIR / "client_birthday_invite_selected.png"
 WUWA_CLIENT_MONTHLY_REWARD_TEMPLATE = TEMPLATES_DIR / "client_monthly_reward.png"
 WUWA_CLIENT_REWARD_RESULT_TEMPLATE = TEMPLATES_DIR / "client_reward_result_close.png"
 WUWA_CLIENT_NETWORK_RETRY_TEMPLATE = TEMPLATES_DIR / "client_network_retry.png"

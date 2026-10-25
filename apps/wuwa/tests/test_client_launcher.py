@@ -941,35 +941,51 @@ def test_covered_launcher_is_brought_forward_while_waiting() -> None:
     focus.assert_not_called()
 
 
-def test_birthday_invite_picks_first_resonator_then_invites() -> None:
+def test_birthday_invite_selects_once_then_holds_the_invite_button() -> None:
     # 1022–1025 生日邀约弹窗挡住大世界，OK-WW 按 Esc 关不掉，四天刷声骸 0/5。
-    from wuwa_auto.client.launcher import accept_birthday_invite
+    # 1026 实机：“邀约”要长按；已选中的头像再点会取消选中。
+    from wuwa_auto.client.launcher import BIRTHDAY_INVITE_HOLD_SECONDS, accept_birthday_invite
     from wuwa_auto.settings import (
         WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE,
         WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE,
+        WUWA_CLIENT_BIRTHDAY_SELECTED_TEMPLATE,
     )
 
     game = WindowInfo(hwnd=5, pid=5, title="鸣潮", executable=Path("D:/Client.exe"), rect=(0, 0, 2560, 1440))
-    points = {
-        WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE: (1310, 306),
-        WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE: (1827, 1135),
-    }
-    mouse = FakeMouse()
-    with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
-        "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
-    ), patch(
-        "wuwa_auto.client.launcher._locate", side_effect=lambda template, **_: points.get(template)
-    ), patch("wuwa_auto.client.launcher._restore_game"), patch(
-        "wuwa_auto.client.launcher.managed_virtual_mouse"
-    ) as managed, patch(
-        "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
-    ), patch(
-        "wuwa_auto.client.launcher._save_action_crop", return_value=Path("a.png")
-    ), patch("wuwa_auto.client.launcher.time.sleep"):
-        managed.return_value.__enter__.return_value = mouse
-        assert accept_birthday_invite() is True
 
-    assert mouse.clicks == [(1233, 613), (1827, 1135)]
+    def run(screens: list[dict]) -> list[tuple]:
+        calls: list[tuple] = []
+
+        class HoldMouse:
+            def click_at(self, x: int, y: int, *, hold: float = 0.08) -> None:
+                calls.append((x, y, hold))
+                if len(screens) > 1:
+                    screens.pop(0)
+
+        with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
+            "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
+        ), patch(
+            "wuwa_auto.client.launcher._locate", side_effect=lambda template, **_: screens[0].get(template)
+        ), patch("wuwa_auto.client.launcher._restore_game"), patch(
+            "wuwa_auto.client.launcher.managed_virtual_mouse"
+        ) as managed, patch(
+            "wuwa_auto.client.launcher._save_screenshot", return_value=Path("s.png")
+        ), patch(
+            "wuwa_auto.client.launcher._save_action_crop", return_value=Path("a.png")
+        ), patch("wuwa_auto.client.launcher.time.sleep"):
+            managed.return_value.__enter__.return_value = HoldMouse()
+            assert accept_birthday_invite() is True
+        return calls
+
+    notice = {WUWA_CLIENT_BIRTHDAY_NOTICE_TEMPLATE: (1310, 306)}
+    unselected = {**notice, WUWA_CLIENT_BIRTHDAY_INVITE_TEMPLATE: (1827, 1135)}
+    selected = {**notice, WUWA_CLIENT_BIRTHDAY_SELECTED_TEMPLATE: (1764, 1135)}
+
+    assert run([unselected, selected]) == [
+        (1233, 613, 0.08),
+        (1764, 1135, BIRTHDAY_INVITE_HOLD_SECONDS),
+    ]
+    assert run([selected]) == [(1764, 1135, BIRTHDAY_INVITE_HOLD_SECONDS)]
 
     with patch("wuwa_auto.client.launcher._game_window", return_value=game), patch(
         "wuwa_auto.client.launcher.pyautogui.size", return_value=(2560, 1440)
