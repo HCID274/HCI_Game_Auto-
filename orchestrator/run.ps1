@@ -181,12 +181,9 @@ try {
                     $starRailCleanupCode = Invoke-AppCommand -AppName StarRail -CommandName Cleanup -Label 'Star Rail cleanup verification'
                 }
 
-                if ($starRailCleanupCode -eq 0) {
-                    $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Daily -Label 'Wuthering Waves daily'
-                }
-                else {
-                    Write-OrchestratorLog 'Wuthering Waves skipped because the desktop handoff was unsafe'
-                }
+                # 2026-11-06 user: Wuthering Waves is uninstalled; never run it again.
+                Write-OrchestratorLog 'Wuthering Waves retired; daily chain runs Star Rail only'
+                $wuwaCode = 0
             }
             'farm-echo' {
                 $starRailCode = 0
@@ -243,17 +240,8 @@ try {
                 if ($starRailCleanupCode -ne 0) {
                     Invoke-AppCommand -AppName StarRail -CommandName UuStop -Label 'Star Rail UU fallback stop' | Out-Null
                 }
-                if ($starRailCode -eq 0 -and $starRailCleanupCode -eq 0) {
-                    $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName UuStart -Label 'Wuthering Waves UU real adapter'
-                    if ($wuwaCode -eq 0) {
-                        $wuwaCode = Invoke-AppCommand -AppName Wuwa -CommandName Smoke -Label 'Wuthering Waves core substitute'
-                    }
-                    $wuwaCleanupCode = Invoke-AppCommand -AppName Wuwa -CommandName Cleanup -Label 'Wuthering Waves real cleanup'
-                }
-                else {
-                    Write-OrchestratorLog 'Wuthering Waves smoke skipped because Star Rail handoff failed'
-                    $wuwaCode = 30
-                }
+                Write-OrchestratorLog 'Wuthering Waves retired; smoke skipped'
+                $wuwaCode = 0
             }
         }
 

@@ -57,11 +57,11 @@
 正式每日任务为 `Game_Daily_0530`，每天 05:30 启动，计划任务执行上限 3 小时。链路是：
 
 1. 星铁 daily。
-2. 星铁 cleanup。
-3. 鸣潮 daily。
-4. 鸣潮 cleanup 与最终汇报。
+2. 星铁 cleanup 与最终汇报。
 
-星铁业务失败本身不阻断鸣潮，但星铁 cleanup 失败会阻断桌面交接。总控等待自己直接启动的 CLI 进程，取真实退出码，不通过轮询后代进程猜测完成。无论成功或异常，`finally` 都要在 `runtime/orchestrator/<run_id>/result.json` 落盘并释放互斥锁。
+2026-11-06 用户已卸载鸣潮，要求以后不再运行：日常链和 `integration-smoke` 不再调用鸣潮（`wuwa_exit_code` 固定记 0），版本日晚间补跑任务 `HCID274_GameAutomation_WuwaVersionDayEvening` 列入 `RemovedTasks`。`apps/wuwa` 代码保留不动，手动 `-Mode wuwa-*` 入口仍在，但游戏已卸载，不要再跑。
+
+总控等待自己直接启动的 CLI 进程，取真实退出码，不通过轮询后代进程猜测完成。无论成功或异常，`finally` 都要在 `runtime/orchestrator/<run_id>/result.json` 落盘并释放互斥锁。
 
 全局互斥锁是 `Global\HCID274_GameAutomation`。周日鸣潮花园计划任务 `Game_Wuwa_WeeklyGarden_Sunday` 已于 2026-10-25 按用户要求停用（只保留日常）：它列入 `RemovedTasks`，日常链开跑时自动删除，`register_tasks.ps1` 不再注册。需要时手动 `run.ps1 -Mode weekly-garden`，锁等待 210 分钟仍取 `Tasks.WeeklyGarden`。
 

@@ -37,7 +37,7 @@
             # 2026-08-20: a version-day Wuwa download may legally run for
             # hours inside the chain; normal days still finish in ~2h.
             ExecutionLimitHours = 6
-            Description = '05:30 Star Rail -> safe cleanup -> Wuthering Waves daily chain'
+            Description = '05:30 Star Rail daily -> safe cleanup (Wuthering Waves retired 2026-11-06)'
         }
         WeeklyGarden = @{
             Name = 'Game_Wuwa_WeeklyGarden_Sunday'
@@ -55,5 +55,7 @@
         # 2026-10-25 user: stop the Sunday Wuwa weekly task, keep only dailies.
         # Tasks.WeeklyGarden stays for a manual `-Mode weekly-garden` run.
         'Game_Wuwa_WeeklyGarden_Sunday'
+        # 2026-11-06 user: Wuthering Waves uninstalled; never run it again.
+        'HCID274_GameAutomation_WuwaVersionDayEvening'
     )
 }
