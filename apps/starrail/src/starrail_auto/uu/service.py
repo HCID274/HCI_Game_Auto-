@@ -1,5 +1,6 @@
 """UU startup, reuse, retry, and shutdown orchestration."""
 
+import itertools
 import logging
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from starrail_auto.uu.config import (
     REUSE_CONFIRM_TIMEOUT,
     STEP_1_INITIAL_DELAY,
     STEP_1_TIMEOUT,
+    STEP_2_HOVER_INTERVAL,
+    STEP_2_HOVER_NUDGES,
     STEP_2_TIMEOUT,
     STOP_ACCELERATION_TIMEOUT,
     TPL_STEP_1,
@@ -74,6 +77,30 @@ def _confirm_starrail_active(timeout: float) -> bool:
     identity = try_locate_image(TPL_STEP_1, timeout=timeout)
     stop = try_locate_image(TPL_STEP_3, timeout=timeout)
     return identity is not None and stop is not None
+
+
+def _hover_until_accelerate_button(card: tuple[int, int]) -> tuple[int, int]:
+    """停在星铁卡片上，直到 UU 浮出“立即加速”。
+
+    1102、1104、1108 早上：鼠标只移上去一次，UU 没浮出按钮，干等 5 秒就判失败，
+    重开 UU 也一样。等待期间每隔一会儿在卡片上换个点重新停一下，给 UU 新的鼠标移动。
+    """
+    deadline = time.monotonic() + STEP_2_TIMEOUT
+    nudges = itertools.cycle(STEP_2_HOVER_NUDGES)
+    while True:
+        target = try_locate_image(TPL_STEP_2, timeout=STEP_2_HOVER_INTERVAL)
+        if target is not None:
+            log.info("matched %s at %s", TPL_STEP_2.name, target)
+            return target
+        if time.monotonic() >= deadline:
+            raise startup_error(
+                "locate_startup_click_target",
+                f"cannot locate {TPL_STEP_2.name} within {STEP_2_TIMEOUT:.1f}s "
+                "while re-hovering the Star Rail card",
+            )
+        dx, dy = next(nudges)
+        log.info("accelerate button not shown yet; re-hovering the card")
+        move_mouse_to((card[0] + dx, card[1] + dy))
 
 
 def _recover_mandatory_update(context: str) -> bool:
@@ -156,11 +183,7 @@ def _run_startup_attempt(attempt_no: int, *, update_used: bool = False) -> None:
     time.sleep(POST_MOVE_DELAY)
     dismiss_known_popups("before second startup step")
 
-    second = wait_for_image(
-        TPL_STEP_2,
-        step_name="locate_startup_click_target",
-        timeout=STEP_2_TIMEOUT,
-    )
+    second = _hover_until_accelerate_button(first)
     # 点击前留图：此刻星铁卡片正处于悬停样式，可直接裁成 uu_01__hover.png 变体模板。
     click_after_evidence(second, "start_acceleration")
     time.sleep(POST_CLICK_WAIT)

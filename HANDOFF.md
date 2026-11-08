@@ -400,6 +400,12 @@ uv run --project apps/wuwa wuwa-auto elevate daily-resume
     已加 `accept_birthday_invite()`(`client/launcher.py`):认出 `client_birthday_invite_notice.png` 和
     `client_birthday_invite_action.png` 后点第一位共鸣者、再点“邀约”,之后交回 OK-WW;`confirmed_retry` 与
     `runner` 的轮询里每轮最多处理两次。点完之后的画面未经实机验证,1026 早上伴随监控确认。
+  - **1102、1104、1108 晨星铁 UU 卡在“立即加速”**:鼠标移到星铁卡片一次,UU 没浮出“立即加速”,
+    原代码干等 5 秒判失败,重开 UU 4 次都一样(1104、1108 整轮红,1102 第 2 次过)。坏的那几次共同特征:
+    鼠标停在屏幕右边时卡片已是悬停样子(只有整卡模板 `uu_01__hover.png` 认得出),再移上去一次不刷新。
+    与卡片顺序、内存、关屏(插电“从不关屏”)、重启都无关。已改为 `_hover_until_accelerate_button()`:
+    等按钮期间每 1.5 秒在卡片内换个点重新悬停,总共等 15 秒。1108 10:21 联调冒烟真机复现同一状态,
+    重新悬停后 0.5 秒按钮出现,全程退出码 0。1108 当天已于 10:08 补跑星铁成功。
 
 ## 9. 验证、发布与排障手册
 

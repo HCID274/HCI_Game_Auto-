@@ -8,6 +8,7 @@ from starrail_auto.uu.desktop import keep_uu_in_background_on_exit
 from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
 from starrail_auto.uu.service import (
     _confirm_starrail_active,
+    _hover_until_accelerate_button,
     _run_startup_attempt,
     ensure_uu_connected,
 )
@@ -107,6 +108,36 @@ class UuIdentityTests(unittest.TestCase):
                 _run_startup_attempt(1)
 
         self.assertEqual(order, ["park", "locate"])
+
+
+class UuAccelerateHoverTests(unittest.TestCase):
+    # 1102/1104/1108：鼠标只移上去一次，UU 没浮出“立即加速”，干等后整轮失败。
+    def test_re_hovers_the_card_until_the_accelerate_button_shows(self) -> None:
+        with patch(
+            "starrail_auto.uu.service.try_locate_image",
+            side_effect=[None, None, (840, 734)],
+        ), patch("starrail_auto.uu.service.move_mouse_to") as move:
+            target = _hover_until_accelerate_button((844, 702))
+
+        self.assertEqual(target, (840, 734))
+        self.assertEqual(
+            [c.args[0] for c in move.call_args_list], [(844, 642), (874, 582)]
+        )
+
+    def test_gives_up_after_the_step_timeout(self) -> None:
+        clock = iter([0.0, 6.0, 12.0, 16.0])
+        with patch(
+            "starrail_auto.uu.service.try_locate_image", return_value=None
+        ), patch("starrail_auto.uu.service.move_mouse_to") as move, patch(
+            "starrail_auto.uu.service.time.monotonic", side_effect=lambda: next(clock)
+        ), patch(
+            "starrail_auto.uu.service.startup_error",
+            side_effect=lambda step, reason: UuStartupError(step, reason),
+        ):
+            with self.assertRaises(UuStartupError):
+                _hover_until_accelerate_button((844, 702))
+
+        self.assertEqual(move.call_count, 2)
 
 
 class UuSupervisorTests(unittest.TestCase):
