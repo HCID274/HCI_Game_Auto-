@@ -34,6 +34,7 @@ from starrail_auto.m7a.logs import (
     wait_for_daily_completion,
 )
 from starrail_auto.m7a.models import M7ALogCheckpoint, RunResult
+from starrail_auto.m7a.resolution_guard import hold_automation_resolution
 from starrail_auto.m7a.tutorial_recovery import GluttonyTutorialRecovery
 from starrail_auto.m7a.watchdog import find_new_assistant, hard_timeout_for_task, watch
 
@@ -86,6 +87,11 @@ def _startup_ready(
 
 
 def run_m7a(task: str, timeout: int, *, uu_retries: int = 0) -> RunResult:
+    with hold_automation_resolution():
+        return _run_m7a(task, timeout, uu_retries)
+
+
+def _run_m7a(task: str, timeout: int, uu_retries: int) -> RunResult:
     hard_timeout = hard_timeout_for_task(task, timeout)
     checkpoint = capture_log_checkpoint()
     try:
