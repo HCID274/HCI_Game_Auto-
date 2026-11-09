@@ -142,4 +142,8 @@ def launcher_update_maintenance(checkpoint: M7ALogCheckpoint) -> bool:
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if recover_launcher_download_failure() else 1)
+    from starrail_auto.windows.topmost_guard import keep_game_windows_uncovered
+
+    with keep_game_windows_uncovered():
+        recovered = recover_launcher_download_failure()
+    raise SystemExit(0 if recovered else 1)

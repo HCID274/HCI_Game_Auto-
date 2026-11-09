@@ -7,3 +7,12 @@ def _no_real_memory_preflight(monkeypatch) -> None:
     monkeypatch.setattr(
         "starrail_auto.workflows.daily.free_memory_for_games", lambda: []
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_topmost_guard(monkeypatch) -> None:
+    # 置顶窗口看守会真的把别的程序的置顶窗口压下去；测试里只空转，不碰真窗口。
+    monkeypatch.setattr(
+        "game_automation_core.windows.topmost_guard.TopmostCoverGuard.sweep",
+        lambda self: None,
+    )

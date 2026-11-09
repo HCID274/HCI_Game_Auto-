@@ -11,6 +11,7 @@ from starrail_auto.reporting.service import send_short_report
 from starrail_auto.settings import LOGS_DIR
 from starrail_auto.uu.processes import kill_uu
 from starrail_auto.uu.service import stop_uu_acceleration
+from starrail_auto.windows.topmost_guard import keep_game_windows_uncovered
 
 GAME_PROCESS_NAMES = {"starrail.exe"}
 M7A_PROCESS_NAMES = {"march7th launcher.exe", "march7th assistant.exe"}
@@ -124,7 +125,8 @@ def run(delay: int = 0) -> int:
 def execute_cleanup(delay: int = 0, log_file: Path | None = None) -> int:
     """Configure logging, execute cleanup, and send failure-only notification."""
     _setup_logging(log_file)
-    exit_code = run(delay=delay)
+    with keep_game_windows_uncovered():
+        exit_code = run(delay=delay)
     if exit_code == EXIT_PROCESS_CLOSE_FAILED:
         send_short_report(game="星铁收尾", problems=["游戏或三月七助手没能关闭"])
     elif exit_code == EXIT_UU_DISCONNECT_FAILED:

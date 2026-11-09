@@ -57,6 +57,7 @@ from starrail_auto.windows.desktop_guard import (
     describe_window,
     require_desktop_ready,
 )
+from starrail_auto.windows.topmost_guard import keep_game_windows_uncovered
 
 log = logging.getLogger(__name__)
 
@@ -247,14 +248,15 @@ def execute_action(action: str = "start", log_file: Path | None = None) -> int:
         handlers=handlers,
     )
     try:
-        if action == "disconnect":
-            stop_uu_acceleration()
-        elif action == "minimize":
-            minimize_uu_window()
-        elif action == "stop":
-            kill_uu()
-        else:
-            ensure_uu_connected()
+        with keep_game_windows_uncovered():
+            if action == "disconnect":
+                stop_uu_acceleration()
+            elif action == "minimize":
+                minimize_uu_window()
+            elif action == "stop":
+                kill_uu()
+            else:
+                ensure_uu_connected()
     except RuntimeError as exc:
         log.error("%s", exc)
         return 1

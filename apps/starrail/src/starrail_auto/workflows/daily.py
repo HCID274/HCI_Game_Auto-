@@ -21,6 +21,7 @@ from starrail_auto.reporting.service import report_main_run, send_short_report
 from starrail_auto.settings import LOGS_DIR
 from starrail_auto.uu.errors import UuStartupError, UuStartupFinalError
 from starrail_auto.uu.service import ensure_uu_connected
+from starrail_auto.windows.topmost_guard import keep_game_windows_uncovered
 
 log = logging.getLogger(__name__)
 DAILY_RESET_HOUR = 5
@@ -68,6 +69,11 @@ def _run(task: str, timeout: int) -> RunResult:
 
 def execute_task(task: str, timeout: int | None = None) -> int:
     _setup_logging()
+    with keep_game_windows_uncovered():
+        return _execute_task(task, timeout)
+
+
+def _execute_task(task: str, timeout: int | None) -> int:
     host_notes = free_memory_for_games()
     started = time.monotonic()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
