@@ -139,7 +139,8 @@ def _problems(run: RunReport) -> list[str]:
             problems.append(f"汇报时三月七助手还在运行：{run.current_task}")
         elif run.overall_status == "stalled":
             problems.append(f"疑似卡在「{run.current_task}」：{run.current_reason}")
-        else:
+        elif run.overall_status != "completed":
+            # M7A v2026.11.19 跑完不再打“停止运行”，已完成的运行不算停在半路。
             problems.append(f"停在「{run.current_task}」")
     if run.errors:
         shown = "；".join(run.errors[:MAX_ERRORS])
@@ -163,6 +164,8 @@ def build_report(
     stamina = [_stamina_line(item, failed=failed) for item in run.stamina_runs]
     if run.rewards:
         tasks.append(f"{DONE} 领取奖励：{'、'.join(run.rewards)}")
+    if run.unclaimed_rewards:
+        tasks.append(f"{WARN} {'、'.join(run.unclaimed_rewards)}没领到")
     for text in run.other_tasks:
         (stamina if "未执行：" in text else tasks).append(_other_line(text))
     tasks.extend(

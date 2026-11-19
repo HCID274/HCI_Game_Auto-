@@ -454,7 +454,14 @@ class TestParser:
         )
         card = _report(report)
 
-        assert card.tasks[:2] == ["✅ 每日实训 500/500", "✅ 领取奖励：委托、每日实训"]
+        assert card.tasks == [
+            "✅ 每日实训 500/500",
+            "✅ 领取奖励：委托、每日实训",
+            "⚠️ 邮件没领到",
+        ]
+        # 跑完了只是邮件没领到：部分完成，不写“停在「领取奖励」”。
+        assert card.status == "partial"
+        assert card.problems == ["三月七助手报错：邮件失败：未确认邮箱的全部领取按钮状态"]
         assert _stamina(card) == [
             "✅ 侵蚀隧洞·密伶之径：6 次，计划还剩 25 次",
             "⏸️ 侵蚀隧洞·睿治之径：开拓力不足，保留该计划",

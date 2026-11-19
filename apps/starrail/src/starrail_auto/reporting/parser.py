@@ -33,6 +33,8 @@ PLAN_KEPT_PATTERN = re.compile(r"^资源不足，保留当前计划的 (?P<count
 PLANS_DONE_MARKER = "体力计划已完成"
 TARGET_INSTANCE_PATTERN = re.compile(r"^使用培养目标副本：(?P<type>.+?) · (?P<name>.+)$")
 CLAIMED_REWARD_PATTERN = re.compile(r"^已领取(?P<reward>.+?)奖励$")
+# 领奖各步骤出错时 M7A 打“邮件失败：原因”（tasks/base/task_steps.py 的 run_steps）。
+REWARD_FAILED_PATTERN = re.compile(r"^(?P<reward>委托|邮件|支援礼盒|无名勋礼|短信|成就)(?:失败：.*|未完成)$")
 # 体力计划各行的冒号全角、半角都认：M7A v2026.9.30 起把“计划次数”“剩余次数”后的
 # 冒号改成了全角，旧规则从 10-04 起漏掉了所有刷副本记录。
 PLAN_PATTERN = re.compile(
@@ -353,6 +355,9 @@ def parse_m7a_run(
         if claimed_match and claimed_match.group("reward") != "实训档位":
             # 实训档位奖励由“每日实训已完成”记成“每日实训”。
             _append_unique(report.rewards, claimed_match.group("reward"))
+        reward_failed_match = REWARD_FAILED_PATTERN.match(message)
+        if reward_failed_match and level == "ERROR" and active_section == "领取奖励":
+            _append_unique(report.unclaimed_rewards, reward_failed_match.group("reward"))
         if message == "邮件奖励已领取":
             _append_unique(report.rewards, "邮件")
         if message == "模拟宇宙奖励已领取":

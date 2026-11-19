@@ -32,6 +32,7 @@ class RunReport:
     daily_unfinished: list[str] = field(default_factory=list)
     stamina_runs: list[StaminaRun] = field(default_factory=list)
     rewards: list[str] = field(default_factory=list)
+    unclaimed_rewards: list[str] = field(default_factory=list)  # 三月七助手报领取失败的奖励
     other_tasks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     current_task: str = ""
