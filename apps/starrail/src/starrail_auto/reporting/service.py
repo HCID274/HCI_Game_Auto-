@@ -12,7 +12,7 @@ from game_automation_core.reporting.redact import redact_sensitive_data
 from game_automation_core.reporting.report import GameReport
 
 from starrail_auto.integrations.feishu import send_card
-from starrail_auto.m7a.power_plan import load_power_plan_remaining
+from starrail_auto.m7a.power_plan import load_default_instance, load_power_plan_remaining
 from starrail_auto.reporting.models import RunReport
 from starrail_auto.reporting.parser import parse_m7a_run
 from starrail_auto.reporting.reminders import format_active_reminders
@@ -62,6 +62,7 @@ def build_main_report(
         run_stage=stage,
         force_failed=exit_code != 0,
         power_plan_remaining=load_power_plan_remaining(),
+        default_instance=load_default_instance(),
     )
     plan = reconcile_training_plan(
         run.stamina_runs,

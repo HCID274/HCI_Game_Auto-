@@ -19,7 +19,20 @@ DAILY_COMPLETED_PATTERN = re.compile(
     r"^完成任务: (?P<task>.+?) \(\+\d+分\)，当前分数: (?P<score>\d+/\d+)$"
 )
 DAILY_BLOCKED_PATTERN = re.compile(r"^任务无法完成: (?P<task>.+)$")
-DAILY_SCORE_PATTERN = re.compile(r"当前(?:累计)?分数[：:]\s*(?P<score>\d+\s*/\s*\d+)")
+DAILY_SCORE_PATTERN = re.compile(
+    r"(?:当前(?:累计)?分数[：:]|^每日实训活跃度)\s*(?P<score>\d+\s*/\s*\d+)"
+)
+# M7A v2026.11.19 起体力计划换了写法：每项一行开头，每批一行“已结算 N 次”，
+# 资源不足时一行说当前计划还剩几次；下一项开头即上一项已打满。
+PLAN_START_PATTERN = re.compile(
+    r"^体力计划 \[\d+/\d+\] (?P<type>.+?) · (?P<name>.+?)，剩余 (?P<count>\d+) 次$"
+)
+SETTLED_PATTERN = re.compile(r"^已结算 (?P<count>\d+) 次$")
+SHORTAGE_PATTERN = re.compile(r"^(?P<shortage>.+?不足)，结束本副本项$")
+PLAN_KEPT_PATTERN = re.compile(r"^资源不足，保留当前计划的 (?P<count>\d+) 次及后续计划$")
+PLANS_DONE_MARKER = "体力计划已完成"
+TARGET_INSTANCE_PATTERN = re.compile(r"^使用培养目标副本：(?P<type>.+?) · (?P<name>.+)$")
+CLAIMED_REWARD_PATTERN = re.compile(r"^已领取(?P<reward>.+?)奖励$")
 # 体力计划各行的冒号全角、半角都认：M7A v2026.9.30 起把“计划次数”“剩余次数”后的
 # 冒号改成了全角，旧规则从 10-04 起漏掉了所有刷副本记录。
 PLAN_PATTERN = re.compile(
@@ -189,6 +202,23 @@ def _latest_run(report: RunReport, name: str) -> StaminaRun | None:
     return next((item for item in reversed(report.stamina_runs) if item.name == name), None)
 
 
+def _finish_plan(run: StaminaRun | None) -> None:
+    """新写法里一项计划打满就结束，不再单独报“计划已完成”。"""
+    if run is not None and run.status == "started":
+        run.status = "completed"
+        run.remaining_plan_count = 0
+
+
+def _next_plan(name: str, power_plan_remaining: dict[str, int]) -> str:
+    """运行后的体力计划里排在 ``name`` 后面的那一项；M7A 新写法不再逐项报保留的计划。"""
+    names = list(power_plan_remaining)
+    target = _normalized_task_name(name)
+    for index, candidate in enumerate(names[:-1]):
+        if _normalized_task_name(candidate) == target:
+            return names[index + 1]
+    return ""
+
+
 def parse_m7a_run(
     content: str,
     *,
@@ -197,8 +227,12 @@ def parse_m7a_run(
     run_stage: str = "",
     force_failed: bool = False,
     power_plan_remaining: dict[str, int] | None = None,
+    default_instance: str = "",
 ) -> RunReport:
-    """Parse only the content after the run's recorded byte checkpoint."""
+    """Parse only the content after the run's recorded byte checkpoint.
+
+    ``default_instance`` 是计划打完后清体力用的副本（“类型 - 名称”），新写法的日志里不写名字。
+    """
     power_plan_remaining = power_plan_remaining or {}
     report = RunReport(run_stage=run_stage)
     events: list[tuple[datetime, str, str]] = []
@@ -214,6 +248,7 @@ def parse_m7a_run(
     detected_training_target = ""
     detected_training_dungeons: list[str] = []
     last_plan_constraint = ""
+    last_shortage = ""
     last_screen = ""
     redemption_total = 0
     redemption_failed = 0
@@ -314,6 +349,10 @@ def parse_m7a_run(
         reward_match = DIRECT_REWARD_PATTERN.match(message)
         if reward_match:
             _append_unique(report.rewards, reward_match.group("reward"))
+        claimed_match = CLAIMED_REWARD_PATTERN.match(message)
+        if claimed_match and claimed_match.group("reward") != "实训档位":
+            # 实训档位奖励由“每日实训已完成”记成“每日实训”。
+            _append_unique(report.rewards, claimed_match.group("reward"))
         if message == "邮件奖励已领取":
             _append_unique(report.rewards, "邮件")
         if message == "模拟宇宙奖励已领取":
@@ -441,6 +480,67 @@ def parse_m7a_run(
                 )
             )
             active_section = f"体力计划：{active_plan.name}"
+
+        new_plan_match = PLAN_START_PATTERN.match(message)
+        if new_plan_match:
+            _finish_plan(active_plan)
+            last_shortage = ""
+            active_plan = start_stamina_run(
+                StaminaRun(
+                    name=f"{new_plan_match.group('type')} - {new_plan_match.group('name')}",
+                    planned_count=int(new_plan_match.group("count")),
+                )
+            )
+            active_section = f"体力计划：{active_plan.name}"
+
+        target_instance_match = TARGET_INSTANCE_PATTERN.match(message)
+        if target_instance_match:
+            default_instance = (
+                f"{target_instance_match.group('type')} - {target_instance_match.group('name')}"
+            )
+
+        shortage_match = SHORTAGE_PATTERN.match(message)
+        if shortage_match:
+            last_shortage = shortage_match.group("shortage")
+
+        settled_match = SETTLED_PATTERN.match(message)
+        if settled_match:
+            settled = int(settled_match.group("count"))
+            if active_plan is not None and _in_power_plan_section(active_section):
+                active_plan.completed_instances += settled
+                if (
+                    active_plan.planned_count is not None
+                    and active_plan.completed_instances >= active_plan.planned_count
+                ):
+                    _finish_plan(active_plan)
+            elif active_section == "清体力":
+                if active_default_stamina is None:
+                    active_default_stamina = start_stamina_run(
+                        StaminaRun(
+                            name=default_instance or "默认副本",
+                            source="default",
+                            status="completed",
+                        )
+                    )
+                active_default_stamina.completed_instances += settled
+
+        if message == PLANS_DONE_MARKER:
+            _finish_plan(active_plan)
+            active_plan = None
+            active_section = "清体力"
+
+        kept_match = PLAN_KEPT_PATTERN.match(message)
+        if kept_match and active_plan is not None:
+            kept_reason = f"{last_shortage or '资源不足'}，保留该计划"
+            active_plan.remaining_plan_count = int(kept_match.group("count"))
+            if active_plan.completed_instances:
+                active_plan.status = "completed"
+            else:
+                active_plan.status = "skipped"
+                active_plan.reason = kept_reason
+            next_name = _next_plan(active_plan.name, power_plan_remaining)
+            if next_name:
+                start_stamina_run(StaminaRun(name=next_name, status="skipped", reason=kept_reason))
 
         completed_instance_match = INSTANCE_COMPLETED_PATTERN.match(message)
         if (

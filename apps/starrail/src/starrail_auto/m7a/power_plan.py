@@ -12,16 +12,32 @@ from starrail_auto.m7a.config import M7A_CONFIG_PATH
 log = logging.getLogger(__name__)
 
 
-def load_power_plan_remaining(
-    path: Path = M7A_CONFIG_PATH,
-) -> dict[str, int]:
-    """Return exact dungeon names and their current remaining plan counts."""
+def _load_config(path: Path) -> dict:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         log.warning("M7A power plan cannot be loaded from %s: %s", path, exc)
         return {}
-    if not isinstance(data, dict) or not isinstance(data.get("power_plan"), list):
+    return data if isinstance(data, dict) else {}
+
+
+def load_default_instance(path: Path = M7A_CONFIG_PATH) -> str:
+    """计划打完后清体力用的副本，写成“类型 - 名称”；没配置时返回空串。"""
+    data = _load_config(path)
+    instance_type = data.get("instance_type")
+    names = data.get("instance_names")
+    name = names.get(instance_type) if isinstance(names, dict) else None
+    if not isinstance(instance_type, str) or not isinstance(name, str) or name == "无":
+        return ""
+    return f"{instance_type.strip()} - {name.strip()}"
+
+
+def load_power_plan_remaining(
+    path: Path = M7A_CONFIG_PATH,
+) -> dict[str, int]:
+    """Return exact dungeon names and their current remaining plan counts."""
+    data = _load_config(path)
+    if not isinstance(data.get("power_plan"), list):
         return {}
 
     remaining: dict[str, int] = {}
