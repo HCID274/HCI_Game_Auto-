@@ -9,7 +9,7 @@ from starrail_auto.reporting.training_plan import load_training_plan, set_goal_s
 from starrail_auto.uu.service import execute_action
 from starrail_auto.windows.elevation import relaunch_cli_elevated
 from starrail_auto.workflows.cleanup import execute_cleanup
-from starrail_auto.workflows.daily import run_daily, run_universe
+from starrail_auto.workflows.daily import run_daily, run_m7a_update, run_universe
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,6 +18,9 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("smoke", help="validate integration without starting M7A")
+    commands.add_parser(
+        "m7a-update", help="install the official M7A update now (same step as before daily)"
+    )
 
     daily = commands.add_parser("daily", help="run the complete daily workflow")
     daily.add_argument("--timeout", type=int)
@@ -78,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_smoke()
     if args.command == "universe":
         return run_universe(args.timeout)
+    if args.command == "m7a-update":
+        return run_m7a_update()
     if args.command == "cleanup":
         return execute_cleanup(args.delay, args.log_file)
     if args.command == "uu":

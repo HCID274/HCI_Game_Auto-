@@ -6,6 +6,7 @@ from datetime import datetime
 
 from game_automation_core.windows.memory_guard import free_memory_for_games
 
+from starrail_auto.m7a.app_update import update_m7a
 from starrail_auto.m7a.config import (
     DEFAULT_TIMEOUTS,
     EXIT_DAILY_VALIDATION_FAILED,
@@ -74,7 +75,7 @@ def execute_task(task: str, timeout: int | None = None) -> int:
 
 
 def _execute_task(task: str, timeout: int | None) -> int:
-    host_notes = free_memory_for_games()
+    host_notes = [*free_memory_for_games(), *update_m7a()]
     started = time.monotonic()
     result = _run(task, timeout or DEFAULT_TIMEOUTS.get(task, 1800))
     duration = round(time.monotonic() - started)
@@ -131,3 +132,11 @@ def run_daily(timeout: int | None = None) -> int:
 
 def run_universe(timeout: int | None = None) -> int:
     return execute_task("universe", timeout)
+
+
+def run_m7a_update() -> int:
+    """单独更新三月七助手（和开跑前那一步相同），结果写进运行日志。"""
+    _setup_logging()
+    for note in update_m7a():
+        log.info("M7A update note: %s", note)
+    return 0

@@ -63,7 +63,7 @@ def test_unsafe_startup_mutation_stops_only_new_m7a_processes() -> None:
     ), patch(
         "starrail_auto.m7a.runner.capture_failure_evidence"
     ), patch(
-        "starrail_auto.m7a.runner._stop_new_m7a_processes"
+        "starrail_auto.m7a.runner.stop_new_m7a_processes"
     ) as stop:
         result = run_m7a("main", 1800)
 

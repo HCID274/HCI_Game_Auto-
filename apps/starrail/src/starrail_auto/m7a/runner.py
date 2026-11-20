@@ -41,7 +41,7 @@ from starrail_auto.m7a.watchdog import find_new_assistant, hard_timeout_for_task
 log = logging.getLogger(__name__)
 
 
-def _stop_new_m7a_processes(started_at: float) -> None:
+def stop_new_m7a_processes(started_at: float) -> None:
     names = {M7A_ASSISTANT_PROCESS_NAME, M7A_LAUNCHER_PROCESS_NAME}
     targets: list[psutil.Process] = []
     for proc in psutil.process_iter(["name", "create_time"]):
@@ -125,7 +125,7 @@ def _run_m7a(task: str, timeout: int, uu_retries: int) -> RunResult:
     except M7AConfigProtectionError as exc:
         log.error("M7A stopped after unsafe config mutation: %s", exc)
         capture_failure_evidence("m7a_config_unsafe_change", checkpoint)
-        _stop_new_m7a_processes(launch_started_at)
+        stop_new_m7a_processes(launch_started_at)
         return _config_failure_result(checkpoint, retries=uu_retries)
     if not game_ready:
         reason = disclaimer.failure_reason or "game_window_timeout"
@@ -175,7 +175,7 @@ def _run_m7a(task: str, timeout: int, uu_retries: int) -> RunResult:
     except M7AConfigProtectionError as exc:
         log.error("M7A result rejected by config protection: %s", exc)
         capture_failure_evidence("m7a_config_finalize_failed", checkpoint)
-        _stop_new_m7a_processes(launch_started_at)
+        stop_new_m7a_processes(launch_started_at)
         return _config_failure_result(checkpoint, retries=uu_retries)
 
     return RunResult(

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('auto', 'daily-chain', 'starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
+    [ValidateSet('auto', 'daily-chain', 'starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'starrail-m7a-update', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'validate', 'integration-smoke')]
     [string]$Mode = 'auto',
     [switch]$DryRun
 )
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 if ($Mode -eq 'auto' -and (Test-Path -LiteralPath $modeRequestPath)) {
     $requestedMode = (Get-Content -LiteralPath $modeRequestPath -Raw).Trim()
-    if ($requestedMode -notin @('starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'integration-smoke')) {
+    if ($requestedMode -notin @('starrail-daily', 'starrail-cleanup', 'starrail-update-recovery', 'starrail-m7a-update', 'wuwa-daily', 'wuwa-daily-only', 'farm-echo', 'weekly-garden', 'wuwa-cleanup', 'integration-smoke')) {
         throw "unsupported one-shot mode: $requestedMode"
     }
     $runMode = $requestedMode
@@ -202,6 +202,11 @@ try {
             }
             'starrail-update-recovery' {
                 $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName UpdateRecovery -Label 'Star Rail launcher update recovery'
+                $starRailCleanupCode = 0
+                $wuwaCode = 0
+            }
+            'starrail-m7a-update' {
+                $starRailCode = Invoke-AppCommand -AppName StarRail -CommandName M7AUpdate -Label 'Star Rail M7A update only'
                 $starRailCleanupCode = 0
                 $wuwaCode = 0
             }

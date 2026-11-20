@@ -10,6 +10,12 @@ def _no_real_memory_preflight(monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_m7a_update(monkeypatch) -> None:
+    # 开跑前的更新会真的启动三月七助手的更新程序；测试里一律当作已是最新版本。
+    monkeypatch.setattr("starrail_auto.workflows.daily.update_m7a", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_real_game_resolution(monkeypatch) -> None:
     # 分辨率看守会真的改星铁注册表；测试里当作没装游戏，什么都不写。
     monkeypatch.setattr(
