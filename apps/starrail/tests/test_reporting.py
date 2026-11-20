@@ -467,6 +467,24 @@ class TestParser:
             "⏸️ 侵蚀隧洞·睿治之径：开拓力不足，保留该计划",
         ]
 
+    def test_m7a_2026_11_20_reward_warning_still_reports_unclaimed_mail(self) -> None:
+        # v2026.11.20 起领奖出错改打 WARNING“X奖励待核对：原因”，不再打“日常领奖未完成”。
+        content = """\
+|                                                   开始领取奖励                                                    |
+2026-11-21 05:36:49,175 | INFO | 已领取委托奖励
+2026-11-21 05:36:59,046 | WARNING | 邮件奖励待核对：未确认邮箱可领附件状态
+2026-11-21 05:37:00,000 | WARNING | 已确认奖励到账，通知截图待核对：timeout
+2026-11-21 05:37:42,246 | INFO | 每日实训活跃度 500/500
+2026-11-21 05:37:44,661 | INFO | 每日实训已完成
+"""
+        card = _report(parse_m7a_run(content, now=datetime(2026, 11, 21, 5, 38)))
+
+        assert card.tasks == [
+            "✅ 每日实训 500/500",
+            "✅ 领取奖励：委托、每日实训",
+            "⚠️ 邮件没领到",
+        ]
+
     def test_m7a_2026_11_19_finished_plans_then_default_stamina(self) -> None:
         content = """\
 |                                                    开始清体力                                                     |
